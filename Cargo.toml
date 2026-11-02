@@ -1,0 +1,13 @@
+[package]
+name = "kdiff4"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
+egui_extras = "0.37.0"
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+insta = "1.49.0"
+proptest = "1.12.0"
