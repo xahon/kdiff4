@@ -42,6 +42,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | Config | `serde`, `toml`, `dirs` | core, gui |
 | GUI | `egui`, `eframe`, `egui_extras` | gui |
 | File dialogs | `rfd` | gui |
+| Font discovery and monospace detection | `fontique`, `skrifa` | gui |
 | CLI | `clap` | bin |
 | Snapshot tests | `insta` | dev |
 | Property tests | `proptest` | dev |
@@ -138,6 +139,12 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Pane**: the view of one document.
 - **Merge pane**: the pane showing D. A custom editor widget.
 - **Overview strip**: the 4-line lens row between the source panes and the merge pane.
+- **Caret**: the one text cursor on screen, with its selection. It lives in one pane at a time; pressing the mouse button in another pane moves it there.
+- **Splitter**: the draggable border between the source panes and the merge pane.
+- **Open dialog**: the window where A, B, C and D are chosen before a session opens.
+- **Settings dialog**: the window where GUI config is edited, with a live preview.
+- **Theme**: light or dark appearance of the GUI.
+- **Palette**: the colors one theme draws with: window and pane backgrounds, pane border, pane header, text.
 
 ## Core data model (`kdiff4-core`)
 
@@ -255,6 +262,9 @@ All communication between the engine and anything else goes through this crate: 
 | host → client | Event | progress, snapshot, delta or notice |
 
 - Commands: open, reload, cancel, choose hunks for a region, choose a side for all unresolved regions, split a region, edit D, add or remove a manual alignment, undo, redo, save, set engine config. Every user action in any front end ends up as a command.
+- Implemented so far: open; reload one source document from a (possibly new) path, keeping D; edit D (replace a byte range, tagged with the revision it was made on; a stale revision or a range off character boundaries is rejected); set D's path without writing it (or clear it, making D unnamed); save; save as; undo and redo of D; resync (the host re-sends a snapshot). Deltas so far: a source document replaced, D edited (with whether D now differs from its saved text, which undo can bring back), D's path changed, D saved.
+- D's undo history is kept by the host. Typing on one line is one undo step, and so is a run of Backspace or of Delete; a line break, a paste, replacing a selection, a word deletion, save, undo and redo start a new step. Undoing back to the saved text clears the modified flag.
+- D's text crosses the protocol with `\n` line ends. It is saved as UTF-8 with the EOL style and BOM of A, the output reference.
 - Queries: reads the mirror does not hold: character-level diffs for a row range, navigation (next or previous difference, conflict or unresolved conflict from a row), config help text.
 - Progress events report long work (job, amount done, total); notices carry warnings such as a pending lossy re-encode.
 - The first exchange is a handshake with the protocol version; a mismatch is an error.
@@ -309,10 +319,10 @@ Sections with representative keys; the config definitions in code are the author
 
 ### GUI config (`gui.toml`)
 
-- `[view]`: font, tab size (`TabSize`), replace tabs (`ReplaceTabs`), show line numbers (`ShowLineNumbers`), show whitespace (`ShowWhiteSpace`, `ShowWhiteSpaceCharacters`), auto-advance after choosing (`AutoAdvance`, `AutoAdvanceDelay`), Escape quits (`EscapeKeyQuits`).
+- `[view]`: font family (`font_family`, monospace only; absent means the built-in font), font size (`font_size`, 6 to 48), font hinting (`font_hinting`), subpixel glyph positioning (`subpixel_positioning`), corner radius of widgets, dialogs, panes and the window frame (`corner_radius`, 0 to 12), tab size (`TabSize`), replace tabs (`ReplaceTabs`), show line numbers (`ShowLineNumbers`), show whitespace (`ShowWhiteSpace`, `ShowWhiteSpaceCharacters`), auto-advance after choosing (`AutoAdvance`, `AutoAdvanceDelay`), Escape quits (`EscapeKeyQuits`).
 - `[colors]`: foreground, background, removed, added, modified, conflict, manual alignment ranges, void regions.
 - `[window]`: size, position, maximized, full screen.
-- `[recent]`: recent A/B/C/output files and encodings.
+- `[recent]`: recent A/B/C/output files and encodings, directory of the last file confirmed in a file dialog (`last_dir`).
 
 ### Precedence
 
@@ -343,6 +353,10 @@ The binary routes each override by its section to the engine (in the open comman
 
 - Layout:
   - Two (2-way diff) panes side by side (A/B), Three (3-way merge) panes side by side (A/B/C) and a horizontal pane full width below for output merge result (D).
+  - A session is a merge when it has C or an output file. Merges show the merge pane below the source panes, behind a splitter. It starts at half the height and keeps its share when the window is resized.
+  - Each pane has a header with the document letter (with `*` while D has unsaved changes), its label, an editable path field and a Browse button. Enter in the field, or a file picked with Browse, reloads A, B or C from that path and keeps D's edits; for D it only changes where D will be saved.
+  - Panes show a caret and its selection; there is one on screen. Pressing the mouse button in any pane moves the caret there at once, and dragging selects (Shift+click extends). Clicking below the text goes to its end, and right of a line to the line's end. Double-click selects a word (or a run of whitespace, or one punctuation character), triple-click a line. The keys are arrows, Ctrl+Left/Right by words, Home/End, PageUp/PageDown and Ctrl+Home/End, with Shift to select, plus Ctrl+A and Ctrl+C. A, B and C are read-only. D is editable: typing, Enter (also with Ctrl held), Backspace, Delete, Ctrl+Backspace and Ctrl+Delete by words, Ctrl+V and Ctrl+X, which replace or remove a selection; Edit → Undo (Ctrl+Z) and Redo (Ctrl+Y, Ctrl+Shift+Z) work on D wherever the caret is. Each edit is applied to the mirror at once and sent to the engine.
+  - File → Save writes D to its path, or asks for one like Save As when D has none. Save As picks a new path with the native Save dialog, which asks before overwriting, and D moves there. Errors from saving or reloading show in a status line under the panes.
   - Overview strip: a 4-line lens row between (A/B/C) and (D), shows current lines from all A, B, C, and D. D is allowed to be edited in this widget, and it automatically reflected in the D text. Shows char-diffs within each A, B, and C lines, so the contents could be judged by user and edited as the user wants.
 - Void Region: a special graphical entity that spans the rows of a region where a document has no text, and it represents absence of text in the specified document. Graphically represented as hatched block of space with no text in it.
 - Scrolling of the three panes is synchronized through row indices, not pixels. Void Regions take rows like text does, so synced scrolling stays aligned.
@@ -350,6 +364,10 @@ The binary routes each override by its section to the engine (in the open comman
 - The GUI talks to the engine only through its protocol client and renders from the client mirror.
 - Long work (load, diff, align) runs in the host; the GUI shows its progress events, keeps repainting and can cancel.
 - Dialogs: open files, save-as, settings, find, go to line, "unsaved changes" confirm.
+- Open dialog: shown at start and from File → Open. Each document has a path field and a Browse button that opens a native file dialog; D gets a save dialog, since it may not exist yet. Every file dialog starts in `last_dir`, which is updated whenever a file is confirmed. Run needs A and B; C makes a 3-way merge, and D names the output file (a merge without D keeps D in memory until it is saved). If D is an existing file, Run asks before overwriting it. Until the merge engine exists, D starts with the existing output file's contents, or empty.
+- Corner radius: applied to widgets, menus, dialogs and panes. On Windows 11 the native window frame follows it too, through the DWM corner preference: 0 is square, 1 to 4 is small rounding, more is normal rounding.
+- Theme: light for now. Both themes have a palette and are styled at startup, so switching to dark later needs no other change. Panes are bordered boxes with a header strip; their text uses the palette's text color, which has at least 7:1 contrast with the pane background.
+- Settings dialog: Settings → Configure Kdiff4... (Ctrl+,). It edits the `[view]` font keys and the corner radius. The font list shows only installed monospace families, found on a background thread, plus the built-in font. Changes preview live; OK saves `gui.toml`, Cancel reverts.
 - Colors:
   - Red (removed hunks, chars)
   - Green (added hunks, chars)
@@ -376,6 +394,7 @@ Usage: `kdiff4 [OPTIONS] FILE1 [FILE2] [FILE3]`
 | `-h`, `--help`, `-v`, `--version` | usage and version |
 
 - Compatible with `git mergetool` / `git difftool` invocations used for kdiff3.
+- Implemented so far: the positional files, `-b`/`--base`, `-o`/`--output`/`--out`, `--L1`/`--L2`/`--L3` and `-L`/`--fname`. A set with A and B opens directly, with no Open window and no overwrite question; fewer files open the Open window with what was given filled in.
 - Wiring: the binary starts the host, connects a client over the in-process transport and sends the open command. With `--auto` it drives the session headless; if conflicts remain, the GUI takes over the same client and session, so nothing is loaded twice.
 - Exit codes follow kdiff3: `0` when the output was saved, `1` when the user quit without saving, on error, and on invalid usage (clap's default of `2` is overridden).
 - Any option not in the table is rejected with a usage error. Differences from kdiff3's command line are listed in `DEVIATIONS.md`.

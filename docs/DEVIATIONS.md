@@ -42,6 +42,17 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 - `--cs` takes Kdiff4 keys (`section.key=value`, see Config in `ARCHITECTURE.md`), not kdiff3 setting names. Accepting kdiff3 names is planned for v1.1.
 - Until directory compare lands in v1.1, a directory argument is an error (exit code 1) instead of opening directory compare.
 
+### Fonts
+
+- kdiff3 lets the user pick any installed font, style and weight. Kdiff4 offers only monospace families, in their regular face.
+- Font hinting and subpixel glyph positioning can be switched off; kdiff3 has no such options.
+
+### Open dialog
+
+- Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.
+- Until the merge engine exists, D starts with the existing output file's contents (or empty), not with a merge result.
+- File dialogs remember the directory of the last confirmed file between sessions.
+
 ### Configuration
 
 - Settings are stored in `config.toml` and `gui.toml`, not `kdiff3rc`. Import of `kdiff3rc` is planned for v1.1.
