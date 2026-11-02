@@ -1,13 +1,46 @@
-[package]
-name = "kdiff4"
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "GPL-2.0-or-later"
 
-[dependencies]
-eframe = "0.37.0"
-egui = "0.37.0"
-egui_extras = "0.37.0"
+[workspace.dependencies]
+kdiff4-core = { path = "crates/kdiff4-core" }
+kdiff4-protocol = { path = "crates/kdiff4-protocol" }
+kdiff4-gui = { path = "crates/kdiff4-gui" }
 thiserror = "2.0.21"
 anyhow = "1.0.104"
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+imara-diff = "0.2.0"
+encoding_rs = "0.8.44"
+chardetng = "1.0.0"
+toml = "1.1.8"
+dirs = "7.0.0"
+egui = "0.37.0"
+eframe = "0.37.0"
+egui_extras = "0.37.0"
+rfd = "0.17.2"
+clap = { version = "4.6.7", features = ["derive"] }
 insta = "1.49.0"
 proptest = "1.12.0"
+
+[package]
+name = "kdiff4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kdiff4-core.workspace = true
+kdiff4-protocol.workspace = true
+kdiff4-gui.workspace = true
+anyhow.workspace = true
+log.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true
