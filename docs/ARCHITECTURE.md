@@ -28,6 +28,34 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - `kdiff4-core` and `kdiff4-gui` depend on `kdiff4-protocol` and never on each other. Core never depends on egui, eframe or any windowing crate, so everything except rendering is testable headless.
 - The binary is the only crate that depends on both core and GUI, and only to wire them: it starts the host, connects a client to it and hands the client to the GUI or to the headless driver. After that it talks to the engine only through the client, like any other front end.
 
+## Modules
+
+| Crate | File | Responsibility |
+|---|---|---|
+| protocol | `messages.rs` | the message vocabulary: commands, responses, events (snapshot, delta and its changes) and the small types both sides share, such as document, labels, EOL style, revision and protocol error |
+| protocol | `transport.rs` | the client and host endpoints and the in-process transport, with the waker that tells a front end a message arrived |
+| core | `text.rs` | decoding, line splitting, line-ending and BOM detection, and atomic writes |
+| core | `session.rs` | one open comparison: the sources, D and its history, the revision, and load, edit and save |
+| core | `undo.rs` | D's undo steps and the saved/modified tracking |
+| core | `host.rs` | the host thread: turns each command into a response plus a snapshot or delta |
+| core | `error.rs` | core's errors and their conversion to protocol errors |
+| gui | `lib.rs` | starts the window with what the binary already knows: pre-filled paths, labels and a pending open request |
+| gui | `app.rs` | the application loop: menus, shortcuts, sending commands and handling their results, the status bar, and routing to dialogs and panes |
+| gui | `mirror.rs` | the front end's copy of the session, built from snapshots and deltas; applies D edits at once and resyncs on a gap or a rejected edit |
+| gui | `panes.rs` | pane layout, pane headers with path fields and Browse, and the splitter above the merge pane |
+| gui | `text_view.rs` | the virtualized text widget: draws only visible rows, the caret and selection, and maps pointer input to positions |
+| gui | `editing.rs` | caret motion, word and line selection, and turning keys into edits of D, independent of egui |
+| gui | `open_dialog.rs` | the Open form, its Run rule, file pickers and the overwrite question |
+| gui | `settings_dialog.rs` | the Settings dialog with live preview |
+| gui | `config.rs` | `gui.toml`: loading, saving and backing up a broken file |
+| gui | `fonts.rs` | discovering monospace font families and installing the chosen one |
+| gui | `theme.rs` | palettes and the egui style, including corner radius and pane frames |
+| gui | `window_frame.rs` | the native window's corner rounding (Windows only) |
+| gui | `paths.rs` | cleaning path text from the command line, the Open form and pane headers |
+| bin | `main.rs` | the command line, mapping it to a launch, and wiring the host to the GUI |
+| bin | `logging.rs` | the logger: rotating files next to the executable, stdout, the level override and the panic hook |
+
+
 ## Crates
 
 | Purpose | Crate | Where |
