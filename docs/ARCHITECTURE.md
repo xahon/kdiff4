@@ -44,6 +44,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | File dialogs | `rfd` | gui |
 | Font discovery and monospace detection | `fontique`, `skrifa` | gui |
 | CLI | `clap` | bin |
+| Log output | `flexi_logger` | bin |
 | Snapshot tests | `insta` | dev |
 | Property tests | `proptest` | dev |
 
@@ -356,7 +357,7 @@ The binary routes each override by its section to the engine (in the open comman
   - A session is a merge when it has C or an output file. Merges show the merge pane below the source panes, behind a splitter. It starts at half the height and keeps its share when the window is resized.
   - Each pane has a header with the document letter (with `*` while D has unsaved changes), its label, an editable path field and a Browse button. Enter in the field, or a file picked with Browse, reloads A, B or C from that path and keeps D's edits; for D it only changes where D will be saved.
   - Panes show a caret and its selection; there is one on screen. Pressing the mouse button in any pane moves the caret there at once, and dragging selects (Shift+click extends). Clicking below the text goes to its end, and right of a line to the line's end. Double-click selects a word (or a run of whitespace, or one punctuation character), triple-click a line. The keys are arrows, Ctrl+Left/Right by words, Home/End, PageUp/PageDown and Ctrl+Home/End, with Shift to select, plus Ctrl+A and Ctrl+C. A, B and C are read-only. D is editable: typing, Enter (also with Ctrl held), Backspace, Delete, Ctrl+Backspace and Ctrl+Delete by words, Ctrl+V and Ctrl+X, which replace or remove a selection; Edit → Undo (Ctrl+Z) and Redo (Ctrl+Y, Ctrl+Shift+Z) work on D wherever the caret is. Each edit is applied to the mirror at once and sent to the engine.
-  - File → Save writes D to its path, or asks for one like Save As when D has none. Save As picks a new path with the native Save dialog, which asks before overwriting, and D moves there. Errors from saving or reloading show in a status line under the panes.
+  - File → Save writes D to its path, or asks for one like Save As when D has none. Save As picks a new path with the native Save dialog, which asks before overwriting, and D moves there. The outcome of saving, reloading and path changes shows in the status bar under the panes. The status bar is always there, one line high, so the panes never move when a message comes or goes; long messages are cut, with the full text in a tooltip.
   - Overview strip: a 4-line lens row between (A/B/C) and (D), shows current lines from all A, B, C, and D. D is allowed to be edited in this widget, and it automatically reflected in the D text. Shows char-diffs within each A, B, and C lines, so the contents could be judged by user and edited as the user wants.
 - Void Region: a special graphical entity that spans the rows of a region where a document has no text, and it represents absence of text in the specified document. Graphically represented as hatched block of space with no text in it.
 - Scrolling of the three panes is synchronized through row indices, not pixels. Void Regions take rows like text does, so synced scrolling stays aligned.
@@ -394,7 +395,7 @@ Usage: `kdiff4 [OPTIONS] FILE1 [FILE2] [FILE3]`
 | `-h`, `--help`, `-v`, `--version` | usage and version |
 
 - Compatible with `git mergetool` / `git difftool` invocations used for kdiff3.
-- Implemented so far: the positional files, `-b`/`--base`, `-o`/`--output`/`--out`, `--L1`/`--L2`/`--L3` and `-L`/`--fname`. A set with A and B opens directly, with no Open window and no overwrite question; fewer files open the Open window with what was given filled in.
+- Implemented so far: the positional files, `-b`/`--base`, `-o`/`--output`/`--out`, `--L1`/`--L2`/`--L3` and `-L`/`--fname`. A set with A and B opens directly, with no Open window and no overwrite question; fewer files open the Open window with what was given filled in. Paths from the command line, the Open window and the pane headers are cleaned the same way: surrounding whitespace, line breaks and other control characters are dropped, and on Windows surrounding quotes too, so a pasted "Copy as path" value or an IDE run configuration that adds a trailing line break still names the file.
 - Wiring: the binary starts the host, connects a client over the in-process transport and sends the open command. With `--auto` it drives the session headless; if conflicts remain, the GUI takes over the same client and session, so nothing is loaded twice.
 - Exit codes follow kdiff3: `0` when the output was saved, `1` when the user quit without saving, on error, and on invalid usage (clap's default of `2` is overridden).
 - Any option not in the table is rejected with a usage error. Differences from kdiff3's command line are listed in `DEVIATIONS.md`.
@@ -403,7 +404,10 @@ Usage: `kdiff4 [OPTIONS] FILE1 [FILE2] [FILE3]`
 
 - `kdiff4-core`, `kdiff4-protocol` and `kdiff4-gui` expose `thiserror` enums; the binary wraps them with `anyhow` and `.context(...)`.
 - No bare `unwrap()` outside tests. Startup failures use `.expect("<Subsystem>: message")`.
-- Logging everything.
+- Logging everything. Library crates only call the `log` macros; the binary installs the logger, after the command line is parsed, so `--help` and usage errors stay on the console.
+- Log records go to rotating files in a `logs` folder next to the executable and are duplicated to stdout, in the same format, with local timestamps. The current file is `kdiff4_rCURRENT.log`; at 5 MB it is renamed to `kdiff4_r00000.log`, `kdiff4_r00001.log` and so on (higher is newer), and the 5 newest rotated files are kept. A new run appends to the current file. If the folder can't be created or written, logging goes to stdout only, with a warning.
+- Level: kdiff4's crates log at info and above, dependencies at warn and above. The `KDIFF4_LOG` environment variable (off, error, warn, info, debug, trace) changes kdiff4's level for one run; an unknown value is reported and info is used.
+- Logged at info: start (with the log folder), the launch arguments, opened files, reloads, output path changes, saves, and exit. Requests and D edits are logged at debug, failed requests at warn, and panics at error.
 
 ## Directory compare (v1.1, optional, pending decision)
 

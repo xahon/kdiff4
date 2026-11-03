@@ -1,7 +1,7 @@
 use std::io;
 use std::thread::{self, JoinHandle};
 
-use kdiff4_protocol::{Command, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
+use kdiff4_protocol::{Change, Command, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
 
 use crate::error::CoreError;
 use crate::session::Session;
@@ -44,6 +44,7 @@ fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId,
         },
         Command::Open(files) => {
             let opened = Session::open(&files)?;
+            log::info!("host: opened A {}, B {}, C {}, output {}", files.a.display(), files.b.display(), describe(files.c.as_deref()), describe(files.output.as_deref()));
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(opened.snapshot())));
             *session = Some(opened);
             return Ok(());
@@ -59,8 +60,19 @@ fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId,
         Command::SaveAs(path) => active(session)?.save_as(&path)?,
     };
     let revision = active(session)?.revision();
+    match &change {
+        Change::SourceReplaced(text) => log::info!("host: reloaded {} from {}", text.document.letter(), text.path.display()),
+        Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
+        Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
+        Change::OutputEdited { range, text, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, revision {}", text.len(), revision.0),
+    }
     let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta { revision, cause: Some(id), change })));
     Ok(())
+}
+
+
+fn describe(path: Option<&std::path::Path>) -> String {
+    path.map(|path| path.display().to_string()).unwrap_or_else(|| "none".to_string())
 }
 
 

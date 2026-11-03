@@ -11,6 +11,7 @@ use crate::fonts::{self, FontScan};
 use crate::mirror::{DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
 use crate::panes::{self, PaneAction, PaneState};
+use crate::paths;
 use crate::settings_dialog::{SettingsAction, SettingsDialog};
 use crate::theme;
 use crate::window_frame;
@@ -304,7 +305,10 @@ impl KdiffApp {
                         .as_ref()
                         .and_then(Mirror::output)
                         .and_then(|output| output.path.as_ref())
-                        .map(|path| Status { text: format!("Saved {}", path.display()), is_error: false }),
+                        .map(|path| {
+                            log::info!("saved {}", path.display());
+                            Status { text: format!("Saved {}", path.display()), is_error: false }
+                        }),
                     Pending::Edit | Pending::Resync | Pending::UndoRedo => self.status.take(),
                     Pending::Open | Pending::LoadSource(_) | Pending::SetOutputPath => None,
                 };
@@ -435,8 +439,7 @@ impl KdiffApp {
                 }
             }
             PaneAction::CommitPath(document, text) => {
-                let text = text.trim();
-                let path = if text.is_empty() { None } else { Some(PathBuf::from(text)) };
+                let path = paths::clean_path_text(&text).map(PathBuf::from);
                 self.change_path(document, path);
             }
             PaneAction::Browse(document) => {
@@ -672,14 +675,15 @@ impl KdiffApp {
     }
 
 
+    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip.
     fn show_status(&self, ui: &mut egui::Ui) {
-        let status = match self.status.as_ref() {
-            Some(status) => status,
-            None => return,
-        };
         egui::Panel::bottom("status_bar").show(ui, |ui| {
-            let color = if status.is_error { ui.visuals().error_fg_color } else { theme::palette_of(ui).weak_text };
-            ui.label(RichText::new(&status.text).color(color));
+            let (text, color) = match self.status.as_ref() {
+                Some(status) if status.is_error => (status.text.as_str(), ui.visuals().error_fg_color),
+                Some(status) => (status.text.as_str(), theme::palette_of(ui).weak_text),
+                None => ("Ready", theme::palette_of(ui).weak_text),
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
         });
     }
 

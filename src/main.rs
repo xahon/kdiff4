@@ -1,8 +1,11 @@
+mod logging;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::Parser;
+use kdiff4_gui::clean_path;
 use kdiff4_protocol::{Command, Document, Labels, OpenFiles};
 
 
@@ -44,21 +47,23 @@ enum Launch {
 }
 
 
-/// Maps the arguments the way kdiff3 does: three inputs are A B C, two are A B, and `--base` comes first.
+/// Maps the arguments the way kdiff3 does: three inputs are A B C, two are A B, and `--base` comes first. Paths are cleaned of stray line breaks and quotes; one that is blank after that is dropped.
 fn plan_launch(cli: Cli) -> Result<Launch, String> {
     let inputs: Vec<PathBuf> = cli.base
         .into_iter()
         .chain(cli.files)
+        .filter_map(|path| clean_path(&path))
         .collect();
+    let output = cli.output.and_then(|path| clean_path(&path));
     if inputs.len() > 3 {
         return Err(format!("too many input files: {} given, at most 3 allowed", inputs.len()));
     }
     let labels = assign_labels([cli.label_a, cli.label_b, cli.label_c], cli.fname);
     let mut inputs = inputs.into_iter();
     match (inputs.next(), inputs.next(), inputs.next()) {
-        (Some(a), Some(b), c) => Ok(Launch::Open(OpenFiles { a, b, c, output: cli.output, labels })),
+        (Some(a), Some(b), c) => Ok(Launch::Open(OpenFiles { a, b, c, output, labels })),
         (a, _, _) => {
-            let paths = [(Document::A, a), (Document::D, cli.output)]
+            let paths = [(Document::A, a), (Document::D, output)]
                 .into_iter()
                 .filter_map(|(document, path)| path.map(|path| (document, path)))
                 .collect();
@@ -121,13 +126,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run(launch) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+    let logger = logging::init();
+    log::info!("launch: {launch:?}");
+    let result = run(launch);
+    if let Err(error) = &result {
+        if logger.is_some() {
+            log::error!("{error:#}");
+        } else {
             eprintln!("kdiff4: {error:#}");
-            ExitCode::FAILURE
         }
     }
+    log::info!("kdiff4 exits");
+    drop(logger);
+    if result.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 
@@ -155,6 +166,13 @@ mod tests {
     #[test]
     fn two_files_are_a_and_b() {
         assert_eq!(launch(&["a", "b"]), Ok(open("a", "b", None, None, Labels::default())));
+    }
+
+
+    #[test]
+    fn stray_line_breaks_and_blank_paths_are_cleaned() {
+        assert_eq!(launch(&["a\n", " b ", "c\r\n", "-o", "out\n"]), Ok(open("a", "b", Some("c"), Some("out"), Labels::default())));
+        assert_eq!(launch(&["a", "\n", "b"]), Ok(open("a", "b", None, None, Labels::default())));
     }
 
 

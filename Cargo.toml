@@ -14,6 +14,7 @@ kdiff4-gui = { path = "crates/kdiff4-gui" }
 thiserror = "2.0.21"
 anyhow = "1.0.104"
 log = "0.4.35"
+flexi_logger = { version = "0.31.10", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 imara-diff = "0.2.0"
 encoding_rs = "0.8.44"
@@ -42,6 +43,7 @@ kdiff4-protocol.workspace = true
 kdiff4-gui.workspace = true
 anyhow.workspace = true
 log.workspace = true
+flexi_logger.workspace = true
 clap.workspace = true
 
 [dev-dependencies]

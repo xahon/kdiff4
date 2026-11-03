@@ -5,6 +5,7 @@ mod fonts;
 mod mirror;
 mod open_dialog;
 mod panes;
+mod paths;
 mod settings_dialog;
 mod text_view;
 mod theme;
@@ -14,6 +15,8 @@ use std::path::PathBuf;
 
 use kdiff4_protocol::{Client, Document, Labels, RequestId};
 use thiserror::Error;
+
+pub use paths::{clean_path, clean_path_text};
 
 
 #[derive(Debug, Error)]

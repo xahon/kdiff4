@@ -1,10 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use egui::{Color32, RichText, TextEdit, Ui};
+use egui::{Align, Color32, Label, Layout, RichText, TextEdit, TextStyle, TextWrapMode, Ui, WidgetText, vec2};
 use kdiff4_protocol::{Document, Labels, OpenFiles};
 
+use crate::paths::clean_path_text;
 
-const PATH_FIELD_WIDTH: f32 = 420.0;
+
+/// The form fills the window or dialog up to this width; path fields take whatever the labels and buttons leave.
+const FORM_MAX_WIDTH: f32 = 720.0;
+const MIN_FIELD_WIDTH: f32 = 80.0;
 
 
 /// Paths typed or picked in the Open dialog, in `Document::ALL` order, plus labels from the command line, which the dialog keeps but doesn't show.
@@ -24,10 +28,9 @@ pub enum FormAction {
 
 
 impl OpenForm {
-    /// Returns `None` for an empty or blank field.
+    /// Returns `None` for an empty or blank field. Stray line breaks and quotes around a pasted path are dropped.
     pub fn path(&self, document: Document) -> Option<PathBuf> {
-        let text = self.paths[index(document)].trim();
-        if text.is_empty() { None } else { Some(PathBuf::from(text)) }
+        clean_path_text(&self.paths[index(document)]).map(PathBuf::from)
     }
 
 
@@ -52,22 +55,29 @@ impl OpenForm {
     /// Draws the dialog contents. `busy` disables Run while an open is in flight; `cancelable` adds a Cancel button.
     pub fn show(&mut self, ui: &mut Ui, error: Option<&str>, busy: bool, cancelable: bool) -> Option<FormAction> {
         let mut action = None;
-        egui::Grid::new("open_form").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
-            for document in Document::ALL {
-                ui.label(label(document));
-                let height = ui.spacing().interact_size.y;
-                ui.add_sized([PATH_FIELD_WIDTH, height], TextEdit::singleline(&mut self.paths[index(document)]));
-                if ui.button("Browse...").clicked() {
-                    action = Some(FormAction::Browse(document));
-                }
-                ui.end_row();
-            }
-        });
-        ui.label(RichText::new("A and B are required. Add C for a 3-way merge, D to merge into a file.").weak());
-        if let Some(error) = error {
-            ui.label(RichText::new(error).color(Color32::RED));
+        ui.set_width(ui.available_width().min(FORM_MAX_WIDTH));
+        let height = ui.spacing().interact_size.y;
+        let label_width = Document::ALL
+            .into_iter()
+            .map(|document| WidgetText::from(label(document)).into_galley(ui, Some(TextWrapMode::Extend), f32::INFINITY, TextStyle::Body).size().x)
+            .fold(0.0, f32::max);
+        for document in Document::ALL {
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(vec2(label_width, height), Layout::left_to_right(Align::Center), |ui| ui.label(label(document)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Browse...").clicked() {
+                        action = Some(FormAction::Browse(document));
+                    }
+                    let width = ui.available_width().max(MIN_FIELD_WIDTH);
+                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).desired_width(width));
+                });
+            });
         }
-        ui.horizontal(|ui| {
+        ui.add(Label::new(RichText::new("A and B are required. Add C for a 3-way merge, D to merge into a file.").weak()).wrap());
+        if let Some(error) = error {
+            ui.add(Label::new(RichText::new(error).color(Color32::RED)).wrap());
+        }
+        ui.horizontal_wrapped(|ui| {
             let can_run = !busy && self.files().is_some();
             let run = ui.add_enabled(can_run, egui::Button::new("Run"));
             let enter = can_run && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -214,8 +224,9 @@ mod tests {
 
     #[test]
     fn blank_fields_count_as_empty_and_paths_are_trimmed() {
-        let files = form(["  a.txt ", "b.txt", "   ", "\t"]).files().unwrap();
+        let files = form(["  a.txt ", "b.txt\r\n", "   ", "\t"]).files().unwrap();
         assert_eq!(files.a, PathBuf::from("a.txt"));
+        assert_eq!(files.b, PathBuf::from("b.txt"));
         assert_eq!(files.c, None);
     }
 
