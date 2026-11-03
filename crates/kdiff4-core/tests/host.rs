@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kdiff4_protocol::engine::{MergeStatus, RegionStatus};
-use kdiff4_protocol::{Change, Choice, Client, Command, Delta, Document, ErrorKind, Event, HostMessage, Labels, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
+use kdiff4_protocol::engine::{ComparisonOptions, MergeStatus, RegionStatus};
+use kdiff4_protocol::{Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, Navigation, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
 
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -209,6 +209,36 @@ fn edit_save_and_reload_go_through_deltas() {
     let id = client.send(Command::Resync).unwrap();
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.revision, Revision(7));
+    expect_ok(&client, id);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
+#[test]
+fn navigation_broadcasts_the_current_region_without_a_new_revision() {
+    let dir = temp_dir("navigate");
+    let a = write(&dir, "a.txt", "s\na\n");
+    let b = write(&dir, "b.txt", "s\nb\n");
+    let c = write(&dir, "c.txt", "s\nc\n");
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), ..OpenFiles::default() })).unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict }).unwrap();
+    assert_eq!(next_message(&client), HostMessage::Event(Event::CurrentRegion(CurrentRegion { revision: snapshot.revision.clone(), region: Some(1), cause: Some(id.clone()) })));
+    expect_ok(&client, id);
+
+    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict }).unwrap();
+    expect_ok(&client, id);
+
+    let options = ComparisonOptions { try_hard: true, ..ComparisonOptions::default() };
+    let id = client.send(Command::SetComparisonOptions(options.clone())).unwrap();
+    let snapshot = expect_snapshot(&client);
+    assert_eq!(snapshot.options, options);
+    assert_eq!(snapshot.current_region, None);
     expect_ok(&client, id);
 
     drop(client);

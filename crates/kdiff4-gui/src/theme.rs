@@ -21,6 +21,11 @@ pub struct Palette {
     pub conflict_bg: Color32,
     /// Hatching of void regions.
     pub void_hatch: Color32,
+    /// The bordered gutter block of each region in the source panes.
+    pub gutter_fill: Color32,
+    pub gutter_border: Color32,
+    /// The `<Merge Conflict>` marker of an unresolved conflict in D.
+    pub conflict_marker: Color32,
 }
 
 
@@ -38,6 +43,9 @@ pub const LIGHT: Palette = Palette {
     modified_bg: Color32::from_rgb(0xF3, 0xD8, 0xF3),
     conflict_bg: Color32::from_rgb(0xFF, 0xE2, 0xB0),
     void_hatch: Color32::from_rgb(0xC4, 0xCA, 0xD3),
+    gutter_fill: Color32::from_rgb(0xFF, 0xD3, 0x6E),
+    gutter_border: Color32::from_rgb(0xB0, 0x76, 0x00),
+    conflict_marker: Color32::from_rgb(0xC0, 0x10, 0x10),
 };
 
 
@@ -55,6 +63,9 @@ pub const DARK: Palette = Palette {
     modified_bg: Color32::from_rgb(0x45, 0x25, 0x47),
     conflict_bg: Color32::from_rgb(0x4A, 0x39, 0x16),
     void_hatch: Color32::from_rgb(0x3C, 0x42, 0x4B),
+    gutter_fill: Color32::from_rgb(0x8A, 0x62, 0x10),
+    gutter_border: Color32::from_rgb(0xFF, 0xBF, 0x3C),
+    conflict_marker: Color32::from_rgb(0xFF, 0x8A, 0x8A),
 };
 
 
@@ -192,6 +203,16 @@ mod tests {
 
 
     #[test]
+    fn gutters_and_conflict_markers_are_readable() {
+        for palette in [LIGHT, DARK] {
+            assert!(contrast_ratio(palette.conflict_marker, palette.conflict_bg) >= 4.5, "{palette:?}");
+            assert!(contrast_ratio(palette.gutter_border, palette.gutter_fill) >= 2.0, "{palette:?}");
+            assert!(contrast_ratio(palette.gutter_fill, palette.pane_bg) >= 1.2, "{palette:?}");
+        }
+    }
+
+
+    #[test]
     fn pane_border_stands_out_from_both_backgrounds() {
         for palette in [&LIGHT, &DARK] {
             assert!(contrast_ratio(palette.pane_border, palette.pane_bg) >= 2.0, "{palette:?}");
@@ -212,7 +233,7 @@ mod tests {
     #[test]
     fn configure_style_applies_view_settings() {
         let mut style = Style::default();
-        let view = ViewConfig { font_family: None, font_size: 17.0, font_hinting: false, subpixel_positioning: false, corner_radius: 0 };
+        let view = ViewConfig { font_family: None, font_size: 17.0, font_hinting: false, subpixel_positioning: false, corner_radius: 0, ..ViewConfig::default() };
         configure_style(&mut style, &LIGHT, &view);
         assert_eq!(style.text_styles[&TextStyle::Monospace], FontId::monospace(17.0));
         assert!(!style.visuals.text_options.font_hinting);

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::engine::{Comparison, EngineCapabilities, Region};
+use crate::engine::{Comparison, ComparisonOptions, EngineCapabilities, Region};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -66,6 +66,22 @@ pub enum Command {
     Redo,
     /// Asks the host for a fresh snapshot.
     Resync,
+    /// Recomputes the comparison with these options. Like a reload, D is rebuilt from the new regions and its undo history starts over; the host answers with a new snapshot. On failure the session is unchanged.
+    SetComparisonOptions(ComparisonOptions),
+    /// Moves the current region from region `from` (the current region when `None`) to the next or previous difference or conflict. Nothing changes when there is none. `base` is the revision `from` refers to.
+    Navigate { base: Revision, from: Option<usize>, to: Navigation },
+    /// Makes region `region` current, or no region. `base` is the revision the index refers to.
+    SetCurrentRegion { base: Revision, region: Option<usize> },
+}
+
+
+/// Where a navigate command moves the current region. A difference is a region whose hunks are not all equal; a conflict is one that needs a decision before auto-resolve can merge it, whether or not D has resolved it since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Navigation {
+    PreviousDifference,
+    NextDifference,
+    PreviousConflict,
+    NextConflict,
 }
 
 
@@ -128,6 +144,16 @@ pub struct Response {
 pub enum Event {
     Snapshot(Snapshot),
     Delta(Delta),
+    CurrentRegion(CurrentRegion),
+}
+
+
+/// The current region changed by navigation. It does not change the revision: `revision` is the one `region` refers to. Changes of D also make their region current, without this event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CurrentRegion {
+    pub revision: Revision,
+    pub region: Option<usize>,
+    pub cause: Option<RequestId>,
 }
 
 
@@ -142,7 +168,7 @@ pub struct Delta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
-    /// D's text and the regions behind it changed: a hand edit, a choice, an undo or a redo. `modified` says whether D now differs from what was loaded or last saved; undo can bring it back.
+    /// D's text and the regions behind it changed: a hand edit, a choice, an undo or a redo. The first region of `merge` becomes the current region. `modified` says whether D now differs from what was loaded or last saved; undo can bring it back.
     OutputEdited { range: Range<usize>, text: String, modified: bool, merge: MergeUpdate },
     OutputPathChanged(Option<PathBuf>),
     OutputSaved(PathBuf),
@@ -167,6 +193,10 @@ pub struct Snapshot {
     pub engine: EngineCapabilities,
     /// Per region of `comparison`, its merge state; empty without D.
     pub merge: Vec<RegionMerge>,
+    /// The options `comparison` was computed with.
+    pub options: ComparisonOptions,
+    /// The region navigation is at, if any.
+    pub current_region: Option<usize>,
 }
 
 

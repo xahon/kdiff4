@@ -11,6 +11,10 @@ pub const MAX_FONT_SIZE: f32 = 48.0;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const MAX_CORNER_RADIUS: u8 = 12;
 pub const DEFAULT_CORNER_RADIUS: u8 = 2;
+pub const MAX_JUMP_CONTEXT_LINES: u8 = 20;
+pub const DEFAULT_JUMP_CONTEXT_LINES: u8 = 3;
+/// A light blue wash: visible on every shade, and text keeps its contrast.
+pub const DEFAULT_CURRENT_REGION_COLOR: [u8; 4] = [40, 110, 255, 28];
 
 
 #[derive(Debug, Error)]
@@ -56,12 +60,21 @@ pub struct ViewConfig {
     pub subpixel_positioning: bool,
     /// Rounding of widgets, menus, dialogs, panes and the window frame, in pixels.
     pub corner_radius: u8,
+    pub show_line_numbers: bool,
+    /// The region gutters of the source panes. D's column of line origins is always shown.
+    pub show_gutters: bool,
+    /// D lines up with the source panes: every region gets the same rows in every pane, padded with void space.
+    pub align_output: bool,
+    /// Rows kept above a region that navigation jumps to.
+    pub jump_context_lines: u8,
+    /// RGBA wash over the rows of the current region.
+    pub current_region_color: [u8; 4],
 }
 
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR }
     }
 }
 
@@ -71,6 +84,7 @@ impl ViewConfig {
     pub fn sanitized(mut self) -> ViewConfig {
         self.font_size = if self.font_size.is_finite() { self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) } else { DEFAULT_FONT_SIZE };
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
+        self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         if self.font_family.as_deref().is_some_and(|family| family.trim().is_empty()) {
             self.font_family = None;
         }
@@ -164,7 +178,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0 };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4] };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -196,10 +210,11 @@ mod tests {
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
+        assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!(view.font_size, MAX_FONT_SIZE);
         let tiny = ViewConfig { font_size: 1.0, ..ViewConfig::default() }.sanitized();
         assert_eq!(tiny.font_size, MIN_FONT_SIZE);

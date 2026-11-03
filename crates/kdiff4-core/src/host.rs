@@ -1,7 +1,7 @@
 use std::io;
 use std::thread::{self, JoinHandle};
 
-use kdiff4_protocol::{Change, Command, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
+use kdiff4_protocol::{Change, Command, CurrentRegion, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
 
 use crate::engine_registry::EngineRegistry;
 use crate::error::CoreError;
@@ -62,6 +62,27 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
             return Ok(());
         }
+        Command::SetComparisonOptions(options) => {
+            let active = active(session)?;
+            active.set_comparison_options(options.clone(), registry.default_engine())?;
+            log::info!("host: comparison options set to {options:?}");
+            let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
+            return Ok(());
+        }
+        Command::Navigate { base, from, to } => {
+            let active = active(session)?;
+            if let Some(region) = active.navigate(&base, from, to)? {
+                log::debug!("host: navigated {to:?} to region {region}");
+                send_current(endpoint, active, id);
+            }
+            return Ok(());
+        }
+        Command::SetCurrentRegion { base, region } => {
+            let active = active(session)?;
+            active.set_current_region(&base, region)?;
+            send_current(endpoint, active, id);
+            return Ok(());
+        }
         Command::EditOutput(edit) => active(session)?.edit_output(&edit, registry.default_engine())?,
         Command::SetChoice { base, region, choice } => active(session)?.set_choice(&base, region, choice)?,
         Command::ChooseForUnresolved { base, document } => match active(session)?.choose_for_unresolved(&base, document)? {
@@ -80,6 +101,12 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
     }
     let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta { revision, cause: Some(id), change })));
     Ok(())
+}
+
+
+fn send_current(endpoint: &HostEndpoint, session: &Session, id: RequestId) {
+    let current = CurrentRegion { revision: session.revision(), region: session.current_region(), cause: Some(id) };
+    let _ = endpoint.send(HostMessage::Event(Event::CurrentRegion(current)));
 }
 
 

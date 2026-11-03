@@ -2,17 +2,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
-use kdiff4_protocol::{Change, Client, Command, Document, Event, HostMessage, RequestId, Response};
+use kdiff4_protocol::{Change, Client, Command, Document, Event, HostMessage, Navigation, RequestId, Response};
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
-use crate::editing::{self, Cursor, EditKey, Lines, Motion};
+use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::fonts::{self, FontScan};
 use crate::mirror::{DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
-use crate::panes::{self, PaneAction, PaneState};
+use crate::panes::{self, PaneAction, PaneOptions, PaneState};
 use crate::paths;
+use crate::rows::{self, Rows};
 use crate::settings_dialog::{SettingsAction, SettingsDialog};
+use crate::text_view::{self, Caret};
 use crate::theme;
 use crate::window_frame;
 
@@ -31,6 +33,16 @@ const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::B, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)),
     (Document::C, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)),
 ];
+/// Ctrl+Up and Ctrl+Down go to the previous and next difference, Ctrl+PageUp and Ctrl+PageDown to the previous and next conflict.
+const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
+    (Navigation::PreviousDifference, "Previous Difference", KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowUp)),
+    (Navigation::NextDifference, "Next Difference", KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowDown)),
+    (Navigation::PreviousConflict, "Previous Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp)),
+    (Navigation::NextConflict, "Next Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown)),
+];
+const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
+const VOID_TOGGLE_SIZE: f32 = 18.0;
+const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
 const SETTINGS_WINDOW_SIZE: [f32; 2] = [640.0, 400.0];
@@ -50,6 +62,10 @@ enum Pending {
     UndoRedo,
     /// A choice for one region or for every unresolved one.
     Choose,
+    /// A move to the next or previous difference or conflict; becomes `Navigated` when the current region moved.
+    Navigate(Navigation),
+    Navigated,
+    ComparisonOptions,
 }
 
 
@@ -151,7 +167,8 @@ impl KdiffApp {
     fn open_settings(&mut self, ctx: &egui::Context) {
         if self.settings.is_none() {
             self.font_scan.start(ctx);
-            self.settings = Some(SettingsDialog::new(&self.config.view));
+            let options = self.mirror.as_ref().map(Mirror::options);
+            self.settings = Some(SettingsDialog::new(&self.config.view, options));
             if !self.window_enlarged {
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SETTINGS_WINDOW_SIZE.into()));
             }
@@ -169,6 +186,9 @@ impl KdiffApp {
                 self.config.view = dialog.draft().clone();
                 self.apply_view(ctx, dialog.draft());
                 self.save_config(true);
+                if let Some(options) = dialog.changed_comparison() {
+                    self.send(Command::SetComparisonOptions(options.clone()), Pending::ComparisonOptions);
+                }
             }
             SettingsAction::Cancel => self.apply_view(ctx, dialog.original()),
         }
@@ -262,7 +282,8 @@ impl KdiffApp {
                     self.panes = PaneState { merge_fraction: self.panes.merge_fraction.clone(), ..PaneState::default() };
                     self.status = None;
                 }
-                self.mirror = Some(Mirror::from_snapshot(snapshot));
+                self.mirror = Some(Mirror::from_snapshot(snapshot, self.view().align_output));
+                self.panes.void_row = None;
                 self.form_open = false;
                 self.error = None;
                 if !self.window_enlarged {
@@ -289,14 +310,40 @@ impl KdiffApp {
                         if let Some(offset) = changed_end
                             && let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, Document::D))
                         {
-                            self.panes.caret = Some((Document::D, Cursor::at(editing::position_of(lines, offset))));
+                            self.panes.set_caret(Document::D, Cursor::at(editing::position_of(lines, offset)), None);
                             self.panes.reveal_caret = true;
                         }
                     }
                     DeltaOutcome::Ignored => {}
                 }
             }
+            HostMessage::Event(Event::CurrentRegion(current)) => {
+                let applied = self.mirror.as_mut().is_some_and(|mirror| mirror.apply_current_region(&current));
+                if let Some(cause) = current.cause.as_ref()
+                    && let Some(kind) = self.pending.get_mut(cause)
+                {
+                    *kind = Pending::Navigated;
+                }
+                if applied && let Some(region) = current.region {
+                    self.jump_to(region);
+                }
+            }
             HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
+        }
+    }
+
+
+    /// Scrolls every pane to `region`, with context rows above it, and puts the caret at its start in the pane that has it (A when none does).
+    fn jump_to(&mut self, region: usize) {
+        self.panes.jump = Some(region);
+        let document = self.panes.caret.map_or(Document::A, |(document, _)| document);
+        let target = self.mirror
+            .as_ref()
+            .and_then(|mirror| Some((lines_of(mirror, document.clone())?, rows_of(mirror, document.clone())?)))
+            .and_then(|(lines, rows)| Some((lines, rows, rows.region_start(region)?)));
+        if let Some((lines, rows, row)) = target {
+            let (position, void_row) = rows.caret_at_row(row, 0, text_end(lines));
+            self.panes.set_caret(document, Cursor::at(editing::clamp(lines, position)), void_row);
         }
     }
 
@@ -317,8 +364,9 @@ impl KdiffApp {
                             log::info!("saved {}", path.display());
                             Status { text: format!("Saved {}", path.display()), is_error: false }
                         }),
-                    Pending::Edit | Pending::Resync | Pending::UndoRedo => self.status.take(),
-                    Pending::Open | Pending::LoadSource(_) | Pending::Choose => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
+                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated => self.status.take(),
+                    Pending::Navigate(to) => Some(Status { text: format!("No {}", navigation_noun(to)), is_error: false }),
+                    Pending::Open | Pending::LoadSource(_) | Pending::Choose | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
                     Pending::SetOutputPath => None,
                 };
                 return;
@@ -340,6 +388,8 @@ impl KdiffApp {
             Pending::Choose => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
+            Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
+            Pending::ComparisonOptions => self.report_error(format!("Cannot apply the comparison options: {}", error.message)),
         }
     }
 
@@ -418,12 +468,12 @@ impl KdiffApp {
 
     fn handle_pane_action(&mut self, ctx: &egui::Context, action: PaneAction) {
         match action {
-            PaneAction::Press { document, position, extend } => {
+            PaneAction::Press { document, position, void_row, extend } => {
                 let cursor = match self.panes.caret {
                     Some((current, cursor)) if extend && current == document => Cursor { anchor: cursor.anchor, head: position },
                     _ => Cursor::at(position),
                 };
-                self.panes.caret = Some((document, cursor));
+                self.panes.set_caret(document, cursor, void_row);
                 self.panes.reveal_caret = false;
                 if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
@@ -431,20 +481,20 @@ impl KdiffApp {
             }
             PaneAction::SelectWord(document, position) => {
                 if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-                    self.panes.caret = Some((document, editing::word_at(lines, position)));
+                    self.panes.set_caret(document, editing::word_at(lines, position), None);
                 }
             }
             PaneAction::SelectLine(document, line) => {
                 if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-                    self.panes.caret = Some((document, editing::line_at(lines, line)));
+                    self.panes.set_caret(document, editing::line_at(lines, line), None);
                 }
             }
-            PaneAction::Drag(document, position) => {
+            PaneAction::Drag { document, position, void_row } => {
                 if let Some((current, cursor)) = self.panes.caret
                     && current == document
-                    && cursor.head != position
+                    && (cursor.head != position || self.panes.void_row != void_row)
                 {
-                    self.panes.caret = Some((document, Cursor { anchor: cursor.anchor, head: position }));
+                    self.panes.set_caret(document, Cursor { anchor: cursor.anchor, head: position }, void_row);
                     self.panes.reveal_caret = true;
                 }
             }
@@ -519,11 +569,16 @@ impl KdiffApp {
             Some(caret) => caret,
             None => return,
         };
-        let lines = match self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-            Some(lines) => lines,
+        let mirror = match self.mirror.as_ref() {
+            Some(mirror) => mirror,
             None => return,
         };
-        self.panes.caret = Some((document, editing::move_cursor(lines, cursor, motion, extend)));
+        let (lines, rows) = match (lines_of(mirror, document.clone()), rows_of(mirror, document.clone())) {
+            (Some(lines), Some(rows)) => (lines, rows),
+            _ => return,
+        };
+        let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor, void_row: self.panes.void_row.clone() }, motion, extend);
+        self.panes.set_caret(document, cursor, void_row);
         self.panes.reveal_caret = true;
     }
 
@@ -534,7 +589,7 @@ impl KdiffApp {
             None => return,
         };
         if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-            self.panes.caret = Some((document, editing::select_all(lines)));
+            self.panes.set_caret(document, editing::select_all(lines), None);
         }
     }
 
@@ -572,7 +627,7 @@ impl KdiffApp {
             Some(command) => command,
             None => return,
         };
-        self.panes.caret = Some((Document::D, Cursor::at(caret)));
+        self.panes.set_caret(Document::D, Cursor::at(caret), None);
         self.panes.reveal_caret = true;
         if let Some(id) = self.send(Command::EditOutput(command), Pending::Edit)
             && let Some(mirror) = self.mirror.as_mut()
@@ -582,18 +637,34 @@ impl KdiffApp {
     }
 
 
-    /// Toggles `document` in the region of the line with the caret, in any pane.
+    /// The region of the row the caret is on, in any pane.
+    fn caret_region(&self) -> Option<usize> {
+        let (document, cursor) = self.panes.caret?;
+        let rows = rows_of(self.mirror.as_ref()?, document)?;
+        rows.region_of_row(text_view::caret_row(rows, Caret { cursor, void_row: self.panes.void_row.clone() }))
+    }
+
+
+    /// Asks the engine to move the current region from the caret's region.
+    fn navigate(&mut self, to: Navigation) {
+        let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) else { return };
+        let from = self.caret_region();
+        self.send(Command::Navigate { base, from, to }, Pending::Navigate(to));
+    }
+
+
+    /// Toggles `document` in the region of the row with the caret, in any pane.
     fn choose_current(&mut self, document: Document) {
-        let Some((caret_document, cursor)) = self.panes.caret else {
+        if self.panes.caret.is_none() {
             self.report_error("Put the caret in a region to choose for it".to_string());
             return;
-        };
-        let Some(mirror) = self.mirror.as_ref() else { return };
-        let Some(base) = mirror.choice_base() else { return };
-        let Some(region) = mirror.region_at(caret_document, cursor.head.line) else {
+        }
+        let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
+        let Some(region) = self.caret_region() else {
             self.report_error("The caret is not in a region".to_string());
             return;
         };
+        let Some(mirror) = self.mirror.as_ref() else { return };
         let Some(choice) = mirror.toggled_choice(region, document) else { return };
         self.send(Command::SetChoice { base, region, choice }, Pending::Choose);
     }
@@ -646,6 +717,13 @@ impl KdiffApp {
                     self.choose_current(document);
                 }
             }
+            if self.mirror.is_some() {
+                for (to, _, shortcut) in NAVIGATION_SHORTCUTS.iter() {
+                    if ctx.input_mut(|input| input.consume_shortcut(shortcut)) {
+                        self.navigate(to.clone());
+                    }
+                }
+            }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN_SHORTCUT)) {
             self.form_open = true;
@@ -689,6 +767,8 @@ impl KdiffApp {
 
     fn show_menu(&mut self, ui: &mut egui::Ui) {
         let is_merge = self.is_merge();
+        let savable = is_merge && self.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
+        let has_session = self.mirror.is_some();
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -697,11 +777,11 @@ impl KdiffApp {
                         self.form_open = true;
                     }
                     let save = egui::Button::new("Save").shortcut_text(ui.ctx().format_shortcut(&SAVE_SHORTCUT));
-                    if ui.add_enabled(is_merge, save).clicked() {
+                    if ui.add_enabled(savable, save).on_disabled_hover_text(UNSAVABLE_HINT).clicked() {
                         self.save();
                     }
                     let save_as = egui::Button::new("Save As...").shortcut_text(ui.ctx().format_shortcut(&SAVE_AS_SHORTCUT));
-                    if ui.add_enabled(is_merge, save_as).clicked() {
+                    if ui.add_enabled(savable, save_as).on_disabled_hover_text(UNSAVABLE_HINT).clicked() {
                         self.save_as();
                     }
                     ui.separator();
@@ -736,6 +816,13 @@ impl KdiffApp {
                             self.choose_for_unresolved(document.clone());
                         }
                     }
+                    ui.separator();
+                    for (to, label, shortcut) in NAVIGATION_SHORTCUTS.iter() {
+                        let button = egui::Button::new(*label).shortcut_text(ui.ctx().format_shortcut(shortcut));
+                        if ui.add_enabled(has_session, button).clicked() {
+                            self.navigate(to.clone());
+                        }
+                    }
                 });
                 ui.menu_button("Settings", |ui| {
                     let configure = egui::Button::new("Configure Kdiff4...").shortcut_text(ui.ctx().format_shortcut(&SETTINGS_SHORTCUT));
@@ -746,6 +833,47 @@ impl KdiffApp {
                 });
             });
         });
+    }
+
+
+    /// The strip under the menu bar: the void space toggle of the output pane.
+    fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        let is_merge = self.is_merge();
+        let on = self.view().align_output;
+        let mut toggled = false;
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, response) = ui.allocate_exact_size(egui::vec2(VOID_TOGGLE_SIZE, VOID_TOGGLE_SIZE) + ui.spacing().button_padding * 2.0, egui::Sense::click());
+                let response = response.on_hover_text(VOID_TOGGLE_HINT);
+                if is_merge && response.clicked() {
+                    toggled = true;
+                }
+                paint_void_toggle(ui, rect, on, is_merge, response.hovered());
+            });
+        });
+        if toggled {
+            self.config.view.align_output = !on;
+            if let Some(applied) = self.applied_view.as_mut() {
+                applied.align_output = !on;
+            }
+            if let Some(dialog) = self.settings.as_mut() {
+                dialog.set_align_output(!on);
+            }
+            self.save_config(false);
+        }
+    }
+
+
+    /// The view settings in effect: the settings dialog's draft while it is open, otherwise the saved ones.
+    fn view(&self) -> &ViewConfig {
+        self.applied_view.as_ref().unwrap_or(&self.config.view)
+    }
+
+
+    fn pane_options(&self) -> PaneOptions {
+        let view = self.view();
+        let [r, g, b, a] = view.current_region_color;
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize }
     }
 
 
@@ -799,6 +927,12 @@ impl eframe::App for KdiffApp {
         self.handle_shortcuts(&ctx);
         self.handle_pane_keys(&ctx);
         self.show_menu(ui);
+        self.show_toolbar(ui);
+        let aligned = self.view().align_output;
+        if let Some(mirror) = self.mirror.as_mut() {
+            mirror.set_aligned(aligned);
+        }
+        let pane_options = self.pane_options();
 
         let busy = self.is_opening();
         let mut form_action = None;
@@ -811,7 +945,7 @@ impl eframe::App for KdiffApp {
             }
             Some(mirror) => {
                 self.show_status(ui);
-                pane_actions = panes::show_session(ui, mirror, &mut self.panes);
+                pane_actions = panes::show_session(ui, mirror, &mut self.panes, &pane_options);
                 self.panes.reveal_caret = false;
                 if self.form_open {
                     let modal = egui::Modal::new(egui::Id::unique("open_dialog")).show(&ctx, |ui| {
@@ -834,6 +968,74 @@ impl eframe::App for KdiffApp {
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
     }
+}
+
+
+fn rows_of(mirror: &Mirror, document: Document) -> Option<Rows<'_>> {
+    match document {
+        Document::D => mirror.output().map(|_| Rows::Mapped(mirror.output_rows())),
+        document => {
+            let text = mirror.document(document.clone())?;
+            Some(mirror.rows(document).map_or(Rows::PerLine(text.line_count()), Rows::Mapped))
+        }
+    }
+}
+
+
+fn text_end(lines: Lines<'_>) -> Position {
+    editing::move_caret(lines, Position::default(), Motion::DocumentEnd)
+}
+
+
+/// Moves the caret. Up, Down, PageUp and PageDown go row by row, so the caret can stop on void rows; other motions work on lines and leave voids.
+fn move_by_rows(lines: Lines<'_>, rows: Rows<'_>, caret: Caret, motion: Motion, extend: bool) -> (Cursor, Option<usize>) {
+    let delta = match motion {
+        Motion::Up => -1,
+        Motion::Down => 1,
+        Motion::PageUp(page) => -(page as isize),
+        Motion::PageDown(page) => page as isize,
+        _ => return (editing::move_cursor(lines, caret.cursor, motion, extend), None),
+    };
+    if rows.len() == 0 {
+        return (editing::move_cursor(lines, caret.cursor, motion, extend), None);
+    }
+    let target = rows::step_row(text_view::caret_row(rows, caret), delta, rows.len());
+    let (position, void_row) = rows.caret_at_row(target, caret.cursor.head.column, text_end(lines));
+    let head = editing::clamp(lines, position);
+    let cursor = if extend { Cursor { anchor: caret.cursor.anchor, head } } else { Cursor::at(head) };
+    (cursor, void_row)
+}
+
+
+fn navigation_noun(to: Navigation) -> &'static str {
+    match to {
+        Navigation::PreviousDifference => "previous difference",
+        Navigation::NextDifference => "next difference",
+        Navigation::PreviousConflict => "previous conflict",
+        Navigation::NextConflict => "next conflict",
+    }
+}
+
+
+/// A small rounded square, hatched like void space; filled while void space is shown.
+fn paint_void_toggle(ui: &egui::Ui, rect: egui::Rect, on: bool, enabled: bool, hovered: bool) {
+    let palette = theme::palette_of(ui);
+    let radius = theme::corner_radius_of(ui).max(3);
+    let visuals = ui.visuals();
+    if on || hovered {
+        let fill = if on { visuals.selection.bg_fill } else { visuals.widgets.hovered.weak_bg_fill };
+        ui.painter().rect_filled(rect, radius, fill);
+    }
+    let square = egui::Rect::from_center_size(rect.center(), egui::vec2(VOID_TOGGLE_SIZE, VOID_TOGGLE_SIZE) * 0.7);
+    let stroke_color = if enabled { palette.text } else { palette.weak_text.gamma_multiply(0.5) };
+    let clip = ui.painter().with_clip_rect(square);
+    let spacing = 3.0;
+    let mut sum = square.left() + square.top() - square.height();
+    while sum < square.right() + square.bottom() {
+        clip.line_segment([egui::pos2(sum - square.bottom(), square.bottom()), egui::pos2(sum - square.top(), square.top())], egui::Stroke::new(1.0, stroke_color));
+        sum += spacing;
+    }
+    ui.painter().rect_stroke(square, radius.min(4), egui::Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
 }
 
 
@@ -910,5 +1112,40 @@ mod tests {
         assert_eq!(edit_key_for(Key::Delete, Modifiers::COMMAND), Some(EditKey::DeleteWordRight));
         assert_eq!(edit_key_for(Key::Enter, Modifiers::ALT), None);
         assert_eq!(edit_key_for(Key::S, Modifiers::NONE), None);
+    }
+
+
+    /// Lines "ab" and "c" of A, with a void row between them.
+    fn rows_with_a_void() -> rows::RowMap {
+        use kdiff4_protocol::engine::{Comparison, HunkChange, Region, RegionStatus, Row};
+        let region = |hunk: std::ops::Range<usize>, line: Option<usize>| Region { hunks: vec![hunk.clone(), hunk], status: RegionStatus::Diff(HunkChange::Unchanged), rows: vec![Row { lines: vec![line, line] }] };
+        let comparison = Comparison { regions: vec![region(0..1, Some(0)), region(1..1, None), region(1..2, Some(1))] };
+        rows::RowMap::for_source(&comparison, 0, 2, None)
+    }
+
+
+    #[test]
+    fn vertical_moves_stop_on_void_rows() {
+        let map = rows_with_a_void();
+        let rows = Rows::Mapped(&map);
+        let ranges = [0..2, 3..4];
+        let lines = Lines { text: "ab\nc", ranges: &ranges };
+        let at = |line, column| Position { line, column };
+        let start = Caret { cursor: Cursor::at(at(0, 2)), void_row: None };
+        let (cursor, void_row) = move_by_rows(lines, rows, start, Motion::Down, false);
+        assert_eq!((cursor, void_row), (Cursor::at(at(1, 0)), Some(1)));
+        let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor, void_row }, Motion::Down, false);
+        assert_eq!((cursor, void_row), (Cursor::at(at(1, 0)), None));
+        let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor, void_row }, Motion::PageUp(5), true);
+        assert_eq!((cursor, void_row), (Cursor { anchor: at(1, 0), head: at(0, 0) }, None));
+        let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor: Cursor::at(at(0, 1)), void_row: Some(1) }, Motion::Right, false);
+        assert_eq!((cursor, void_row), (Cursor::at(at(0, 2)), None));
+    }
+
+
+    #[test]
+    fn missing_navigation_targets_are_named() {
+        assert_eq!(navigation_noun(Navigation::NextConflict), "next conflict");
+        assert_eq!(navigation_noun(Navigation::PreviousDifference), "previous difference");
     }
 }

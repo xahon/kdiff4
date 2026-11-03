@@ -178,6 +178,18 @@ pub fn auto_choice(status: &RegionStatus) -> Choice {
 }
 
 
+/// A region whose hunks are not all equal.
+pub fn is_difference(status: &RegionStatus) -> bool {
+    !matches!(status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged))
+}
+
+
+/// A region auto-resolve leaves unresolved, whatever D holds for it now.
+pub fn is_conflict(status: &RegionStatus) -> bool {
+    auto_choice(status) == Choice::Unresolved
+}
+
+
 /// Rejects choices of D, of documents the session doesn't have, and of one hunk twice.
 pub fn validate_choice(choice: &Choice, source_count: usize) -> Result<(), CoreError> {
     let Choice::Hunks(documents) = choice else {

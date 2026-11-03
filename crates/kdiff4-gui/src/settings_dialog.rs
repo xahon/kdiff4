@@ -1,11 +1,13 @@
 use egui::{ComboBox, DragValue, RichText, Ui};
+use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
-use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MIN_FONT_SIZE, ViewConfig};
+use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MIN_FONT_SIZE, ViewConfig};
 use crate::fonts::MonospaceFamily;
 use crate::theme;
 
 
 const BUILTIN_FONT_LABEL: &str = "Built-in (Hack)";
+const MAX_CHAR_DIFF_LINE_LIMIT: usize = 1_000_000;
 const PREVIEW_LINES: [&str; 3] = ["fn main() { println!(\"Hello, world!\"); }", "0O 1lI| {}[]() <=> != -> 'x' \"y\"", "The quick brown fox jumps over the lazy dog."];
 
 
@@ -16,17 +18,44 @@ pub enum SettingsAction {
 }
 
 
-/// Edits a draft of the view settings. The app previews the draft live and keeps or reverts it on close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Font,
+    View,
+    Comparison,
+}
+
+
+/// Edits a draft of the view settings and, while a session is open, of its comparison options. The app previews the view draft live and keeps or reverts it on close; comparison options are applied on OK only, since they rebuild D.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsDialog {
     original: ViewConfig,
     draft: ViewConfig,
+    /// The session's options and their draft; `None` without a session.
+    comparison: Option<(ComparisonOptions, ComparisonOptions)>,
+    tab: Tab,
 }
 
 
 impl SettingsDialog {
-    pub fn new(view: &ViewConfig) -> SettingsDialog {
-        SettingsDialog { original: view.clone(), draft: view.clone() }
+    pub fn new(view: &ViewConfig, comparison: Option<&ComparisonOptions>) -> SettingsDialog {
+        SettingsDialog { original: view.clone(), draft: view.clone(), comparison: comparison.map(|options| (options.clone(), options.clone())), tab: Tab::Font }
+    }
+
+
+    /// The comparison options to apply on OK, if the user changed them.
+    pub fn changed_comparison(&self) -> Option<&ComparisonOptions> {
+        self.comparison
+            .as_ref()
+            .filter(|(original, draft)| original != draft)
+            .map(|(_, draft)| draft)
+    }
+
+
+    /// Follows the toolbar's void space toggle, which also works while the dialog is open.
+    pub fn set_align_output(&mut self, align: bool) {
+        self.original.align_output = align;
+        self.draft.align_output = align;
     }
 
 
@@ -42,6 +71,9 @@ impl SettingsDialog {
 
     pub fn reset_to_defaults(&mut self) {
         self.draft = ViewConfig::default();
+        if let Some((_, draft)) = self.comparison.as_mut() {
+            *draft = ComparisonOptions::default();
+        }
     }
 
 
@@ -50,34 +82,17 @@ impl SettingsDialog {
         let mut action = None;
         ui.heading("Settings");
         ui.add_space(4.0);
-        egui::Grid::new("settings_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Font:");
-            ui.horizontal(|ui| {
-                self.font_family_combo(ui, families);
-                if families.is_none() {
-                    ui.spinner();
-                    ui.label(RichText::new("Looking for monospace fonts...").weak());
-                }
-            });
-            ui.end_row();
-
-            ui.label("Size:");
-            ui.add(DragValue::new(&mut self.draft.font_size).range(MIN_FONT_SIZE..=MAX_FONT_SIZE).speed(0.25).max_decimals(1).suffix(" pt"));
-            ui.end_row();
-
-            ui.label("Corner radius:");
-            ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px"));
-            ui.end_row();
-
-            ui.label("Rendering:");
-            ui.vertical(|ui| {
-                ui.checkbox(&mut self.draft.font_hinting, "Hinting").on_hover_text("Snap glyphs to the pixel grid: sharper at small sizes, slightly distorted shapes.");
-                ui.checkbox(&mut self.draft.subpixel_positioning, "Subpixel positioning").on_hover_text("Place glyphs at fractional pixel offsets: more even spacing, slightly blurrier.");
-            });
-            ui.end_row();
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, Tab::Font, "Font");
+            ui.selectable_value(&mut self.tab, Tab::View, "View");
+            ui.selectable_value(&mut self.tab, Tab::Comparison, "Comparison");
         });
-        ui.add_space(8.0);
-        show_preview(ui);
+        ui.separator();
+        match self.tab {
+            Tab::Font => self.font_tab(ui, families),
+            Tab::View => self.view_tab(ui),
+            Tab::Comparison => self.comparison_tab(ui),
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui.button("OK").clicked() {
@@ -94,6 +109,87 @@ impl SettingsDialog {
     }
 
 
+    fn font_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
+        egui::Grid::new("settings_font_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Font:");
+            ui.horizontal(|ui| {
+                self.font_family_combo(ui, families);
+                if families.is_none() {
+                    ui.spinner();
+                    ui.label(RichText::new("Looking for monospace fonts...").weak());
+                }
+            });
+            ui.end_row();
+
+            ui.label("Size:");
+            ui.add(DragValue::new(&mut self.draft.font_size).range(MIN_FONT_SIZE..=MAX_FONT_SIZE).speed(0.25).max_decimals(1).suffix(" pt"));
+            ui.end_row();
+
+            ui.label("Rendering:");
+            ui.vertical(|ui| {
+                ui.checkbox(&mut self.draft.font_hinting, "Hinting").on_hover_text("Snap glyphs to the pixel grid: sharper at small sizes, slightly distorted shapes.");
+                ui.checkbox(&mut self.draft.subpixel_positioning, "Subpixel positioning").on_hover_text("Place glyphs at fractional pixel offsets: more even spacing, slightly blurrier.");
+            });
+            ui.end_row();
+        });
+        ui.add_space(8.0);
+        show_preview(ui);
+    }
+
+
+    fn view_tab(&mut self, ui: &mut Ui) {
+        egui::Grid::new("settings_view_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Corner radius:");
+            ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px"));
+            ui.end_row();
+
+            ui.label("Panes:");
+            ui.vertical(|ui| {
+                ui.checkbox(&mut self.draft.show_line_numbers, "Line numbers");
+                ui.checkbox(&mut self.draft.show_gutters, "Region gutters in A, B and C").on_hover_text("A bordered block left of each region. D always shows where each line came from.");
+                ui.checkbox(&mut self.draft.align_output, "Void space in the output pane").on_hover_text("Line D up with A, B and C: every region gets the same rows in every pane, padded with void space.");
+            });
+            ui.end_row();
+
+            ui.label("Context above jumps:");
+            ui.add(DragValue::new(&mut self.draft.jump_context_lines).range(0..=MAX_JUMP_CONTEXT_LINES).speed(0.1).suffix(" lines")).on_hover_text("Lines kept above a difference or conflict that navigation jumps to.");
+            ui.end_row();
+
+            ui.label("Current region:");
+            ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color).on_hover_text("The wash over the rows of the region navigation is at.");
+            ui.end_row();
+        });
+    }
+
+
+    fn comparison_tab(&mut self, ui: &mut Ui) {
+        let Some((_, draft)) = self.comparison.as_mut() else {
+            ui.label(RichText::new("Open files to change how they are compared.").weak());
+            return;
+        };
+        egui::Grid::new("settings_comparison_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Algorithm:");
+            ComboBox::from_id_salt("diff_algorithm").selected_text(algorithm_name(draft.algorithm)).show_ui(ui, |ui| {
+                for algorithm in [DiffAlgorithm::Histogram, DiffAlgorithm::Myers] {
+                    ui.selectable_value(&mut draft.algorithm, algorithm, algorithm_name(algorithm));
+                }
+            });
+            ui.end_row();
+
+            ui.label("");
+            let myers = draft.algorithm == DiffAlgorithm::Myers;
+            ui.add_enabled(myers, egui::Checkbox::new(&mut draft.try_hard, "Minimal diff")).on_hover_text("Myers only: find the smallest diff, which can be slow on large files.");
+            ui.end_row();
+
+            ui.label("Character diff limit:");
+            ui.add(DragValue::new(&mut draft.char_diff_line_limit).range(0..=MAX_CHAR_DIFF_LINE_LIMIT).speed(10.0).suffix(" chars")).on_hover_text("Longer lines are marked as different as a whole.");
+            ui.end_row();
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("Applied on OK. The files are compared again and D is rebuilt: its choices, edits and undo history are dropped.").weak());
+    }
+
+
     fn font_family_combo(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
         let selected = self.draft.font_family.clone().unwrap_or_else(|| BUILTIN_FONT_LABEL.to_string());
         ComboBox::from_id_salt("font_family").selected_text(selected).width(260.0).height(400.0).show_ui(ui, |ui| {
@@ -103,6 +199,14 @@ impl SettingsDialog {
                 ui.selectable_value(&mut self.draft.font_family, Some(name.clone()), name);
             }
         });
+    }
+}
+
+
+fn algorithm_name(algorithm: DiffAlgorithm) -> &'static str {
+    match algorithm {
+        DiffAlgorithm::Histogram => "Histogram",
+        DiffAlgorithm::Myers => "Myers",
     }
 }
 
@@ -150,17 +254,40 @@ mod tests {
 
     #[test]
     fn new_dialog_starts_from_current_view() {
-        let view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.0, font_hinting: false, subpixel_positioning: true, corner_radius: 4 };
-        let dialog = SettingsDialog::new(&view);
+        let view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.0, font_hinting: false, subpixel_positioning: true, corner_radius: 4, ..ViewConfig::default() };
+        let dialog = SettingsDialog::new(&view, None);
         assert_eq!(dialog.original(), &view);
         assert_eq!(dialog.draft(), &view);
+        assert_eq!(dialog.changed_comparison(), None);
+    }
+
+
+    #[test]
+    fn comparison_changes_are_reported_and_reset() {
+        let options = ComparisonOptions { algorithm: DiffAlgorithm::Myers, ..ComparisonOptions::default() };
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), Some(&options));
+        assert_eq!(dialog.changed_comparison(), None);
+        if let Some((_, draft)) = dialog.comparison.as_mut() {
+            draft.try_hard = true;
+        }
+        assert_eq!(dialog.changed_comparison().map(|options| options.try_hard), Some(true));
+        dialog.reset_to_defaults();
+        assert_eq!(dialog.changed_comparison(), Some(&ComparisonOptions::default()));
+    }
+
+
+    #[test]
+    fn toolbar_toggle_reaches_the_open_dialog() {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
+        dialog.set_align_output(true);
+        assert!(dialog.original().align_output && dialog.draft().align_output);
     }
 
 
     #[test]
     fn reset_changes_only_the_draft() {
-        let view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 20.0, font_hinting: false, subpixel_positioning: false, corner_radius: 9 };
-        let mut dialog = SettingsDialog::new(&view);
+        let view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 20.0, font_hinting: false, subpixel_positioning: false, corner_radius: 9, ..ViewConfig::default() };
+        let mut dialog = SettingsDialog::new(&view, None);
         dialog.reset_to_defaults();
         assert_eq!(dialog.draft(), &ViewConfig::default());
         assert_eq!(dialog.original(), &view);

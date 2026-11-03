@@ -2,11 +2,11 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, RegionStatus};
-use kdiff4_protocol::{Change, Choice, Delta, Document, DocumentText, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot};
+use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, RegionStatus};
+use kdiff4_protocol::{Change, Choice, CurrentRegion, Delta, Document, DocumentText, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot};
 
 use crate::editing::{self, Edit, Lines};
-use crate::rows::RowMap;
+use crate::rows::{self, RowMap};
 
 
 /// The client's copy of D.
@@ -59,6 +59,10 @@ pub struct Mirror {
     merge: Vec<RegionMerge>,
     /// D's rows: its lines and the placeholders of unresolved conflicts.
     output_rows: RowMap,
+    /// Every pane gives each region the same number of rows, padding with voids, so D lines up with the source panes.
+    aligned: bool,
+    options: ComparisonOptions,
+    current_region: Option<usize>,
     /// Requests of edits applied locally that the host has not confirmed yet, oldest first.
     pending_edits: VecDeque<RequestId>,
     awaiting_resync: bool,
@@ -66,14 +70,56 @@ pub struct Mirror {
 
 
 impl Mirror {
-    pub fn from_snapshot(snapshot: Snapshot) -> Mirror {
+    /// `aligned` lines D up with the source panes; see `set_aligned`.
+    pub fn from_snapshot(snapshot: Snapshot, aligned: bool) -> Mirror {
         let output = snapshot.output.map(|output| {
             let lines = editing::editor_lines(&output.text);
             OutputMirror { path: output.path, text: output.text, lines, modified: output.modified }
         });
-        let row_maps = row_maps(&snapshot.documents, &snapshot.comparison);
-        let output_rows = RowMap::for_output(&snapshot.merge, output.as_ref().map_or(0, |output| output.lines.len()));
-        Mirror { revision: snapshot.revision, documents: snapshot.documents, output, comparison: snapshot.comparison, row_maps, merge: snapshot.merge, output_rows, pending_edits: VecDeque::new(), awaiting_resync: false }
+        let mut mirror = Mirror { revision: snapshot.revision, documents: snapshot.documents, output, comparison: snapshot.comparison, row_maps: Vec::new(), merge: snapshot.merge, output_rows: RowMap::default(), aligned, options: snapshot.options, current_region: snapshot.current_region, pending_edits: VecDeque::new(), awaiting_resync: false };
+        mirror.refresh_rows();
+        mirror
+    }
+
+
+    /// Lines D up with the source panes, or lets it have just its own rows. Only a merge can line up.
+    pub fn set_aligned(&mut self, aligned: bool) {
+        if self.aligned != aligned {
+            self.aligned = aligned;
+            self.refresh_rows();
+        }
+    }
+
+
+    /// Whether D shares the source panes' rows, and so their scrolling.
+    pub fn is_aligned(&self) -> bool {
+        self.aligned && self.is_merge() && self.merge.len() == self.comparison.regions.len()
+    }
+
+
+    pub fn options(&self) -> &ComparisonOptions {
+        &self.options
+    }
+
+
+    pub fn current_region(&self) -> Option<usize> {
+        self.current_region.clone()
+    }
+
+
+    /// The revision navigation commands are based on: like choices, region indices must be known.
+    pub fn navigation_base(&self) -> Option<Revision> {
+        (self.pending_edits.is_empty() && !self.awaiting_resync).then(|| self.revision.clone())
+    }
+
+
+    /// Applies a current-region event; false when it refers to another revision, so it is dropped.
+    pub fn apply_current_region(&mut self, current: &CurrentRegion) -> bool {
+        let fits = current.revision == self.revision && current.region.is_none_or(|region| region < self.comparison.regions.len());
+        if fits {
+            self.current_region = current.region.clone();
+        }
+        fits
     }
 
 
@@ -138,24 +184,7 @@ impl Mirror {
     }
 
 
-    /// The region holding `line` of `document`: for A, B and C by its hunks, for D by the lines each region contributes.
-    pub fn region_at(&self, document: Document, line: usize) -> Option<usize> {
-        if document == Document::D {
-            let mut end = 0;
-            return self.merge.iter().position(|state| {
-                end += state.output_lines;
-                line < end
-            });
-        }
-        let index = self.documents.iter().position(|text| text.document == document)?;
-        self.comparison
-            .regions
-            .iter()
-            .position(|region| region.hunks.get(index).is_some_and(|hunk| hunk.contains(&line)))
-    }
-
-
-    /// The choice after toggling `document` in region `region`: added at the end, or removed if it is already chosen. An unresolved or hand-edited region starts from no choice.
+    /// The choice after toggling `document` in region `region`: added at the end, or removed if it is already chosen. An unresolved or hand-edited region starts from no choice, and removing the last chosen hunk makes the region unresolved again.
     pub fn toggled_choice(&self, region: usize, document: Document) -> Option<Choice> {
         let state = self.merge.get(region)?;
         let mut documents = match &state.choice {
@@ -168,7 +197,7 @@ impl Mirror {
             }
             None => documents.push(document),
         }
-        Some(Choice::Hunks(documents))
+        if documents.is_empty() { Some(Choice::Unresolved) } else { Some(Choice::Hunks(documents)) }
     }
 
 
@@ -181,15 +210,27 @@ impl Mirror {
         let range = update.at..update.at + update.removed;
         self.comparison.regions.splice(range.clone(), update.regions);
         self.merge.splice(range, update.merge);
-        self.row_maps = row_maps(&self.documents, &self.comparison);
-        self.refresh_output_rows();
+        self.current_region = Some(update.at);
+        self.refresh_rows();
         true
+    }
+
+
+    fn refresh_rows(&mut self) {
+        let heights = self.is_aligned().then(|| rows::aligned_heights(&self.comparison.regions, &self.merge));
+        self.row_maps = self.documents
+            .iter()
+            .enumerate()
+            .map(|(index, text)| RowMap::for_source(&self.comparison, index, text.line_count(), heights.as_deref()))
+            .collect();
+        self.refresh_output_rows();
     }
 
 
     fn refresh_output_rows(&mut self) {
         let line_count = self.output.as_ref().map_or(0, |output| output.lines.len());
-        self.output_rows = RowMap::for_output(&self.merge, line_count);
+        let heights = self.is_aligned().then(|| rows::aligned_heights(&self.comparison.regions, &self.merge));
+        self.output_rows = RowMap::for_output(&self.merge, &self.comparison.regions, line_count, heights.as_deref());
     }
 
 
@@ -322,20 +363,11 @@ impl Mirror {
 }
 
 
-fn row_maps(documents: &[DocumentText], comparison: &Comparison) -> Vec<RowMap> {
-    documents
-        .iter()
-        .enumerate()
-        .map(|(index, text)| RowMap::for_source(comparison, index, text.line_count()))
-        .collect()
-}
-
-
 #[cfg(test)]
 mod tests {
     use kdiff4_protocol::engine::{EngineCapabilities, Region, Row};
 
-    use crate::rows::{PaneRow, Rows, Shade};
+    use crate::rows::{Mark, PaneRow, Rows, Shade};
     use kdiff4_protocol::{EolStyle, OutputDocument};
 
     use super::*;
@@ -349,7 +381,7 @@ mod tests {
 
     fn merge_mirror(text: &str) -> Mirror {
         let output = OutputDocument { path: Some(PathBuf::from("out.txt")), text: text.to_string(), modified: false };
-        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new() })
+        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None }, false)
     }
 
 
@@ -371,8 +403,8 @@ mod tests {
     /// A 2-way merge of "a" and "b" with one modified region, unresolved, and D empty.
     fn conflict_mirror() -> Mirror {
         let output = OutputDocument { path: None, text: String::new(), modified: false };
-        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: vec![unresolved()] };
-        Mirror::from_snapshot(snapshot)
+        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: vec![unresolved()], options: ComparisonOptions::default(), current_region: None };
+        Mirror::from_snapshot(snapshot, false)
     }
 
 
@@ -382,8 +414,37 @@ mod tests {
         assert_eq!(mirror.unresolved_count(), 1);
         assert_eq!(mirror.difference_summary(), "1 difference; 1 unresolved");
         let rows = Rows::Mapped(mirror.output_rows());
-        assert_eq!(rows.row(0), Some(PaneRow { line: None, shade: Some(Shade::Conflict) }));
-        assert_eq!(rows.row(1), Some(PaneRow { line: Some(0), shade: None }));
+        assert_eq!(rows.row(0), Some(PaneRow { shade: Some(Shade::Conflict), region: Some(0), conflict_marker: true, ..PaneRow::default() }));
+        assert_eq!(rows.row(1), Some(PaneRow { line: Some(0), ..PaneRow::default() }));
+    }
+
+
+    #[test]
+    fn aligned_d_shares_the_source_rows() {
+        let mut mirror = conflict_mirror();
+        assert!(!mirror.is_aligned());
+        mirror.set_aligned(true);
+        assert!(mirror.is_aligned());
+        assert_eq!(Rows::Mapped(mirror.output_rows()).region_start(0), Rows::Mapped(mirror.rows(Document::A).unwrap()).region_start(0));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0).unwrap().conflict_marker, true);
+        let diff = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None }, true);
+        assert!(!diff.is_aligned());
+    }
+
+
+    #[test]
+    fn current_region_follows_navigation_and_changes() {
+        let mut mirror = conflict_mirror();
+        assert_eq!(mirror.current_region(), None);
+        assert!(mirror.apply_current_region(&CurrentRegion { revision: Revision(1), region: Some(0), cause: None }));
+        assert_eq!(mirror.current_region(), Some(0));
+        assert!(!mirror.apply_current_region(&CurrentRegion { revision: Revision(2), region: None, cause: None }));
+        assert!(!mirror.apply_current_region(&CurrentRegion { revision: Revision(1), region: Some(5), cause: None }));
+        assert_eq!(mirror.current_region(), Some(0));
+        assert!(mirror.apply_current_region(&CurrentRegion { revision: Revision(1), region: None, cause: None }));
+        let update = MergeUpdate { at: 0, removed: 1, regions: comparison(&[RegionStatus::Diff(HunkChange::Modified)]).regions, merge: vec![RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 1 }] };
+        mirror.apply_delta(delta(2, None, Change::OutputEdited { range: 0..0, text: "b\n".to_string(), modified: true, merge: update }));
+        assert_eq!(mirror.current_region(), Some(0));
     }
 
 
@@ -395,9 +456,8 @@ mod tests {
         assert_eq!(mirror.output().unwrap().text, "b\n");
         assert_eq!(mirror.unresolved_count(), 0);
         assert_eq!(mirror.difference_summary(), "1 difference; nothing unresolved");
-        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), shade: None }));
-        assert_eq!(mirror.region_at(Document::D, 0), Some(0));
-        assert_eq!(mirror.region_at(Document::D, 1), None);
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), region: Some(0), mark: Some(Mark::Source(Document::B)), ..PaneRow::default() }));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).region_of_row(1), None);
     }
 
 
@@ -412,10 +472,10 @@ mod tests {
     #[test]
     fn regions_are_found_by_line() {
         let mirror = conflict_mirror();
-        assert_eq!(mirror.region_at(Document::A, 0), Some(0));
-        assert_eq!(mirror.region_at(Document::B, 0), Some(0));
-        assert_eq!(mirror.region_at(Document::B, 5), None);
-        assert_eq!(mirror.region_at(Document::C, 0), None);
+        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).region_of_row(0), Some(0));
+        assert_eq!(Rows::Mapped(mirror.rows(Document::B).unwrap()).region_of_row(0), Some(0));
+        assert_eq!(Rows::Mapped(mirror.rows(Document::B).unwrap()).region_of_row(5), None);
+        assert!(mirror.rows(Document::C).is_none());
     }
 
 
@@ -425,7 +485,8 @@ mod tests {
         assert_eq!(mirror.toggled_choice(0, Document::B), Some(Choice::Hunks(vec![Document::B])));
         mirror.merge[0] = RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 1 };
         assert_eq!(mirror.toggled_choice(0, Document::A), Some(Choice::Hunks(vec![Document::B, Document::A])));
-        assert_eq!(mirror.toggled_choice(0, Document::B), Some(Choice::Hunks(Vec::new())));
+        mirror.merge[0] = RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 1 };
+        assert_eq!(mirror.toggled_choice(0, Document::B), Some(Choice::Unresolved));
         mirror.merge[0].edited = true;
         assert_eq!(mirror.toggled_choice(0, Document::B), Some(Choice::Hunks(vec![Document::B])));
         assert_eq!(mirror.toggled_choice(4, Document::B), None);
@@ -462,10 +523,10 @@ mod tests {
 
     #[test]
     fn snapshot_comparison_is_kept() {
-        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: Vec::new() };
-        let mirror = Mirror::from_snapshot(snapshot);
+        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None };
+        let mirror = Mirror::from_snapshot(snapshot, false);
         assert_eq!(mirror.comparison(), &comparison(&[RegionStatus::Diff(HunkChange::Modified)]));
-        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), shade: Some(Shade::Modified) }));
+        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), shade: Some(Shade::Modified), region: Some(0), ..PaneRow::default() }));
         assert!(mirror.rows(Document::C).is_none());
     }
 
@@ -595,7 +656,7 @@ mod tests {
 
     #[test]
     fn diff_mirror_has_no_output_and_rejects_edits() {
-        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new() });
+        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None }, false);
         assert!(!mirror.is_merge());
         assert!(mirror.apply_local_edit(&Edit { range: 0..0, text: "x".to_string() }).is_none());
         assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputPathChanged(None))), DeltaOutcome::NeedsResync);

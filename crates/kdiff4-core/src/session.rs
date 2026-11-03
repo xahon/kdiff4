@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, MergeStatus, Progress, Region, RegionStatus, SourceLines, run_comparison};
-use kdiff4_protocol::{Change, Choice, Document, DocumentText, EolStyle, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
+use kdiff4_protocol::{Change, Choice, Document, DocumentText, EolStyle, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
 
 use crate::error::CoreError;
 use crate::merge::{self, Merge, MergeStep, RegionState};
@@ -55,6 +55,8 @@ pub struct Session {
     options: ComparisonOptions,
     merge: Merge,
     engine: EngineCapabilities,
+    /// The region navigation is at. Changes of D make their region current.
+    current: Option<usize>,
 }
 
 
@@ -84,7 +86,7 @@ impl Session {
         } else {
             (Merge::without_output(comparison.regions), None)
         };
-        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities() })
+        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None })
     }
 
 
@@ -107,7 +109,12 @@ impl Session {
             .as_ref()
             .map(|output| OutputDocument { path: output.path.clone(), text: output.text.clone(), modified: output.history.is_modified() });
         let comparison = Comparison { regions: self.merge.regions().to_vec() };
-        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges() }
+        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone() }
+    }
+
+
+    pub fn current_region(&self) -> Option<usize> {
+        self.current.clone()
     }
 
 
@@ -127,7 +134,63 @@ impl Session {
             }
         };
         self.sources[index].path = path.to_path_buf();
+        self.rebuild(comparison, engine);
+        Ok(())
+    }
+
+
+    /// Recomputes the regions and rows with `options` and rebuilds D from them, like a reload. On failure the session is unchanged.
+    pub fn set_comparison_options(&mut self, options: ComparisonOptions, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
+        let comparison = compare(&self.sources, engine, &options)?;
+        self.options = options;
+        self.rebuild(comparison, engine);
+        Ok(())
+    }
+
+
+    /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. `Ok(None)` when there is none; the current region stays.
+    pub fn navigate(&mut self, base: &Revision, from: Option<usize>, to: Navigation) -> Result<Option<usize>, CoreError> {
+        self.check_base(base)?;
+        let regions = self.merge.regions();
+        let count = regions.len();
+        if let Some(index) = from
+            && index >= count
+        {
+            return Err(CoreError::NoSuchRegion { index, count });
+        }
+        let from = from.or(self.current.clone()).filter(|index| *index < count);
+        let wanted = |index: &usize| match to {
+            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status),
+            Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
+        };
+        let found = match to {
+            Navigation::NextDifference | Navigation::NextConflict => (from.map_or(0, |index| index + 1)..count).find(wanted),
+            Navigation::PreviousDifference | Navigation::PreviousConflict => (0..from.unwrap_or(count)).rev().find(wanted),
+        };
+        if found.is_some() {
+            self.current = found.clone();
+        }
+        Ok(found)
+    }
+
+
+    pub fn set_current_region(&mut self, base: &Revision, region: Option<usize>) -> Result<(), CoreError> {
+        self.check_base(base)?;
+        let count = self.merge.regions().len();
+        if let Some(index) = region
+            && index >= count
+        {
+            return Err(CoreError::NoSuchRegion { index, count });
+        }
+        self.current = region;
+        Ok(())
+    }
+
+
+    /// Takes a new comparison: D is rebuilt from its regions, its choices and edits are dropped and its undo history starts over.
+    fn rebuild(&mut self, comparison: Comparison, engine: &dyn ComparisonEngine) {
         self.engine = engine.capabilities();
+        self.current = None;
         match self.output.as_mut() {
             Some(output) => {
                 let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&self.sources));
@@ -138,7 +201,6 @@ impl Session {
             None => self.merge = Merge::without_output(comparison.regions),
         }
         self.revision += 1;
-        Ok(())
     }
 
 
@@ -356,6 +418,7 @@ impl Session {
             None => false,
         };
         self.revision += 1;
+        self.current = Some(at.clone());
         Change::OutputEdited { range, text: inserted, modified, merge: self.merge.update(at, removed, added) }
     }
 }
@@ -890,6 +953,101 @@ mod tests {
         session.redo().unwrap();
         assert_eq!(output_text(&session), "s\nc\nb\nt\n");
         assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn navigation_finds_differences_and_conflicts() {
+        let dir = temp_dir("navigate");
+        let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
+        let base = session.revision();
+        assert_eq!(session.current_region(), None);
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), None);
+        assert_eq!(session.current_region(), Some(3));
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, Some(3), Navigation::PreviousConflict).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict).unwrap(), None);
+        assert_eq!(session.revision(), base);
+    }
+
+
+    #[test]
+    fn navigation_without_a_current_region_starts_at_the_ends() {
+        let dir = temp_dir("navigate-ends");
+        let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
+        let base = session.revision();
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference).unwrap(), Some(3));
+        session.set_current_region(&base, None).unwrap();
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousConflict).unwrap(), Some(3));
+    }
+
+
+    #[test]
+    fn navigation_counts_resolved_conflicts() {
+        let dir = temp_dir("navigate-resolved");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        assert_eq!(session.navigate(&session.revision(), Some(0), Navigation::NextConflict).unwrap(), Some(1));
+    }
+
+
+    #[test]
+    fn navigation_rejects_bad_requests() {
+        let dir = temp_dir("navigate-bad");
+        let mut session = merge_of(&dir, &["a"], &["b"], &["c"]);
+        let base = session.revision();
+        assert!(matches!(session.navigate(&Revision(9), None, Navigation::NextConflict), Err(CoreError::StaleRevision { .. })));
+        assert!(matches!(session.navigate(&base, Some(4), Navigation::NextConflict), Err(CoreError::NoSuchRegion { index: 4, count: 1 })));
+        assert!(matches!(session.set_current_region(&base, Some(1)), Err(CoreError::NoSuchRegion { index: 1, count: 1 })));
+        session.set_current_region(&base, Some(0)).unwrap();
+        assert_eq!(session.current_region(), Some(0));
+    }
+
+
+    #[test]
+    fn changes_of_d_and_their_undo_make_their_region_current() {
+        let dir = temp_dir("current-follows-changes");
+        let mut session = merge_of(&dir, &["a1", "s", "a2"], &["b1", "s", "b2"], &["c1", "s", "c2"]);
+        session.set_choice(&session.revision(), 2, Choice::Hunks(vec![Document::B])).unwrap();
+        assert_eq!(session.current_region(), Some(2));
+        session.set_choice(&session.revision(), 0, Choice::Hunks(vec![Document::C])).unwrap();
+        assert_eq!(session.current_region(), Some(0));
+        session.undo().unwrap();
+        assert_eq!(session.current_region(), Some(0));
+        session.undo().unwrap();
+        assert_eq!(session.current_region(), Some(2));
+        assert_eq!(session.snapshot().current_region, Some(2));
+    }
+
+
+    #[test]
+    fn comparison_options_recompute_and_rebuild_d() {
+        let dir = temp_dir("options");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        let revision = session.revision();
+        let options = ComparisonOptions { try_hard: true, ..ComparisonOptions::default() };
+        session.set_comparison_options(options.clone(), &BuiltinEngine).unwrap();
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.options, options);
+        assert_eq!(snapshot.current_region, None);
+        assert!(snapshot.revision.0 > revision.0);
+        assert_eq!(choices(&session)[1], Choice::Unresolved);
+        assert_eq!(session.undo().unwrap(), None);
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn failed_comparison_options_keep_the_session() {
+        let dir = temp_dir("options-fail");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        let before = session.snapshot();
+        assert!(session.set_comparison_options(ComparisonOptions { try_hard: true, ..ComparisonOptions::default() }, &FailingEngine).is_err());
+        assert_eq!(session.snapshot(), before);
     }
 
 

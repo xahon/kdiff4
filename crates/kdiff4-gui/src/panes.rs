@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use egui::{Align, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
+use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
 use kdiff4_protocol::Document;
 
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::rows::Rows;
-use crate::text_view::{self, PointerAction};
+use crate::text_view::{self, Caret, MarginKind, PointerAction, ViewStyle};
 use crate::theme::{self, Palette};
 
 
@@ -19,10 +19,10 @@ pub const DEFAULT_MERGE_FRACTION: f32 = 0.5;
 /// What the user did in the panes; the app turns these into caret moves and commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneAction {
-    /// The mouse button went down in a pane; `extend` (Shift) extends the selection there.
-    Press { document: Document, position: Position, extend: bool },
-    /// The button pressed in a pane is still held, over `Position`.
-    Drag(Document, Position),
+    /// The mouse button went down in a pane; `void_row` is the row when it went down on a void. `extend` (Shift) extends the selection there.
+    Press { document: Document, position: Position, void_row: Option<usize>, extend: bool },
+    /// The button pressed in a pane is still held, over `position`.
+    Drag { document: Document, position: Position, void_row: Option<usize> },
     SelectWord(Document, Position),
     SelectLine(Document, usize),
     /// Enter in a header path field, with the field's text.
@@ -36,6 +36,10 @@ pub enum PaneAction {
 pub struct PaneState {
     /// The one caret on screen, with its selection.
     pub caret: Option<(Document, Cursor)>,
+    /// The row of the caret when it sits on a void; its position is then the start of the line after the void.
+    pub void_row: Option<usize>,
+    /// A region to scroll every pane to on the next frame, with context rows above it.
+    pub jump: Option<usize>,
     /// Scroll the caret into view on the next frame.
     pub reveal_caret: bool,
     /// Rows that fit in the pane with the caret, as of the last frame.
@@ -51,7 +55,7 @@ pub struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0 }
+        PaneState { caret: None, void_row: None, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0 }
     }
 }
 
@@ -62,25 +66,52 @@ impl PaneState {
             .filter(|(caret_document, _)| *caret_document == document)
             .map(|(_, cursor)| cursor)
     }
+
+
+    /// Moves the caret; `void_row` is the row when it sits on a void.
+    pub fn set_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
+        self.caret = Some((document, cursor));
+        self.void_row = void_row;
+    }
 }
 
 
-/// Source panes side by side; for a merge, the merge pane below them, behind a splitter.
-pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState) -> Vec<PaneAction> {
+/// View settings the panes draw with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaneOptions {
+    pub line_numbers: bool,
+    pub gutters: bool,
+    pub current_region_color: Color32,
+    pub jump_context_rows: usize,
+}
+
+
+/// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
+pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = theme::palette_of(ui);
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows };
+    let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
+    let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
     egui::CentralPanel::default().show(ui, |ui| {
         let total = ui.available_size();
+        let shared = state.source_offset.clone();
+        let mut offsets = Vec::new();
         if mirror.output().is_none() {
-            source_columns(ui, palette, mirror, state, &mut actions);
-            return;
+            source_columns(ui, &source_style, mirror, state, &mut actions, &mut offsets);
+        } else {
+            let usable = (total.y - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
+            let merge_height = (usable * state.merge_fraction).round();
+            ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut offsets));
+            splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
+            ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut offsets));
         }
-        let usable = (total.y - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
-        let merge_height = (usable * state.merge_fraction).round();
-        ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, palette, mirror, state, &mut actions));
-        splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
-        ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, palette, mirror, state, &mut actions));
+        state.source_offset = next_shared_offset(shared.clone(), &offsets);
+        if state.source_offset != shared {
+            ui.ctx().request_repaint();
+        }
     });
+    state.jump = None;
     actions
 }
 
@@ -98,22 +129,17 @@ fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, frac
 }
 
 
-/// The source panes are forced to one scroll offset; the pane the user scrolled this frame, or the one that revealed the caret, sets it for the next.
-fn source_columns(ui: &mut Ui, palette: &Palette, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
+/// The source panes are forced to one scroll offset; the pane the user scrolled this frame, or the one that revealed the caret, sets it for the next. Each pushes its offset after this frame to `offsets`.
+fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, offsets: &mut Vec<f32>) {
     let count = mirror.documents().len().max(1);
     let shared = state.source_offset.clone();
-    let mut offsets = Vec::with_capacity(count);
     ui.columns(count, |columns| {
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines { text: &text.text, ranges: &text.lines };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
-            offsets.push(pane(column, palette, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), state, actions));
+            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), state, actions));
         }
     });
-    state.source_offset = next_shared_offset(shared, &offsets);
-    if state.source_offset != shared {
-        ui.ctx().request_repaint();
-    }
 }
 
 
@@ -126,30 +152,38 @@ fn next_shared_offset(shared: f32, offsets: &[f32]) -> f32 {
 }
 
 
-fn output_pane(ui: &mut Ui, palette: &Palette, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
+/// D scrolls on its own, unless it is lined up with the source panes: then it shares their offset.
+fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, offsets: &mut Vec<f32>) {
     if let Some(output) = mirror.output() {
         let lines = output.lines();
-        pane(ui, palette, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::Mapped(mirror.output_rows()), None, state, actions);
+        let aligned = mirror.is_aligned();
+        let offset = aligned.then(|| state.source_offset.clone());
+        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::Mapped(mirror.output_rows()), offset, state, actions);
+        if aligned {
+            offsets.push(after);
+        }
     }
 }
 
 
 /// Returns the pane's vertical scroll offset after this frame.
-fn pane(ui: &mut Ui, palette: &Palette, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
+fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
+    let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
         .show(ui, |ui| {
             header(ui, palette, radius, document.clone(), label, path, modified, state, actions);
             theme::pane_body_frame()
                 .show(ui, |ui| {
-                    let caret = state.caret_in(document.clone());
-                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), offset, palette);
+                    let caret = state.caret_in(document.clone()).map(|cursor| Caret { cursor, void_row: state.void_row.clone() });
+                    let jump_row = state.jump.and_then(|region| rows.region_start(region));
+                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), jump_row, offset, style);
                     if caret.is_some() {
                         state.page_rows = response.page_rows;
                     }
                     match response.pointer {
-                        Some(PointerAction::Press { position, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, extend }),
-                        Some(PointerAction::Drag(position)) => actions.push(PaneAction::Drag(document.clone(), position)),
+                        Some(PointerAction::Press { position, void_row, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, void_row, extend }),
+                        Some(PointerAction::Drag { position, void_row }) => actions.push(PaneAction::Drag { document: document.clone(), position, void_row }),
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         None => {}
