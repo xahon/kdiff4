@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
+use kdiff4_protocol::engine::EngineError;
 use kdiff4_protocol::{Document, ErrorKind, ProtocolError, Revision};
 use thiserror::Error;
 
@@ -25,14 +26,20 @@ pub enum CoreError {
     StaleRevision { base: Revision, current: Revision },
     #[error("the edit range {start}..{end} does not fit the output text")]
     InvalidRange { start: usize, end: usize },
+    #[error(transparent)]
+    Engine(#[from] EngineError),
 }
 
 
 impl From<CoreError> for ProtocolError {
     fn from(error: CoreError) -> Self {
+        if let CoreError::Engine(engine_error) = &error {
+            return ProtocolError::from(engine_error.clone());
+        }
         let kind = match &error {
             CoreError::Read { .. } | CoreError::Write { .. } => ErrorKind::Io,
             CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } => ErrorKind::InvalidRequest,
+            CoreError::Engine(_) => ErrorKind::Engine,
         };
         ProtocolError { kind, message: error.to_string() }
     }

@@ -98,6 +98,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::engine::{Comparison, EngineCapabilities};
     use crate::messages::{Event, OpenFiles, Response, Revision, Snapshot};
 
 
@@ -128,7 +129,7 @@ mod tests {
     fn client_receives_host_messages_in_order() {
         let (client, host) = in_process();
         assert_eq!(client.try_recv(), Ok(None));
-        let snapshot = HostMessage::Event(Event::Snapshot(Snapshot { revision: Revision(1), documents: Vec::new(), output: None }));
+        let snapshot = HostMessage::Event(Event::Snapshot(Snapshot { revision: Revision(1), documents: Vec::new(), output: None, comparison: Comparison::default(), engine: EngineCapabilities::default() }));
         host.send(snapshot.clone()).unwrap();
         host.send(ok_response(RequestId(1))).unwrap();
         assert_eq!(client.try_recv(), Ok(Some(snapshot)));

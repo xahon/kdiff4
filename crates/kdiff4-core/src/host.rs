@@ -3,6 +3,7 @@ use std::thread::{self, JoinHandle};
 
 use kdiff4_protocol::{Change, Command, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
 
+use crate::engine_registry::EngineRegistry;
 use crate::error::CoreError;
 use crate::session::Session;
 
@@ -16,10 +17,11 @@ pub fn spawn_host(endpoint: HostEndpoint) -> io::Result<JoinHandle<()>> {
 
 /// Handles requests in arrival order until the client disconnects.
 pub fn run_host(endpoint: HostEndpoint) {
+    let registry = EngineRegistry::default();
     let mut session: Option<Session> = None;
     while let Some(request) = endpoint.recv() {
         log::debug!("host: request {:?}", request.id);
-        let result = handle(&endpoint, &mut session, request.id.clone(), request.command);
+        let result = handle(&endpoint, &registry, &mut session, request.id.clone(), request.command);
         if let Err(error) = &result {
             log::warn!("host: request {:?} failed: {error}", request.id);
         }
@@ -32,7 +34,7 @@ pub fn run_host(endpoint: HostEndpoint) {
 
 
 /// Events are sent before the response, so a client sees the new state when its request completes. A disconnected client is noticed when the response is sent.
-fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId, command: Command) -> Result<(), ProtocolError> {
+fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Option<Session>, id: RequestId, command: Command) -> Result<(), ProtocolError> {
     let change = match command {
         Command::Undo => match active(session)?.undo()? {
             Some(change) => change,
@@ -43,7 +45,7 @@ fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId,
             None => return Ok(()),
         },
         Command::Open(files) => {
-            let opened = Session::open(&files)?;
+            let opened = Session::open(&files, registry.default_engine())?;
             log::info!("host: opened A {}, B {}, C {}, output {}", files.a.display(), files.b.display(), describe(files.c.as_deref()), describe(files.output.as_deref()));
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(opened.snapshot())));
             *session = Some(opened);
@@ -53,7 +55,7 @@ fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId,
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active(session)?.snapshot())));
             return Ok(());
         }
-        Command::LoadSource { document, path } => active(session)?.load_source(document, &path)?,
+        Command::LoadSource { document, path } => active(session)?.load_source(document, &path, registry.default_engine())?,
         Command::EditOutput(edit) => active(session)?.edit_output(&edit)?,
         Command::SetOutputPath(path) => active(session)?.set_output_path(path)?,
         Command::Save => active(session)?.save()?,
@@ -61,7 +63,7 @@ fn handle(endpoint: &HostEndpoint, session: &mut Option<Session>, id: RequestId,
     };
     let revision = active(session)?.revision();
     match &change {
-        Change::SourceReplaced(text) => log::info!("host: reloaded {} from {}", text.document.letter(), text.path.display()),
+        Change::SourceReplaced { text, .. } => log::info!("host: reloaded {} from {}", text.document.letter(), text.path.display()),
         Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
         Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
         Change::OutputEdited { range, text, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, revision {}", text.len(), revision.0),

@@ -2,9 +2,11 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, RegionStatus};
 use kdiff4_protocol::{Change, Delta, Document, DocumentText, OutputEdit, RequestId, Revision, Snapshot};
 
 use crate::editing::{self, Edit, Lines};
+use crate::rows::RowMap;
 
 
 /// The client's copy of D.
@@ -50,6 +52,9 @@ pub struct Mirror {
     revision: Revision,
     documents: Vec<DocumentText>,
     output: Option<OutputMirror>,
+    comparison: Comparison,
+    /// Per document, in `documents` order: its rows in the synchronized view.
+    row_maps: Vec<RowMap>,
     /// Requests of edits applied locally that the host has not confirmed yet, oldest first.
     pending_edits: VecDeque<RequestId>,
     awaiting_resync: bool,
@@ -62,7 +67,8 @@ impl Mirror {
             let lines = editing::editor_lines(&output.text);
             OutputMirror { path: output.path, text: output.text, lines, modified: output.modified }
         });
-        Mirror { revision: snapshot.revision, documents: snapshot.documents, output, pending_edits: VecDeque::new(), awaiting_resync: false }
+        let row_maps = row_maps(&snapshot.documents, &snapshot.comparison);
+        Mirror { revision: snapshot.revision, documents: snapshot.documents, output, comparison: snapshot.comparison, row_maps, pending_edits: VecDeque::new(), awaiting_resync: false }
     }
 
 
@@ -84,6 +90,14 @@ impl Mirror {
     }
 
 
+    pub fn rows(&self, document: Document) -> Option<&RowMap> {
+        self.documents
+            .iter()
+            .position(|text| text.document == document)
+            .and_then(|index| self.row_maps.get(index))
+    }
+
+
     pub fn output(&self) -> Option<&OutputMirror> {
         self.output.as_ref()
     }
@@ -91,6 +105,47 @@ impl Mirror {
 
     pub fn is_merge(&self) -> bool {
         self.output.is_some()
+    }
+
+
+    #[cfg(test)]
+    pub fn comparison(&self) -> &Comparison {
+        &self.comparison
+    }
+
+
+    /// For the status bar, e.g. "3 differences, 1 conflict (whitespace only)".
+    pub fn difference_summary(&self) -> String {
+        let changed = self.comparison
+            .regions
+            .iter()
+            .filter(|region| !matches!(region.status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged)))
+            .count();
+        let conflicts = self.comparison
+            .regions
+            .iter()
+            .filter(|region| matches!(region.status, RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict)))
+            .count();
+        let whitespace = self.comparison
+            .regions
+            .iter()
+            .filter(|region| region.status == RegionStatus::Merge(MergeStatus::WhitespaceConflict))
+            .count();
+        let mut summary = match changed {
+            0 => return "No differences".to_string(),
+            1 => "1 difference".to_string(),
+            count => format!("{count} differences"),
+        };
+        if conflicts > 0 {
+            let noun = if conflicts == 1 { "conflict" } else { "conflicts" };
+            summary.push_str(&format!(", {conflicts} {noun}"));
+        }
+        if whitespace == conflicts && whitespace > 0 {
+            summary.push_str(" (whitespace only)");
+        } else if whitespace > 0 {
+            summary.push_str(&format!(" ({whitespace} whitespace only)"));
+        }
+        summary
     }
 
 
@@ -144,8 +199,12 @@ impl Mirror {
         }
         let has_pending = !self.pending_edits.is_empty();
         match delta.change {
-            Change::SourceReplaced(text) => match self.documents.iter_mut().find(|existing| existing.document == text.document) {
-                Some(existing) => *existing = text,
+            Change::SourceReplaced { text, comparison } => match self.documents.iter_mut().find(|existing| existing.document == text.document) {
+                Some(existing) => {
+                    *existing = text;
+                    self.row_maps = row_maps(&self.documents, &comparison);
+                    self.comparison = comparison;
+                }
                 None => return DeltaOutcome::NeedsResync,
             },
             Change::OutputEdited { range, text, modified } => {
@@ -175,8 +234,20 @@ impl Mirror {
 }
 
 
+fn row_maps(documents: &[DocumentText], comparison: &Comparison) -> Vec<RowMap> {
+    documents
+        .iter()
+        .enumerate()
+        .map(|(index, text)| RowMap::for_source(comparison, index, text.line_count()))
+        .collect()
+}
+
+
 #[cfg(test)]
 mod tests {
+    use kdiff4_protocol::engine::{EngineCapabilities, Region, Row};
+
+    use crate::rows::{PaneRow, Rows, Shade};
     use kdiff4_protocol::{EolStyle, OutputDocument};
 
     use super::*;
@@ -190,12 +261,55 @@ mod tests {
 
     fn merge_mirror(text: &str) -> Mirror {
         let output = OutputDocument { path: Some(PathBuf::from("out.txt")), text: text.to_string(), modified: false };
-        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output) })
+        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: Comparison::default(), engine: EngineCapabilities::default() })
     }
 
 
     fn delta(revision: u64, cause: Option<u64>, change: Change) -> Delta {
         Delta { revision: Revision(revision), cause: cause.map(RequestId), change }
+    }
+
+
+    /// One single-row region per status; only the statuses matter here.
+    fn comparison(statuses: &[RegionStatus]) -> Comparison {
+        let regions = statuses
+            .iter()
+            .enumerate()
+            .map(|(index, status)| Region { hunks: vec![index..index + 1, index..index + 1], status: status.clone(), rows: vec![Row { lines: vec![Some(index), Some(index)] }] })
+            .collect();
+        Comparison { regions }
+    }
+
+
+    fn summary(statuses: &[RegionStatus]) -> String {
+        let mut mirror = merge_mirror("");
+        mirror.comparison = comparison(statuses);
+        mirror.difference_summary()
+    }
+
+
+    #[test]
+    fn snapshot_comparison_is_kept() {
+        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default() };
+        let mirror = Mirror::from_snapshot(snapshot);
+        assert_eq!(mirror.comparison(), &comparison(&[RegionStatus::Diff(HunkChange::Modified)]));
+        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), shade: Some(Shade::Modified) }));
+        assert!(mirror.rows(Document::C).is_none());
+    }
+
+
+    #[test]
+    fn difference_summaries() {
+        let unchanged = RegionStatus::Merge(MergeStatus::Unchanged);
+        let conflict = RegionStatus::Merge(MergeStatus::Conflict);
+        let whitespace = RegionStatus::Merge(MergeStatus::WhitespaceConflict);
+        assert_eq!(summary(&[]), "No differences");
+        assert_eq!(summary(&[RegionStatus::Diff(HunkChange::Unchanged)]), "No differences");
+        assert_eq!(summary(&[RegionStatus::Diff(HunkChange::Added), RegionStatus::Diff(HunkChange::Unchanged)]), "1 difference");
+        assert_eq!(summary(&[RegionStatus::Merge(MergeStatus::ChangedInB), unchanged, RegionStatus::Merge(MergeStatus::ChangedAlike)]), "2 differences");
+        assert_eq!(summary(&[conflict, unchanged, RegionStatus::Merge(MergeStatus::ChangedInC)]), "2 differences, 1 conflict");
+        assert_eq!(summary(&[conflict, conflict, whitespace]), "3 differences, 3 conflicts (1 whitespace only)");
+        assert_eq!(summary(&[whitespace]), "1 difference, 1 conflict (whitespace only)");
     }
 
 
@@ -247,8 +361,11 @@ mod tests {
         let mut mirror = merge_mirror("x");
         assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputEdited { range: 1..1, text: "y".to_string(), modified: true })), DeltaOutcome::Applied);
         assert_eq!(mirror.output().unwrap().text, "xy");
-        assert_eq!(mirror.apply_delta(delta(3, Some(5), Change::SourceReplaced(source(Document::B, "new")))), DeltaOutcome::Applied);
+        assert_eq!(mirror.apply_delta(delta(3, Some(5), Change::SourceReplaced { text: source(Document::B, "new"), comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]) })), DeltaOutcome::Applied);
         assert_eq!(mirror.document(Document::B).unwrap().text, "new");
+        assert_eq!(mirror.comparison(), &comparison(&[RegionStatus::Diff(HunkChange::Modified)]));
+        let rows = Rows::Mapped(mirror.rows(Document::B).unwrap());
+        assert_eq!(rows.row(0), Some(PaneRow { line: Some(0), shade: Some(Shade::Modified) }));
         assert_eq!(mirror.apply_delta(delta(4, Some(6), Change::OutputPathChanged(None))), DeltaOutcome::Applied);
         assert_eq!(mirror.output().unwrap().path, None);
         assert_eq!(mirror.apply_delta(delta(5, Some(7), Change::OutputSaved(PathBuf::from("s.txt")))), DeltaOutcome::Applied);
@@ -311,7 +428,7 @@ mod tests {
 
     #[test]
     fn diff_mirror_has_no_output_and_rejects_edits() {
-        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None });
+        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default() });
         assert!(!mirror.is_merge());
         assert!(mirror.apply_local_edit(&Edit { range: 0..0, text: "x".to_string() }).is_none());
         assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputPathChanged(None))), DeltaOutcome::NeedsResync);

@@ -1,9 +1,14 @@
+mod builtin_engine;
+mod engine_registry;
 mod error;
 mod host;
+mod normalizer;
 mod session;
 mod text;
 mod undo;
 
+pub use builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
+pub use engine_registry::EngineRegistry;
 pub use error::CoreError;
 pub use host::{run_host, spawn_host};
 pub use session::Session;

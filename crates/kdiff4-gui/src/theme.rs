@@ -14,6 +14,13 @@ pub struct Palette {
     pub weak_text: Color32,
     pub caret: Color32,
     pub selection: Color32,
+    /// Row backgrounds of changed regions.
+    pub removed_bg: Color32,
+    pub added_bg: Color32,
+    pub modified_bg: Color32,
+    pub conflict_bg: Color32,
+    /// Hatching of void regions.
+    pub void_hatch: Color32,
 }
 
 
@@ -26,6 +33,11 @@ pub const LIGHT: Palette = Palette {
     weak_text: Color32::from_rgb(0x55, 0x5D, 0x69),
     caret: Color32::from_rgb(0x1F, 0x5F, 0xD1),
     selection: Color32::from_rgb(0xB8, 0xD4, 0xFF),
+    removed_bg: Color32::from_rgb(0xFF, 0xD9, 0xD6),
+    added_bg: Color32::from_rgb(0xD3, 0xF2, 0xD3),
+    modified_bg: Color32::from_rgb(0xF3, 0xD8, 0xF3),
+    conflict_bg: Color32::from_rgb(0xFF, 0xE2, 0xB0),
+    void_hatch: Color32::from_rgb(0xC4, 0xCA, 0xD3),
 };
 
 
@@ -38,6 +50,11 @@ pub const DARK: Palette = Palette {
     weak_text: Color32::from_rgb(0xA0, 0xA8, 0xB3),
     caret: Color32::from_rgb(0x7A, 0xB0, 0xFF),
     selection: Color32::from_rgb(0x2C, 0x4A, 0x78),
+    removed_bg: Color32::from_rgb(0x4C, 0x23, 0x25),
+    added_bg: Color32::from_rgb(0x1E, 0x40, 0x25),
+    modified_bg: Color32::from_rgb(0x45, 0x25, 0x47),
+    conflict_bg: Color32::from_rgb(0x4A, 0x39, 0x16),
+    void_hatch: Color32::from_rgb(0x3C, 0x42, 0x4B),
 };
 
 
@@ -158,6 +175,18 @@ mod tests {
             assert!(contrast_ratio(palette.weak_text, palette.window_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.caret, palette.pane_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.text, palette.selection) >= 7.0, "{palette:?}");
+        }
+    }
+
+
+    #[test]
+    fn text_on_region_backgrounds_has_high_contrast() {
+        for palette in [&LIGHT, &DARK] {
+            for background in [palette.removed_bg, palette.added_bg, palette.modified_bg, palette.conflict_bg] {
+                assert!(contrast_ratio(palette.text, background) >= 7.0, "{background:?} in {palette:?}");
+                assert!(contrast_ratio(background, palette.pane_bg) >= 1.1, "{background:?} must differ from the pane in {palette:?}");
+            }
+            assert!(contrast_ratio(palette.void_hatch, palette.pane_bg) >= 1.4, "{palette:?}");
         }
     }
 

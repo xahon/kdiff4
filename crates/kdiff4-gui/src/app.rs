@@ -45,7 +45,7 @@ enum Pending {
 }
 
 
-/// A message under the panes: the outcome of the last save, reload or path change.
+/// A message under the panes: the differences found on open and reload, or the outcome of the last save, reload or path change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Status {
     text: String,
@@ -310,7 +310,8 @@ impl KdiffApp {
                             Status { text: format!("Saved {}", path.display()), is_error: false }
                         }),
                     Pending::Edit | Pending::Resync | Pending::UndoRedo => self.status.take(),
-                    Pending::Open | Pending::LoadSource(_) | Pending::SetOutputPath => None,
+                    Pending::Open | Pending::LoadSource(_) => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
+                    Pending::SetOutputPath => None,
                 };
                 return;
             }

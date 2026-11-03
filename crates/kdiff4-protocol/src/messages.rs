@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::engine::{Comparison, EngineCapabilities};
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Document {
@@ -136,7 +138,8 @@ pub struct Delta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
-    SourceReplaced(DocumentText),
+    /// The regions and rows are recomputed with the new text.
+    SourceReplaced { text: DocumentText, comparison: Comparison },
     /// `modified` says whether D now differs from what was loaded or last saved; undo can bring it back.
     OutputEdited { range: Range<usize>, text: String, modified: bool },
     OutputPathChanged(Option<PathBuf>),
@@ -157,6 +160,9 @@ pub struct Snapshot {
     pub documents: Vec<DocumentText>,
     /// D; present for merges.
     pub output: Option<OutputDocument>,
+    pub comparison: Comparison,
+    /// The comparison engine that computed `comparison`.
+    pub engine: EngineCapabilities,
 }
 
 
@@ -222,6 +228,9 @@ impl DocumentText {
 pub enum ErrorKind {
     Io,
     InvalidRequest,
+    Canceled,
+    /// A comparison engine failed or returned a result that broke the rules.
+    Engine,
 }
 
 

@@ -2,6 +2,7 @@ use egui::epaint::text::cursor::CCursor;
 use egui::{CursorIcon, FontId, Galley, Pos2, Rect, ScrollArea, Sense, Stroke, TextStyle, Ui, pos2, vec2};
 
 use crate::editing::{self, Cursor, Lines, Position};
+use crate::rows::{Rows, Shade};
 use crate::theme::Palette;
 
 
@@ -10,6 +11,8 @@ const ROW_PADDING: f32 = 2.0;
 const CARET_WIDTH: f32 = 1.5;
 /// Width of the selected line break at the end of a selected line, as a share of the row height.
 const SELECTED_LINE_BREAK_WIDTH: f32 = 0.4;
+/// Distance between the stripes of a void region.
+const HATCH_SPACING: f32 = 8.0;
 
 
 /// What the mouse did in the view.
@@ -26,16 +29,18 @@ pub enum PointerAction {
 }
 
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ViewResponse {
     pub pointer: Option<PointerAction>,
     /// How many whole rows fit in the view: the step of PageUp and PageDown.
     pub page_rows: usize,
+    /// The vertical scroll offset after this frame, in pixels.
+    pub offset: f32,
 }
 
 
-/// Draws `lines` in a scroll area, laying out only the visible rows. `cursor` (caret and selection) is drawn if it is in this view; `reveal_caret` scrolls the caret into view.
-pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, cursor: Option<Cursor>, reveal_caret: bool, palette: &Palette) -> ViewResponse {
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its region's shade, or hatching for a void. `cursor` (caret and selection, in lines) is drawn if it is in this view; `reveal_caret` scrolls the caret into view. `offset` forces the vertical scroll offset, so several views can scroll together.
+pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, cursor: Option<Cursor>, reveal_caret: bool, offset: Option<f32>, palette: &Palette) -> ViewResponse {
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING;
     let viewport_height = ui.available_height();
@@ -43,30 +48,41 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, cursor: Option<Cursor>
     let cursor = cursor.map(|cursor| editing::clamp_cursor(lines, cursor));
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
-    if reveal_caret
-        && let Some(cursor) = cursor
-    {
-        let current = egui::scroll_area::State::load(ui.ctx(), ui.make_persistent_id(id_salt))
+    let current = offset.unwrap_or_else(|| {
+        egui::scroll_area::State::load(ui.ctx(), ui.make_persistent_id(id_salt))
             .map(|state| state.clamped_offset().y)
-            .unwrap_or(0.0);
-        if let Some(offset) = reveal_offset(cursor.head.line, row_height, viewport_height, current) {
-            area = area.vertical_scroll_offset(offset);
-        }
+            .unwrap_or(0.0)
+    });
+    let revealed = cursor
+        .filter(|_| reveal_caret)
+        .and_then(|cursor| reveal_offset(rows.row_of_line(cursor.head.line), row_height, viewport_height, current));
+    if let Some(target) = revealed.or(offset) {
+        area = area.vertical_scroll_offset(target);
     }
 
     let output = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        area.show_rows(ui, row_height, lines.count(), |ui, rows| {
-            for row in rows {
-                let galley = layout(ui, lines, row, &font_id, palette);
-                let width = (galley.size().x + CARET_WIDTH * 2.0).max(ui.available_width());
+        area.show_rows(ui, row_height, rows.len(), |ui, visible| {
+            for row in visible {
+                let pane_row = rows.row(row);
+                let line = pane_row.and_then(|pane_row| pane_row.line);
+                let galley = line.map(|line| layout(ui, lines, line, &font_id, palette));
+                let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x);
+                let width = (text_width + CARET_WIDTH * 2.0).max(ui.available_width());
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
+                if let Some(shade) = pane_row.and_then(|pane_row| pane_row.shade) {
+                    ui.painter().rect_filled(rect, 0.0, shade_color(palette, shade));
+                }
+                let (Some(line), Some(galley)) = (line, galley) else {
+                    paint_void(ui, rect, palette);
+                    continue;
+                };
                 let text_origin = rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
                 if let Some(cursor) = cursor {
-                    paint_selection(ui, lines, row, rect, &galley, cursor, row_height, palette);
+                    paint_selection(ui, lines, line, rect, &galley, cursor, row_height, palette);
                 }
                 let caret_x = cursor
-                    .filter(|cursor| cursor.head.line == row)
+                    .filter(|cursor| cursor.head.line == line)
                     .map(|cursor| text_origin.x + galley.pos_from_cursor(CCursor::new(cursor.head.column)).min.x);
                 ui.painter().galley(text_origin, galley, palette.text);
                 if let Some(x) = caret_x {
@@ -85,7 +101,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, cursor: Option<Cursor>
     }
     let hit = |pointer: Pos2| {
         let content = pointer - output.inner_rect.min + output.state.clamped_offset();
-        position_at(ui, lines, &font_id, palette, row_height, content.x, content.y)
+        position_at(ui, lines, rows, &font_id, palette, row_height, content.x, content.y)
     };
     let pressed = response.hovered() && ui.input(|input| input.pointer.primary_pressed());
     let pointer_position = ui.input(|input| input.pointer.interact_pos());
@@ -96,7 +112,30 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, cursor: Option<Cursor>
         Some(pointer) if held => Some(PointerAction::Drag(hit(pointer))),
         _ => None,
     };
-    ViewResponse { pointer, page_rows }
+    ViewResponse { pointer, page_rows, offset: output.state.clamped_offset().y }
+}
+
+
+fn shade_color(palette: &Palette, shade: Shade) -> egui::Color32 {
+    match shade {
+        Shade::Removed => palette.removed_bg,
+        Shade::Added => palette.added_bg,
+        Shade::Modified => palette.modified_bg,
+        Shade::Conflict => palette.conflict_bg,
+    }
+}
+
+
+/// Diagonal stripes anchored to the screen, so the stripes of consecutive void rows join up.
+fn paint_void(ui: &Ui, rect: Rect, palette: &Palette) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let stroke = Stroke::new(1.0, palette.void_hatch);
+    let first = ((rect.left() + rect.top()) / HATCH_SPACING).floor() as i64;
+    let last = ((rect.right() + rect.bottom()) / HATCH_SPACING).ceil() as i64;
+    for stripe in first..=last {
+        let sum = stripe as f32 * HATCH_SPACING;
+        painter.line_segment([pos2(sum - rect.bottom(), rect.bottom()), pos2(sum - rect.top(), rect.top())], stroke);
+    }
 }
 
 
@@ -105,36 +144,43 @@ fn layout(ui: &Ui, lines: Lines<'_>, row: usize, font_id: &FontId, palette: &Pal
 }
 
 
-/// The text position at `x`, `y` pixels from the top left of the text. Below the last line it is the end of the text; right of a line's text, the end of that line.
-fn position_at(ui: &Ui, lines: Lines<'_>, font_id: &FontId, palette: &Palette, row_height: f32, x: f32, y: f32) -> Position {
-    match row_at(y, row_height, lines.count()) {
-        Some(row) => {
-            let galley = layout(ui, lines, row, font_id, palette);
+/// The text position at `x`, `y` pixels from the top left of the text. Below the last row it is the end of the text; right of a line's text, the end of that line; on a void, the start of the next line.
+fn position_at(ui: &Ui, lines: Lines<'_>, rows: Rows<'_>, font_id: &FontId, palette: &Palette, row_height: f32, x: f32, y: f32) -> Position {
+    let end = || {
+        let line = lines.count().saturating_sub(1);
+        Position { line, column: lines.line_chars(line) }
+    };
+    let Some(row) = row_at(y, row_height, rows.len()) else {
+        return end();
+    };
+    match rows.row(row).and_then(|pane_row| pane_row.line) {
+        Some(line) => {
+            let galley = layout(ui, lines, line, font_id, palette);
             let column = galley.cursor_from_pos(vec2(x, galley.size().y / 2.0)).index.0;
-            Position { line: row, column }
+            Position { line, column }
         }
-        None => {
-            let line = lines.count().saturating_sub(1);
-            Position { line, column: lines.line_chars(line) }
-        }
+        None => match rows.line_at_or_after(row) {
+            Some(line) => Position { line, column: 0 },
+            None => end(),
+        },
     }
 }
 
 
-/// Highlights the selected part of `row`. A selection that continues past the row also covers a little space for the line break.
-fn paint_selection(ui: &Ui, lines: Lines<'_>, row: usize, rect: Rect, galley: &Galley, cursor: Cursor, row_height: f32, palette: &Palette) {
+/// Highlights the selected part of `line`, drawn in `rect`. A selection that continues past the line also covers a little space for the line break.
+fn paint_selection(ui: &Ui, lines: Lines<'_>, line: usize, rect: Rect, galley: &Galley, cursor: Cursor, row_height: f32, palette: &Palette) {
     if !cursor.has_selection() {
         return;
     }
     let (start, end) = cursor.range();
-    if row < start.line || row > end.line {
+    if line < start.line || line > end.line {
         return;
     }
-    let from = if row == start.line { start.column } else { 0 };
-    let to = if row == end.line { end.column } else { lines.line_chars(row) };
+    let from = if line == start.line { start.column } else { 0 };
+    let to = if line == end.line { end.column } else { lines.line_chars(line) };
     let left = rect.left() + galley.pos_from_cursor(CCursor::new(from)).min.x;
     let mut right = rect.left() + galley.pos_from_cursor(CCursor::new(to)).min.x;
-    if row < end.line {
+    if line < end.line {
         right += row_height * SELECTED_LINE_BREAK_WIDTH;
     }
     ui.painter().rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, palette.selection);

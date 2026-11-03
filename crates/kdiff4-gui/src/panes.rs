@@ -5,6 +5,7 @@ use kdiff4_protocol::Document;
 
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
+use crate::rows::Rows;
 use crate::text_view::{self, PointerAction};
 use crate::theme::{self, Palette};
 
@@ -43,12 +44,14 @@ pub struct PaneState {
     pub merge_fraction: f32,
     /// Texts of the header path fields, in `Document::ALL` order.
     pub path_fields: [String; 4],
+    /// Vertical scroll offset shared by the source panes, which scroll together row by row.
+    pub source_offset: f32,
 }
 
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default() }
+        PaneState { caret: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0 }
     }
 }
 
@@ -95,43 +98,67 @@ fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, frac
 }
 
 
+/// The source panes are forced to one scroll offset; the pane the user scrolled this frame, or the one that revealed the caret, sets it for the next.
 fn source_columns(ui: &mut Ui, palette: &Palette, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
     let count = mirror.documents().len().max(1);
+    let shared = state.source_offset.clone();
+    let mut offsets = Vec::with_capacity(count);
     ui.columns(count, |columns| {
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines { text: &text.text, ranges: &text.lines };
-            pane(column, palette, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, state, actions);
+            let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
+            offsets.push(pane(column, palette, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), state, actions));
         }
     });
+    state.source_offset = next_shared_offset(shared, &offsets);
+    if state.source_offset != shared {
+        ui.ctx().request_repaint();
+    }
+}
+
+
+fn next_shared_offset(shared: f32, offsets: &[f32]) -> f32 {
+    offsets
+        .iter()
+        .find(|offset| **offset != shared)
+        .cloned()
+        .unwrap_or(shared)
 }
 
 
 fn output_pane(ui: &mut Ui, palette: &Palette, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
     if let Some(output) = mirror.output() {
-        pane(ui, palette, Document::D, None, output.path.as_deref(), output.modified, output.lines(), state, actions);
+        let lines = output.lines();
+        pane(ui, palette, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::PerLine(lines.count()), None, state, actions);
     }
 }
 
 
-fn pane(ui: &mut Ui, palette: &Palette, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
+/// Returns the pane's vertical scroll offset after this frame.
+fn pane(ui: &mut Ui, palette: &Palette, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
     let radius = theme::corner_radius_of(ui);
-    theme::pane_frame(palette, radius).show(ui, |ui| {
-        header(ui, palette, radius, document.clone(), label, path, modified, state, actions);
-        theme::pane_body_frame().show(ui, |ui| {
-            let caret = state.caret_in(document.clone());
-            let response = text_view::show(ui, document.letter(), lines, caret, state.reveal_caret && caret.is_some(), palette);
-            if caret.is_some() {
-                state.page_rows = response.page_rows;
-            }
-            match response.pointer {
-                Some(PointerAction::Press { position, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, extend }),
-                Some(PointerAction::Drag(position)) => actions.push(PaneAction::Drag(document.clone(), position)),
-                Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
-                Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
-                None => {}
-            }
-        });
-    });
+    theme::pane_frame(palette, radius)
+        .show(ui, |ui| {
+            header(ui, palette, radius, document.clone(), label, path, modified, state, actions);
+            theme::pane_body_frame()
+                .show(ui, |ui| {
+                    let caret = state.caret_in(document.clone());
+                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), offset, palette);
+                    if caret.is_some() {
+                        state.page_rows = response.page_rows;
+                    }
+                    match response.pointer {
+                        Some(PointerAction::Press { position, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, extend }),
+                        Some(PointerAction::Drag(position)) => actions.push(PaneAction::Drag(document.clone(), position)),
+                        Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
+                        Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
+                        None => {}
+                    }
+                    response.offset
+                })
+                .inner
+        })
+        .inner
 }
 
 
@@ -194,6 +221,15 @@ mod tests {
         assert_eq!(state.caret_in(Document::B), Some(cursor));
         assert_eq!(state.caret_in(Document::A), None);
         assert_eq!(state.caret_in(Document::D), None);
+    }
+
+
+    #[test]
+    fn shared_offset_follows_the_pane_that_moved() {
+        assert_eq!(next_shared_offset(10.0, &[10.0, 10.0, 10.0]), 10.0);
+        assert_eq!(next_shared_offset(10.0, &[10.0, 42.0, 10.0]), 42.0);
+        assert_eq!(next_shared_offset(10.0, &[3.0, 3.0]), 3.0);
+        assert_eq!(next_shared_offset(10.0, &[]), 10.0);
     }
 
 

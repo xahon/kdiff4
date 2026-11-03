@@ -26,6 +26,8 @@ None yet. The owner decides which kdiff3 bugs get fixed. When you find one while
 ### Added features
 
 - Splitting a region into smaller regions (see Splitting regions in `ARCHITECTURE.md`). kdiff3 cannot split its merge blocks.
+- Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
+- Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
 
 ### Manual alignment
 

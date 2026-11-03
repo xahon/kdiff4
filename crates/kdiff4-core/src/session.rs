@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
+use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, Job, Progress, SourceLines, run_comparison};
 use kdiff4_protocol::{Change, Document, DocumentText, EolStyle, OpenFiles, OutputDocument, OutputEdit, Revision, Snapshot};
 
 use crate::error::CoreError;
+use crate::normalizer;
 use crate::text::{self, SourceText};
 use crate::undo::{History, Step};
 
@@ -41,18 +44,21 @@ impl Output {
 }
 
 
-/// One open comparison: the source documents and, for a merge, D.
+/// One open comparison: the source documents, their regions and rows, and, for a merge, D.
 #[derive(Debug)]
 pub struct Session {
     revision: u64,
     sources: Vec<Source>,
     output: Option<Output>,
+    options: ComparisonOptions,
+    comparison: Comparison,
+    engine: EngineCapabilities,
 }
 
 
 impl Session {
     /// For a merge, D starts with the contents of an existing output file, or empty.
-    pub fn open(files: &OpenFiles) -> Result<Session, CoreError> {
+    pub fn open(files: &OpenFiles, engine: &dyn ComparisonEngine) -> Result<Session, CoreError> {
         if let Some(output) = files.output.as_deref()
             && output.is_dir()
         {
@@ -77,7 +83,9 @@ impl Session {
         } else {
             None
         };
-        Ok(Session { revision: 1, sources, output })
+        let options = ComparisonOptions::default();
+        let comparison = compare(&sources, engine, &options)?;
+        Ok(Session { revision: 1, sources, output, options, comparison, engine: engine.capabilities() })
     }
 
 
@@ -94,21 +102,30 @@ impl Session {
         let output = self.output
             .as_ref()
             .map(|output| OutputDocument { path: output.path.clone(), text: output.text.clone(), modified: output.history.is_modified() });
-        Snapshot { revision: self.revision(), documents, output }
+        Snapshot { revision: self.revision(), documents, output, comparison: self.comparison.clone(), engine: self.engine.clone() }
     }
 
 
-    /// Replaces A, B or C with the file at `path`. D is kept.
-    pub fn load_source(&mut self, document: Document, path: &Path) -> Result<Change, CoreError> {
+    /// Replaces A, B or C with the file at `path` and recomputes the regions and rows. D is kept. On failure the session is unchanged.
+    pub fn load_source(&mut self, document: Document, path: &Path, engine: &dyn ComparisonEngine) -> Result<Change, CoreError> {
         let index = self.sources
             .iter()
             .position(|source| source.document == document)
             .ok_or(CoreError::NoSuchDocument { document: document.clone() })?;
         let text = SourceText::load(path)?;
+        let old_text = std::mem::replace(&mut self.sources[index].text, text);
+        let comparison = match compare(&self.sources, engine, &self.options) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                self.sources[index].text = old_text;
+                return Err(error);
+            }
+        };
         let source = &mut self.sources[index];
         source.path = path.to_path_buf();
-        source.text = text;
-        let change = Change::SourceReplaced(source.to_document_text());
+        self.comparison = comparison.clone();
+        self.engine = engine.capabilities();
+        let change = Change::SourceReplaced { text: source.to_document_text(), comparison };
         self.revision += 1;
         Ok(change)
     }
@@ -216,13 +233,35 @@ impl Session {
 }
 
 
+/// Compares the source documents with `engine`. Runs to completion: cancelable worker jobs come later.
+fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &ComparisonOptions) -> Result<Comparison, CoreError> {
+    let lines: Vec<Vec<&str>> = sources
+        .iter()
+        .map(|source| source.text.lines.iter().map(|range| source.text.text.get(range.clone()).unwrap_or("")).collect())
+        .collect();
+    let tokens = normalizer::tokenize(&lines);
+    let input = CompareInput {
+        sources: lines.iter().zip(&tokens).map(|(lines, tokens)| SourceLines { lines, tokens }).collect(),
+        alignments: &[],
+        options,
+    };
+    let cancel = AtomicBool::new(false);
+    let progress = |progress: Progress| log::debug!("compare: step {} of {}", progress.done, progress.total);
+    let comparison = run_comparison(engine, &input, &Job::new(&cancel, &progress))?;
+    log::info!("compare: {} regions with {}", comparison.regions.len(), engine.capabilities().id);
+    Ok(comparison)
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use kdiff4_protocol::Labels;
+    use kdiff4_protocol::engine::{CharDiff, EngineError, HunkChange, MergeStatus, RegionStatus, Row};
+    use kdiff4_protocol::{ErrorKind, Labels, ProtocolError};
 
     use super::*;
+    use crate::builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
 
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -250,7 +289,7 @@ mod tests {
         let a = write(dir, "a.txt", a_text);
         let b = write(dir, "b.txt", "b\n");
         let c = write(dir, "c.txt", "c\n");
-        Session::open(&files(a, b, Some(c), Some(dir.join("out.txt")))).unwrap()
+        Session::open(&files(a, b, Some(c), Some(dir.join("out.txt"))), &BuiltinEngine).unwrap()
     }
 
 
@@ -259,12 +298,113 @@ mod tests {
     }
 
 
+    /// Fails every comparison, so a reload with it must leave the session as it was.
+    struct FailingEngine;
+
+
+    impl ComparisonEngine for FailingEngine {
+        fn capabilities(&self) -> EngineCapabilities {
+            EngineCapabilities { id: "failing".to_string(), ..BuiltinEngine.capabilities() }
+        }
+
+
+        fn compare(&self, _input: &CompareInput<'_>, _job: &Job<'_>) -> Result<Comparison, EngineError> {
+            Err(EngineError::Failed("broken on purpose".to_string()))
+        }
+
+
+        fn classify(&self, hunks: &[SourceLines<'_>]) -> Result<RegionStatus, EngineError> {
+            BuiltinEngine.classify(hunks)
+        }
+
+
+        fn char_diff(&self, row: &[Option<&str>], options: &ComparisonOptions) -> Result<CharDiff, EngineError> {
+            BuiltinEngine.char_diff(row, options)
+        }
+    }
+
+
+    fn statuses(comparison: &Comparison) -> Vec<RegionStatus> {
+        comparison
+            .regions
+            .iter()
+            .map(|region| region.status.clone())
+            .collect()
+    }
+
+
+    #[test]
+    fn open_compares_sources() {
+        let dir = temp_dir("open-compares");
+        let a = write(&dir, "a.txt", "same\nbase\n");
+        let b = write(&dir, "b.txt", "same\nleft\n");
+        let c = write(&dir, "c.txt", "same\nbase\n");
+        let snapshot = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap().snapshot();
+        assert_eq!(statuses(&snapshot.comparison), [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB)]);
+        assert_eq!(snapshot.comparison.regions[1].rows, [Row { lines: vec![Some(1), Some(1), Some(1)] }]);
+        assert_eq!(snapshot.engine.id, BUILTIN_ENGINE_ID);
+    }
+
+
+    #[test]
+    fn two_way_open_compares_a_and_b() {
+        let dir = temp_dir("open-two-way");
+        let a = write(&dir, "a.txt", "x\n");
+        let b = write(&dir, "b.txt", "x\ny\n");
+        let snapshot = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap().snapshot();
+        assert_eq!(statuses(&snapshot.comparison), [RegionStatus::Diff(HunkChange::Unchanged), RegionStatus::Diff(HunkChange::Added)]);
+    }
+
+
+    #[test]
+    fn open_fails_when_the_engine_fails() {
+        let dir = temp_dir("open-engine-fails");
+        let a = write(&dir, "a.txt", "a\n");
+        let b = write(&dir, "b.txt", "b\n");
+        let error = Session::open(&files(a, b, None, None), &FailingEngine).unwrap_err();
+        assert!(matches!(error, CoreError::Engine(EngineError::Failed(_))));
+        assert_eq!(ProtocolError::from(error).kind, ErrorKind::Engine);
+    }
+
+
+    #[test]
+    fn load_source_recomputes_comparison() {
+        let dir = temp_dir("load-recomputes");
+        let mut session = merge_session(&dir, "b\n");
+        assert_eq!(statuses(&session.snapshot().comparison), [RegionStatus::Merge(MergeStatus::ChangedInC)]);
+        let new_c = write(&dir, "c2.txt", "b\n");
+        let Change::SourceReplaced { comparison, .. } = session.load_source(Document::C, &new_c, &BuiltinEngine).unwrap() else {
+            panic!("expected a replaced source");
+        };
+        assert_eq!(statuses(&comparison), [RegionStatus::Merge(MergeStatus::Unchanged)]);
+        assert_eq!(session.snapshot().comparison, comparison);
+    }
+
+
+    #[test]
+    fn failed_recompute_keeps_the_session() {
+        let dir = temp_dir("load-engine-fails");
+        let mut session = merge_session(&dir, "a\n");
+        let before = session.snapshot();
+        let new_b = write(&dir, "b2.txt", "other\n");
+        let error = session.load_source(Document::B, &new_b, &FailingEngine).unwrap_err();
+        assert!(matches!(error, CoreError::Engine(_)));
+        assert_eq!(session.snapshot(), before);
+    }
+
+
+    #[test]
+    fn canceled_comparison_keeps_its_error_kind() {
+        assert_eq!(ProtocolError::from(CoreError::Engine(EngineError::Canceled)).kind, ErrorKind::Canceled);
+    }
+
+
     #[test]
     fn open_two_files_gives_a_and_b_without_output() {
         let dir = temp_dir("two");
         let a = write(&dir, "a.txt", "one\ntwo\n");
         let b = write(&dir, "b.txt", "one\n");
-        let session = Session::open(&files(a.clone(), b.clone(), None, None)).unwrap();
+        let session = Session::open(&files(a.clone(), b.clone(), None, None), &BuiltinEngine).unwrap();
         let snapshot = session.snapshot();
         assert_eq!(snapshot.revision, Revision(1));
         assert_eq!(snapshot.output, None);
@@ -283,7 +423,7 @@ mod tests {
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
         let labels = Labels { a: Some("Base".to_string()), b: Some("Local".to_string()), c: None };
-        let session = Session::open(&OpenFiles { a, b, c: None, output: None, labels }).unwrap();
+        let session = Session::open(&OpenFiles { a, b, c: None, output: None, labels }, &BuiltinEngine).unwrap();
         let snapshot = session.snapshot();
         assert_eq!(snapshot.documents[0].label.as_deref(), Some("Base"));
         assert_eq!(snapshot.documents[1].label.as_deref(), Some("Local"));
@@ -296,7 +436,7 @@ mod tests {
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
         let c = write(&dir, "c.txt", "c");
-        let output = Session::open(&files(a, b, Some(c), None)).unwrap().snapshot().output.unwrap();
+        let output = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap().snapshot().output.unwrap();
         assert_eq!(output, OutputDocument { path: None, text: String::new(), modified: false });
     }
 
@@ -306,7 +446,7 @@ mod tests {
         let dir = temp_dir("two-way-merge");
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
-        let snapshot = Session::open(&files(a, b, None, Some(dir.join("out.txt")))).unwrap().snapshot();
+        let snapshot = Session::open(&files(a, b, None, Some(dir.join("out.txt"))), &BuiltinEngine).unwrap().snapshot();
         assert_eq!(snapshot.documents.len(), 2);
         assert_eq!(snapshot.output.unwrap().path, Some(dir.join("out.txt")));
     }
@@ -319,7 +459,7 @@ mod tests {
         let b = write(&dir, "b.txt", "b");
         let c = write(&dir, "c.txt", "c");
         let out = write(&dir, "out.txt", "\u{FEFF}x\r\ny\r\n");
-        let output = Session::open(&files(a, b, Some(c), Some(out))).unwrap().snapshot().output.unwrap();
+        let output = Session::open(&files(a, b, Some(c), Some(out)), &BuiltinEngine).unwrap().snapshot().output.unwrap();
         assert_eq!(output.text, "x\ny\n");
         assert!(!output.modified);
     }
@@ -329,7 +469,7 @@ mod tests {
     fn missing_file_is_a_read_error() {
         let dir = temp_dir("missing");
         let a = write(&dir, "a.txt", "a");
-        let error = Session::open(&files(a, dir.join("missing.txt"), None, None)).unwrap_err();
+        let error = Session::open(&files(a, dir.join("missing.txt"), None, None), &BuiltinEngine).unwrap_err();
         assert!(matches!(error, CoreError::Read { ref path, .. } if path.ends_with("missing.txt")));
     }
 
@@ -338,7 +478,7 @@ mod tests {
     fn directory_as_source_is_rejected() {
         let dir = temp_dir("dir-source");
         let a = write(&dir, "a.txt", "a");
-        let error = Session::open(&files(a, dir.clone(), None, None)).unwrap_err();
+        let error = Session::open(&files(a, dir.clone(), None, None), &BuiltinEngine).unwrap_err();
         assert!(matches!(error, CoreError::Directory { ref path } if *path == dir));
     }
 
@@ -349,7 +489,7 @@ mod tests {
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
         let c = write(&dir, "c.txt", "c");
-        let error = Session::open(&files(a, b, Some(c), Some(dir.clone()))).unwrap_err();
+        let error = Session::open(&files(a, b, Some(c), Some(dir.clone())), &BuiltinEngine).unwrap_err();
         assert!(matches!(error, CoreError::Directory { ref path } if *path == dir));
     }
 
@@ -359,8 +499,8 @@ mod tests {
         let dir = temp_dir("load-source");
         let mut session = merge_session(&dir, "a\n");
         let new_b = write(&dir, "b2.txt", "new b\n");
-        let change = session.load_source(Document::B, &new_b).unwrap();
-        let Change::SourceReplaced(text) = change else {
+        let change = session.load_source(Document::B, &new_b, &BuiltinEngine).unwrap();
+        let Change::SourceReplaced { text, .. } = change else {
             panic!("expected a replaced source");
         };
         assert_eq!(text.document, Document::B);
@@ -377,7 +517,7 @@ mod tests {
         let mut session = merge_session(&dir, "a\n");
         session.edit_output(&edit(&session, 0..0, "typed")).unwrap();
         let new_a = write(&dir, "a2.txt", "a2\n");
-        session.load_source(Document::A, &new_a).unwrap();
+        session.load_source(Document::A, &new_a, &BuiltinEngine).unwrap();
         assert_eq!(session.snapshot().output.unwrap().text, "typed");
     }
 
@@ -387,10 +527,10 @@ mod tests {
         let dir = temp_dir("load-missing-doc");
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
-        let mut session = Session::open(&files(a.clone(), b, None, None)).unwrap();
-        assert!(matches!(session.load_source(Document::C, &a), Err(CoreError::NoSuchDocument { document: Document::C })));
-        assert!(matches!(session.load_source(Document::D, &a), Err(CoreError::NoSuchDocument { document: Document::D })));
-        assert!(matches!(session.load_source(Document::B, &dir.join("gone.txt")), Err(CoreError::Read { .. })));
+        let mut session = Session::open(&files(a.clone(), b, None, None), &BuiltinEngine).unwrap();
+        assert!(matches!(session.load_source(Document::C, &a, &BuiltinEngine), Err(CoreError::NoSuchDocument { document: Document::C })));
+        assert!(matches!(session.load_source(Document::D, &a, &BuiltinEngine), Err(CoreError::NoSuchDocument { document: Document::D })));
+        assert!(matches!(session.load_source(Document::B, &dir.join("gone.txt"), &BuiltinEngine), Err(CoreError::Read { .. })));
         assert_eq!(session.revision(), Revision(1));
     }
 
@@ -462,7 +602,7 @@ mod tests {
         let dir = temp_dir("diff-output");
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
-        let mut session = Session::open(&files(a, b, None, None)).unwrap();
+        let mut session = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap();
         assert!(matches!(session.edit_output(&edit(&session, 0..0, "x")), Err(CoreError::NotAMerge)));
         assert!(matches!(session.save(), Err(CoreError::NotAMerge)));
         assert!(matches!(session.set_output_path(None), Err(CoreError::NotAMerge)));
@@ -487,7 +627,7 @@ mod tests {
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
         let c = write(&dir, "c.txt", "c");
-        let mut session = Session::open(&files(a, b, Some(c), None)).unwrap();
+        let mut session = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap();
         assert!(matches!(session.save(), Err(CoreError::NoOutputPath)));
     }
 

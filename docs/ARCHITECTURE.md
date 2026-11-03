@@ -34,16 +34,24 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 |---|---|---|
 | protocol | `messages.rs` | the message vocabulary: commands, responses, events (snapshot, delta and its changes) and the small types both sides share, such as document, labels, EOL style, revision and protocol error |
 | protocol | `transport.rs` | the client and host endpoints and the in-process transport, with the waker that tells a front end a message arrived |
+| protocol | `engine/mod.rs` | the comparison engine interface, its input and result types, the cancel and progress handle, engine errors, and the single entry point the host compares through |
+| protocol | `engine/alignment.rs` | validation of manual alignments and the segmentation helper |
+| protocol | `engine/check.rs` | the result check run on every engine result |
+| protocol | `engine/test_engine.rs` | tests only: a minimal engine and input fixtures |
 | core | `text.rs` | decoding, line splitting, line-ending and BOM detection, and atomic writes |
-| core | `session.rs` | one open comparison: the sources, D and its history, the revision, and load, edit and save |
+| core | `session.rs` | one open comparison: the sources, their regions and rows, D and its history, the revision, and load, compare, edit and save |
 | core | `undo.rs` | D's undo steps and the saved/modified tracking |
-| core | `host.rs` | the host thread: turns each command into a response plus a snapshot or delta |
+| core | `host.rs` | the host thread: owns the engine registry and turns each command into a response plus a snapshot or delta |
+| core | `normalizer.rs` | turns the lines of all source documents into tokens |
 | core | `error.rs` | core's errors and their conversion to protocol errors |
+| core | `builtin_engine.rs` | the built-in engine: rows, regions, statuses and character-level diffs on top of `imara-diff` |
+| core | `engine_registry.rs` | the engine registry |
 | gui | `lib.rs` | starts the window with what the binary already knows: pre-filled paths, labels and a pending open request |
 | gui | `app.rs` | the application loop: menus, shortcuts, sending commands and handling their results, the status bar, and routing to dialogs and panes |
-| gui | `mirror.rs` | the front end's copy of the session, built from snapshots and deltas; applies D edits at once and resyncs on a gap or a rejected edit |
+| gui | `mirror.rs` | the front end's copy of the session, built from snapshots and deltas, with a row map per source document; applies D edits at once and resyncs on a gap or a rejected edit |
+| gui | `rows.rs` | row maps: which line, or void, each row of a source pane shows, and its region shade |
 | gui | `panes.rs` | pane layout, pane headers with path fields and Browse, and the splitter above the merge pane |
-| gui | `text_view.rs` | the virtualized text widget: draws only visible rows, the caret and selection, and maps pointer input to positions |
+| gui | `text_view.rs` | the virtualized text widget: draws only visible rows (text with its region shade, or hatching for a void), the caret and selection, and maps pointer input to positions |
 | gui | `editing.rs` | caret motion, word and line selection, and turning keys into edits of D, independent of egui |
 | gui | `open_dialog.rs` | the Open form, its Run rule, file pickers and the overwrite question |
 | gui | `settings_dialog.rs` | the Settings dialog with live preview |
@@ -63,6 +71,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | Errors | `thiserror`, `anyhow` | all |
 | Logging | `log` | all |
 | Protocol messages | `serde` | protocol |
+| Session file | `serde_json`, `base64` | core |
 | Line diff | `imara-diff` (Histogram default, Myers optional) | core |
 | Encoding decode/encode | `encoding_rs` | core |
 | Encoding detection | `chardetng` | core |
@@ -88,6 +97,8 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Document**: the generalized name of A, B, C, or D, which could mean any of them.
 - **Source Document**: either A, B, or C.
 - **Session**: one open comparison: the source documents, their regions and rows, manual alignments, D, undo history and the engine config in effect. Owned by the host.
+- **Session file**: a `.kd4` file holding a saved session, including the bytes of every source document, so the merge can continue later or on another computer.
+- **Detached source**: a source document whose content comes from a session file instead of the disk. Its path is shown for reference only and cannot be changed or reloaded.
 
 ### Text
 
@@ -123,12 +134,20 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Row**: one horizontal line of the synchronized view. For each source document a row holds either one of its lines or nothing. All panes show the same row at the same height, which is how they scroll together. A region is a run of consecutive rows. Inside a region, similar lines of different documents are put in the same row, so their character-level differences can be shown side by side.
 - **Void Region**: the rows in a pane that have no source text: the rows of a void, and the padding below a hunk that is shorter than another hunk of the same region. Drawn hatched.
 - **Character-level diff**: the diff between the lines that share a row. Computed only for visible rows.
+- **Row map**: the rows of one source pane: for each row its line or a void, and the shade of its region in that pane. Built by the mirror from the comparison.
+- **Shade**: the background of a pane's rows in a changed region: removed, added, modified or conflict.
 - **Split**: dividing one region into smaller regions at row boundaries.
 - **Manual alignment**: a user-defined set of parts, one per source document, that must share rows. See Manual alignment.
 - **Alignment part**: one source document's share of a manual alignment: a line range or an anchor.
 - **Anchor**: an alignment part that marks a position between two lines, used when the aligned content does not exist in that document.
 - **Crossing alignments**: two manual alignments whose order differs between source documents. Rejected.
 - **Segment**: a stretch of a source document between two consecutive manual alignments, or one alignment itself. Aligned independently of other segments.
+- **Comparison engine**: a pluggable algorithm that turns source documents, comparison options and manual alignments into regions, rows, region statuses and character-level diffs. Holds no session state. Selected by the engine config.
+- **Built-in engine**: the default comparison engine, in `kdiff4-core`, built on `imara-diff`.
+- **Engine registry**: the comparison engines the host can choose from, by id. The built-in engine is always present and is the default; a second engine with an id already taken is refused.
+- **Engine capabilities**: what a comparison engine supports: 2-way and 3-way comparison, native manual alignment, character-level diffs, progress, and which comparison options it honors. Every engine compares 2 source documents and binary files.
+- **Result check**: validation of an engine result before the host uses it: coverage, row consistency and manual alignment boundaries.
+- **Segmentation helper**: generic code that cuts documents at manual alignments and compares each segment separately, for comparison engines without native manual alignment.
 
 ### Merge
 
@@ -188,22 +207,48 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 
 Lines are compared through their line keys, produced by a normalizer configured from options (ignore whitespace, ignore case, ignore trailing whitespace, ignore numbers, ignore comments). Line keys are interned into integer tokens before diffing, so the diff runs on integers.
 
+### Comparison engine
+
+The algorithm that compares documents is pluggable. The engine config names the comparison engine to use (`[diff]` key `engine`); the built-in engine is the default. The interface is defined in `kdiff4-protocol` and uses only protocol vocabulary types, so its results go into snapshots and deltas without translation, and a later adapter can run an engine out of process. The host keeps a registry of the available engines.
+
+Responsibilities are split so that every engine gets the same merge behavior:
+
+- The comparison engine computes: regions with their hunks, the rows of each region, region statuses (including whitespace conflicts), the status of a given set of hunks (used after a split), character-level diffs for the lines of one row, and binary compare. It honors the comparison options and the manual alignments it is given: the parts of each alignment share rows, and both ends of an alignment are region boundaries. This holds in 2-way and 3-way mode.
+- The session keeps the merge state: the manual alignment list and its validation (crossing and overlapping alignments are rejected before the engine sees them), deciding which part of the documents to recompute, splits, choices, auto-resolve, edited regions, undo, D, save, session files and navigation.
+- Line normalization stays in the session: it builds line keys and tokens and hands them to the engine together with the text, so ignore options behave the same with every engine.
+
+An engine reports its engine capabilities, which go into the snapshot so front ends can disable what it does not support. An engine without native manual alignment is driven through the segmentation helper, which gives it manual alignment for free. Binary compare has a byte-by-byte default that engines may replace.
+
+The host compares only through one entry point, which validates the input (2 or 3 source documents, 3 only if the engine supports it; one token per line; valid manual alignments), hands the alignments to the engine or to the segmentation helper, and runs the result check. The segmentation helper also checks each segment's result on its own, so an engine cannot spill a region across a segment boundary.
+
+Comparison runs on host worker threads with the cancel flag and progress reporting described under Threading and cancellation; the engine itself is synchronous. The host checks every engine result before using it: regions must cover every line of every source document exactly once, in order, and rows must be consistent with the regions and the manual alignments. A result that fails the check, or an engine failure, becomes a protocol error and a notice, never a corrupt session. Engine errors cross as their own error kinds: canceled, invalid request (bad input or manual alignments), or engine (unsupported feature, failure, or a result that failed the check).
+
+Implemented so far: the interface, the entry point, manual alignment validation, the segmentation helper, the result check, the built-in engine and the engine registry. The session compares with the registry's default engine when it opens and when a source document is reloaded, and keeps the result; the snapshot carries the regions, rows and engine capabilities. Line keys are the exact line text. Not yet: the `engine` config key and choosing an engine, ignore options in the normalizer, and running comparisons as cancelable worker jobs: for now they run to completion on the host thread, like loading.
+
+Every engine runs the same conformance tests: coverage invariants, statuses, manual alignment constraints in 2-way and 3-way mode, and the kdiff3 alignment test data. Session tests use a stub engine with fixed results, so merge state is tested without a diff algorithm.
+
+The sections below, from 2-way diff through Regions and rows, describe the built-in engine.
+
 ### 2-way diff
 
-A thin wrapper over `imara-diff`: it diffs the token sequences of two documents with the configured algorithm and returns the changed ranges, which become Diff Regions. The unchanged stretches between them become Unchanged Diff Regions.
+A thin wrapper over `imara-diff`: it diffs the token sequences of two documents with the configured algorithm and returns the changed ranges. Histogram is the default; Myers with try hard is the minimal Myers variant, and try hard does nothing for Histogram.
+
+The diff of A and B gives its rows directly: equal lines share a row, the lines of one changed range are paired by position, and the rest of the longer side gets rows of its own.
 
 ### Regions and rows
 
-3-way mode builds Merge Regions from two 2-way diffs:
+3-way mode builds rows from two 2-way diffs, then regions from the rows:
 
-1. Diff A with B and A with C. Each diff gives a list of changed ranges of A.
-2. Walk both lists along A. A change that only B or only C made becomes a Merge Region of its own. Changes from B and C that overlap, or meet at the same position of A, join into one Merge Region spanning their union. Stretches of A that neither side changed become Unchanged Merge Regions.
-3. The status of each region follows from comparing its hunks.
-4. The lines of each region are paired into rows. Equal lines share a row. In regions where both B and C changed, B and C are diffed with each other, so lines equal between them share a row instead of being stacked. Lines left unpaired get rows of their own, padded with void regions in the other panes.
+1. Diff A with B and A with C, and pair their lines as in 2-way mode. Every line of A now has a partner in B and in C, or none.
+2. Each line of A gets one row with both partners. Lines of B and C without a line of A, which come between the same two lines of A, are diffed with each other and paired the same way, so equal lines of B and C share a row instead of being stacked. They are placed before the next line of A.
+3. A row whose lines are equal in every document is stable. Runs of stable rows become Unchanged regions; the runs between them become changed regions. So changes from B and C that overlap, or meet at the same position of A, join into one region.
+4. The status of each region follows from comparing its hunks. A conflict is a whitespace conflict when hunks B and C are equal once all whitespace, line breaks included, is removed.
 
-2-way mode is the same process with only A and B.
+2-way mode builds its regions from its rows the same way.
 
-Character-level diffs are computed lazily for visible rows and cached; above a line length limit the whole line is marked as different.
+Pairing B and C across rows that also hold a line of A (kdiff3 `Diff3AlignBC`) is not implemented yet; the built-in engine reports that option as not honored.
+
+Character-level diffs are computed lazily for visible rows and cached. Each line of a row is diffed by characters with every other line in the row (Myers); a column is changed when it differs from at least one of them. Lines in voids take no part. Above the line length limit two different lines are marked as different as a whole.
 
 kdiff3 reference: `diff.cpp`, `pdiff.cpp`, `test/alignmenttest.cpp`. We reuse its test data, not its algorithm.
 
@@ -247,6 +292,7 @@ Alignment 1 turns Foo into a Merge Region with voids in A and C, status Changed 
 
 - Alignments cut every source document into segments: the alignments themselves and the stretches between consecutive alignments. Each segment gets its regions and rows on its own with the process above; rows and regions never span a segment boundary.
 - Both ends of an alignment are forced region boundaries, so its contents never merge with anything outside it. Inside an alignment, lines pair up and regions form as usual.
+- These rules bind every comparison engine. The built-in engine meets them through the segmentation helper.
 - Adding or removing an alignment is one undo step. Regions and rows are recomputed only for the affected segments; regions there lose their choices, edits and splits, regions elsewhere keep them.
 
 **Invalid alignments.** Crossing or overlapping alignments are rejected: the GUI shows an error message box, the attempt is logged, and the alignment list stays unchanged. Supporting crossing alignments is a possible later feature: it would allow merging three files even when functions were reordered relative to each other in all three source documents.
@@ -272,6 +318,19 @@ kdiff3 reference: manual diff help in `diff.cpp`. Differences are listed in `DEV
 
 The session holds everything about one open comparison (see Glossary). The host applies each command to the session and turns the result into a response plus a delta. Unit tests apply commands to a session directly; integration tests go through a client, like the GUI.
 
+The session is a core entity and never crosses the protocol: front ends see it only through the snapshot and deltas.
+
+### Session file (`.kd4`)
+
+A session can be saved to a `.kd4` file and opened again, to continue a merge later or to hand a partially resolved merge to someone else, whose computer may have different files at different paths.
+
+- Contents: a `version` key for migrations; for each source document its label, original path and raw bytes (base64), so encoding, BOM and EOL style are reproduced exactly; D's text, path and output reference; the manual alignments, splits, choices and edited regions; the regions and rows as computed; the undo history; the engine config with the comparison engine's id and version.
+- Format: JSON via `serde_json`, written atomically (temp file + rename) like D.
+- Every source document of an opened session file is a detached source: the engine works from the embedded bytes, and the disk is not consulted. Its path is kept for reference; it cannot be changed or reloaded, so the merge state is never recomputed from a changed source. D's path stays editable, so the receiver chooses where to save the result.
+- Opening restores the saved regions and rows without recomputing, so the result does not depend on the engines available. If the comparison engine's id or version differs from the saved one, a notice says so; recomputing is the user's choice and drops choices, edits and splits like an options change.
+- Saving a session does not save D, and saving D does not save the session.
+- The file is read and written by the host only; the format is owned by core.
+
 ## Protocol (`kdiff4-protocol`)
 
 All communication between the engine and anything else goes through this crate: it defines the messages, the two endpoints and the transports between them. Replacing the in-process transport with a network one must not require changes in core or GUI.
@@ -291,7 +350,8 @@ All communication between the engine and anything else goes through this crate: 
 | host → client | Event | progress, snapshot, delta or notice |
 
 - Commands: open, reload, cancel, choose hunks for a region, choose a side for all unresolved regions, split a region, edit D, add or remove a manual alignment, undo, redo, save, set engine config. Every user action in any front end ends up as a command.
-- Implemented so far: open; reload one source document from a (possibly new) path, keeping D; edit D (replace a byte range, tagged with the revision it was made on; a stale revision or a range off character boundaries is rejected); set D's path without writing it (or clear it, making D unnamed); save; save as; undo and redo of D; resync (the host re-sends a snapshot). Deltas so far: a source document replaced, D edited (with whether D now differs from its saved text, which undo can bring back), D's path changed, D saved.
+- Planned: save the session to a session file; open a session file.
+- Implemented so far: open; reload one source document from a (possibly new) path, keeping D; edit D (replace a byte range, tagged with the revision it was made on; a stale revision or a range off character boundaries is rejected); set D's path without writing it (or clear it, making D unnamed); save; save as; undo and redo of D; resync (the host re-sends a snapshot). Deltas so far: a source document replaced (with the regions and rows recomputed), D edited (with whether D now differs from its saved text, which undo can bring back), D's path changed, D saved.
 - D's undo history is kept by the host. Typing on one line is one undo step, and so is a run of Backspace or of Delete; a line break, a paste, replacing a selection, a word deletion, save, undo and redo start a new step. Undoing back to the saved text clears the modified flag.
 - D's text crosses the protocol with `\n` line ends. It is saved as UTF-8 with the EOL style and BOM of A, the output reference.
 - Queries: reads the mirror does not hold: character-level diffs for a row range, navigation (next or previous difference, conflict or unresolved conflict from a row), config help text.
@@ -300,7 +360,7 @@ All communication between the engine and anything else goes through this crate: 
 
 ### State mirroring
 
-- After open, the host sends a snapshot: document texts and metadata (labels, encoding, EOL style), regions, rows, D, manual alignments, engine config and the revision.
+- After open, the host sends a snapshot: document texts and metadata (labels, encoding, EOL style, whether the document is a detached source), regions, rows, D, manual alignments, engine config, engine capabilities and the revision.
 - Every change increments the revision and is broadcast as a delta (replaced ranges of regions, rows and D lines). The client applies deltas in order; on a gap in revisions it requests a new snapshot.
 - Front ends render from the mirror only and never compute diffs, alignment or merge results themselves. View state (scroll position, cursor, selection, focus) stays in the front end.
 - Typing in D: the client applies the edit to its mirror at once and sends it as a command tagged with the revision it was based on. The host is the authority. The delta caused by an accepted edit carries the request id, so the client does not apply it twice; a rejected edit makes the client drop its local change and resync. One editing client per session in v1.
@@ -316,7 +376,7 @@ All communication between the engine and anything else goes through this crate: 
 - Messages are plain owned data that can move between threads and be serialized with `serde`; no references, shared pointers, file handles or callbacks.
 - File paths in messages refer to the host's file system.
 - Errors cross the boundary as a protocol error (kind plus message), never as core's own error types.
-- Small vocabulary types shared by both sides (document, hunk change, region status, choice, EOL style, engine config) are defined in the protocol crate and used by core directly. Core internals (source text, tokens, the undo stack) never appear in messages.
+- Small vocabulary types shared by both sides (document, hunk, hunk change, region, region status, row, choice, manual alignment, EOL style, engine config, engine capabilities) are defined in the protocol crate and used by core directly. The comparison engine interface and the segmentation helper live there too, in an `engine` module. Core internals (source text, the undo stack) never appear in messages. Tokens are passed to comparison engines but never to front ends.
 
 ## Config
 
@@ -383,12 +443,14 @@ The binary routes each override by its section to the engine (in the open comman
 - Layout:
   - Two (2-way diff) panes side by side (A/B), Three (3-way merge) panes side by side (A/B/C) and a horizontal pane full width below for output merge result (D).
   - A session is a merge when it has C or an output file. Merges show the merge pane below the source panes, behind a splitter. It starts at half the height and keeps its share when the window is resized.
-  - Each pane has a header with the document letter (with `*` while D has unsaved changes), its label, an editable path field and a Browse button. Enter in the field, or a file picked with Browse, reloads A, B or C from that path and keeps D's edits; for D it only changes where D will be saved.
+  - Each pane has a header with the document letter (with `*` while D has unsaved changes), its label, an editable path field and a Browse button. Enter in the field, or a file picked with Browse, reloads A, B or C from that path and keeps D's edits; for D it only changes where D will be saved. For a detached source the path field and Browse are disabled.
+  - File → Save Session and File → Open Session write and read `.kd4` files.
   - Panes show a caret and its selection; there is one on screen. Pressing the mouse button in any pane moves the caret there at once, and dragging selects (Shift+click extends). Clicking below the text goes to its end, and right of a line to the line's end. Double-click selects a word (or a run of whitespace, or one punctuation character), triple-click a line. The keys are arrows, Ctrl+Left/Right by words, Home/End, PageUp/PageDown and Ctrl+Home/End, with Shift to select, plus Ctrl+A and Ctrl+C. A, B and C are read-only. D is editable: typing, Enter (also with Ctrl held), Backspace, Delete, Ctrl+Backspace and Ctrl+Delete by words, Ctrl+V and Ctrl+X, which replace or remove a selection; Edit → Undo (Ctrl+Z) and Redo (Ctrl+Y, Ctrl+Shift+Z) work on D wherever the caret is. Each edit is applied to the mirror at once and sent to the engine.
-  - File → Save writes D to its path, or asks for one like Save As when D has none. Save As picks a new path with the native Save dialog, which asks before overwriting, and D moves there. The outcome of saving, reloading and path changes shows in the status bar under the panes. The status bar is always there, one line high, so the panes never move when a message comes or goes; long messages are cut, with the full text in a tooltip.
+  - File → Save writes D to its path, or asks for one like Save As when D has none. Save As picks a new path with the native Save dialog, which asks before overwriting, and D moves there. The outcome of saving, reloading and path changes shows in the status bar under the panes. After open and after a reload it shows how many differences and conflicts the comparison found, and how many of the conflicts are whitespace only. The status bar is always there, one line high, so the panes never move when a message comes or goes; long messages are cut, with the full text in a tooltip.
   - Overview strip: a 4-line lens row between (A/B/C) and (D), shows current lines from all A, B, C, and D. D is allowed to be edited in this widget, and it automatically reflected in the D text. Shows char-diffs within each A, B, and C lines, so the contents could be judged by user and edited as the user wants.
 - Void Region: a special graphical entity that spans the rows of a region where a document has no text, and it represents absence of text in the specified document. Graphically represented as hatched block of space with no text in it.
-- Scrolling of the three panes is synchronized through row indices, not pixels. Void Regions take rows like text does, so synced scrolling stays aligned.
+- Scrolling of the three panes is synchronized through row indices, not pixels. Void Regions take rows like text does, so synced scrolling stays aligned. Every source pane has the same rows at the same height, so the panes share one vertical scroll offset: the pane the user scrolls, or the one that reveals the caret, moves all of them. Horizontal scrolling stays per pane. D has one row per line and scrolls on its own until the merge model exists.
+- Source panes draw rows, not lines: each row shows its line or the hatching of a void, over its region's shade. A changed region is shaded in A by what B or C did to it, and in B and C by their own change; a pane is not shaded for lines it doesn't have, and every pane with lines in a conflict is shaded as a conflict. The caret and selection stay in line positions; a click on a void puts the caret at the start of the next line. If the comparison does not fit a document, the pane falls back to one row per line and the mismatch is logged.
 - The merge pane is a custom widget, not `TextEdit`: own cursor, selection, clipboard, IME, and region coloring.
 - The GUI talks to the engine only through its protocol client and renders from the client mirror.
 - Long work (load, diff, align) runs in the host; the GUI shows its progress events, keeps repainting and can cancel.
@@ -401,6 +463,8 @@ The binary routes each override by its section to the engine (in the open comman
   - Red (removed hunks, chars)
   - Green (added hunks, chars)
   - Magenta (modified hunks, chars)
+  - Amber (conflicts)
+  - Implemented so far: region shades and void hatching, as fixed colors of the palette, which keep text at 7:1 contrast. Character-level colors wait for the character-level diff query, and the `[colors]` section of `gui.toml` is not read yet.
 
 ## Binary and CLI
 

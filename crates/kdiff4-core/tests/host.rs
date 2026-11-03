@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use kdiff4_protocol::engine::{MergeStatus, RegionStatus};
 use kdiff4_protocol::{Change, Client, Command, Delta, Document, ErrorKind, Event, HostMessage, Labels, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
 
 
@@ -82,6 +83,9 @@ fn open_sends_snapshot_then_ok_response() {
     let d = snapshot.output.unwrap();
     assert_eq!(d.path, Some(output));
     assert_eq!(d.text, "merged\n");
+    assert_eq!(snapshot.engine.id, kdiff4_core::BUILTIN_ENGINE_ID);
+    let statuses: Vec<RegionStatus> = snapshot.comparison.regions.iter().map(|region| region.status.clone()).collect();
+    assert_eq!(statuses, [RegionStatus::Merge(MergeStatus::Conflict)]);
     expect_ok(&client, id);
 
     drop(client);
@@ -159,7 +163,12 @@ fn edit_save_and_reload_go_through_deltas() {
     let id = client.send(Command::LoadSource { document: Document::B, path: new_b }).unwrap();
     let delta = expect_delta(&client);
     assert_eq!(delta.revision, Revision(4));
-    assert!(matches!(delta.change, Change::SourceReplaced(ref text) if text.line(0) == "b2"));
+    let Change::SourceReplaced { text, comparison } = delta.change else {
+        panic!("expected a replaced source");
+    };
+    assert_eq!(text.line(0), "b2");
+    assert_eq!(comparison.regions.len(), 1);
+    assert_eq!(comparison.regions[0].status, RegionStatus::Merge(MergeStatus::Conflict));
     expect_ok(&client, id);
 
     let id = client.send(Command::Undo).unwrap();
