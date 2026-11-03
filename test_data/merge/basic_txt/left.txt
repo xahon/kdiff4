@@ -1,0 +1,20 @@
+Weekly shopping list
+=============
+
+Fruit:
+- apples
+- blueberries
+- cherries
+
+Vegetables:
+- carrots
+- potatoes
+- onions
+- spinach
+
+Dairy:
+- milk
+- butter
+
+Notes:
+Buy everything on Saturday.

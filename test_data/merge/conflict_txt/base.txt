@@ -1,0 +1,15 @@
+[server]
+host = localhost
+port = 8080
+timeout = 30
+
+[database]
+name = app
+user = admin
+password = secret
+pool = 4
+
+[logging]
+level = info
+file = app.log
+rotate = daily

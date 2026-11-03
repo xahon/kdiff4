@@ -1,0 +1,14 @@
+[server]
+host = localhost
+port = 9090
+timeout = 30
+
+[database]
+name = app
+user = root
+password = secret
+pool = 4
+
+[logging]
+level = debug
+file = app.log

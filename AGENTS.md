@@ -56,7 +56,7 @@ Listed in `docs/DEVIATIONS.md`. When porting an area, check that list first and 
 
 - Every change comes with tests; write them first where practical. Every functional Rust module should have its own set of tests.
 - Every bug fix, and every fixed kdiff3 bug, gets a regression test.
-- Port kdiff3's test data (`../kdiff3/test/testdata/`) and alignment tests (`../kdiff3/test/alignmenttest.cpp`, `../kdiff3/src/autotests/`) into `tests/data/` and Rust tests.
+- Port kdiff3's test data (`../kdiff3/test/testdata/`) and alignment tests (`../kdiff3/test/alignmenttest.cpp`, `../kdiff3/src/autotests/`) into `test_data/` and Rust tests. All test inputs live in `test_data/`, whatever crate uses them.
 - Use `insta` snapshots for alignment and merge output, `proptest` for invariants (every input line appears exactly once per side, in order; result of choosing a side reproduces that side).
 - Engine behavior is tested headless, both directly and through the same protocol path the GUI uses; the GUI layer stays thin and dumb.
 

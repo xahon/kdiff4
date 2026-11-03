@@ -1,0 +1,19 @@
+Shopping list
+=============
+
+Fruit:
+- apples
+- bananas
+- cherries
+
+Vegetables:
+- carrots
+- potatoes
+- spinach
+
+Dairy:
+- milk
+- butter
+
+Notes:
+Buy everything on Saturday.

@@ -10,7 +10,7 @@ use kdiff4_protocol::engine::{CompareInput, ComparisonOptions, Job, Progress, So
 
 
 fn data_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/data/alignment")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/alignment")
 }
 
 

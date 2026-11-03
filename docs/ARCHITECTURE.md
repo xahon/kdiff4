@@ -12,7 +12,7 @@ kdiff4/
     kdiff4-protocol/    messages between the engine and front ends, client and host endpoints, transports.
     kdiff4-gui/         egui/eframe front end.
   src/main.rs           `kdiff4` binary: CLI parsing (clap), headless mode, wires the host to a front end.
-  tests/data/           test inputs ported from kdiff3 `test/testdata/` plus our own.
+  test_data/            test inputs for every crate: kdiff3 alignment cases (`alignment/`) and merge cases (`merge/`).
   docs/
 ```
 
@@ -234,6 +234,8 @@ Comparison runs on host worker threads with the cancel flag and progress reporti
 Implemented so far: the interface, the entry point, manual alignment validation, the segmentation helper, the result check, the built-in engine and the engine registry. The session compares with the registry's default engine when it opens and when a source document is reloaded, and keeps the result; the snapshot carries the regions, rows and engine capabilities. Line keys are the exact line text. Not yet: the `engine` config key and choosing an engine, ignore options in the normalizer, and running comparisons as cancelable worker jobs: for now they run to completion on the host thread, like loading.
 
 Every engine runs the same conformance tests: coverage invariants, statuses, manual alignment constraints in 2-way and 3-way mode, and the kdiff3 alignment test data. Session tests use a stub engine with fixed results, so merge state is tested without a diff algorithm.
+
+The merge cases in `test_data/merge/` run the built-in engine through the host the way the GUI drives it. Each case folder holds the base, left and right documents (left and right alone for a 2-way merge) and the expected result: the auto-merge, with B chosen for every conflict left. The cases cover plain merges without conflicts, conflicting and alike changes, a 2-way merge, a long file, functions moved with and without changes on the other side, whitespace-only changes, and edge cases (an empty base, a last line without a line break, CRLF line ends). Each test checks the number of differences, conflicts and unresolved regions, the expected result, and that choosing one side everywhere reproduces that side.
 
 The sections below, from 2-way diff through Regions and rows, describe the built-in engine.
 
