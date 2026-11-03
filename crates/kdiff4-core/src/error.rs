@@ -28,6 +28,12 @@ pub enum CoreError {
     InvalidRange { start: usize, end: usize },
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error("there is no region {index}; the session has {count}")]
+    NoSuchRegion { index: usize, count: usize },
+    #[error("invalid choice: {reason}")]
+    InvalidChoice { reason: String },
+    #[error("{count} unresolved {} left; resolve them before saving", if *count == 1 { "conflict is" } else { "conflicts are" })]
+    UnresolvedConflicts { count: usize },
 }
 
 
@@ -38,7 +44,7 @@ impl From<CoreError> for ProtocolError {
         }
         let kind = match &error {
             CoreError::Read { .. } | CoreError::Write { .. } => ErrorKind::Io,
-            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } => ErrorKind::InvalidRequest,
+            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::UnresolvedConflicts { .. } => ErrorKind::InvalidRequest,
             CoreError::Engine(_) => ErrorKind::Engine,
         };
         ProtocolError { kind, message: error.to_string() }

@@ -129,7 +129,7 @@ fn next_shared_offset(shared: f32, offsets: &[f32]) -> f32 {
 fn output_pane(ui: &mut Ui, palette: &Palette, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
     if let Some(output) = mirror.output() {
         let lines = output.lines();
-        pane(ui, palette, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::PerLine(lines.count()), None, state, actions);
+        pane(ui, palette, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::Mapped(mirror.output_rows()), None, state, actions);
     }
 }
 

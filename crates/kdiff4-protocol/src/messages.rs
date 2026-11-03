@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::engine::{Comparison, EngineCapabilities};
+use crate::engine::{Comparison, EngineCapabilities, Region};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,9 +49,13 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     Open(OpenFiles),
-    /// Reloads A, B or C from a (possibly new) path. D is kept.
+    /// Reloads A, B or C from a (possibly new) path and recomputes the comparison. D is rebuilt from the new regions and its undo history starts over; the host answers with a new snapshot.
     LoadSource { document: Document, path: PathBuf },
     EditOutput(OutputEdit),
+    /// Sets the choice of region `region`, dropping its hand edits. `base` is the revision the region index refers to.
+    SetChoice { base: Revision, region: usize, choice: Choice },
+    /// Chooses the hunk of `document` for every unresolved region. One undo step; does nothing when no region is unresolved.
+    ChooseForUnresolved { base: Revision, document: Document },
     /// Changes where D is saved, without writing it. `None` makes D an unnamed in-memory document.
     SetOutputPath(Option<PathBuf>),
     Save,
@@ -138,10 +142,8 @@ pub struct Delta {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
-    /// The regions and rows are recomputed with the new text.
-    SourceReplaced { text: DocumentText, comparison: Comparison },
-    /// `modified` says whether D now differs from what was loaded or last saved; undo can bring it back.
-    OutputEdited { range: Range<usize>, text: String, modified: bool },
+    /// D's text and the regions behind it changed: a hand edit, a choice, an undo or a redo. `modified` says whether D now differs from what was loaded or last saved; undo can bring it back.
+    OutputEdited { range: Range<usize>, text: String, modified: bool, merge: MergeUpdate },
     OutputPathChanged(Option<PathBuf>),
     OutputSaved(PathBuf),
 }
@@ -163,6 +165,45 @@ pub struct Snapshot {
     pub comparison: Comparison,
     /// The comparison engine that computed `comparison`.
     pub engine: EngineCapabilities,
+    /// Per region of `comparison`, its merge state; empty without D.
+    pub merge: Vec<RegionMerge>,
+}
+
+
+/// Which hunks of a region D takes its lines from, in this order; or none yet. An empty list is a deliberate choice of no lines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Choice {
+    Unresolved,
+    Hunks(Vec<Document>),
+}
+
+
+/// The merge state of one region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegionMerge {
+    pub choice: Choice,
+    /// D's lines of this region were changed by hand; they replace the lines of the choice.
+    pub edited: bool,
+    /// How many lines of D this region contributes.
+    pub output_lines: usize,
+}
+
+
+impl RegionMerge {
+    /// An unresolved conflict: no choice and no hand edits. D can't be saved while one exists.
+    pub fn is_unresolved(&self) -> bool {
+        self.choice == Choice::Unresolved && !self.edited
+    }
+}
+
+
+/// Regions `at..at + removed` were replaced by `regions`, with their merge states in `merge`. Usually the same number of regions; fewer when an edit joined them, more when an undo split them again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeUpdate {
+    pub at: usize,
+    pub removed: usize,
+    pub regions: Vec<Region>,
+    pub merge: Vec<RegionMerge>,
 }
 
 
@@ -296,6 +337,16 @@ mod tests {
         assert_eq!(EolStyle::Lf.terminator(), "\n");
         assert_eq!(EolStyle::CrLf.terminator(), "\r\n");
         assert_eq!(EolStyle::Cr.terminator(), "\r");
+    }
+
+
+    #[test]
+    fn unresolved_means_no_choice_and_no_edits() {
+        let state = |choice, edited| RegionMerge { choice, edited, output_lines: 0 };
+        assert!(state(Choice::Unresolved, false).is_unresolved());
+        assert!(!state(Choice::Unresolved, true).is_unresolved());
+        assert!(!state(Choice::Hunks(Vec::new()), false).is_unresolved());
+        assert!(!state(Choice::Hunks(vec![Document::B]), false).is_unresolved());
     }
 
 

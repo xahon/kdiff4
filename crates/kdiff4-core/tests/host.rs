@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kdiff4_protocol::engine::{MergeStatus, RegionStatus};
-use kdiff4_protocol::{Change, Client, Command, Delta, Document, ErrorKind, Event, HostMessage, Labels, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
+use kdiff4_protocol::{Change, Choice, Client, Command, Delta, Document, ErrorKind, Event, HostMessage, Labels, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
 
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -82,7 +82,8 @@ fn open_sends_snapshot_then_ok_response() {
     assert_eq!(snapshot.documents[0].label.as_deref(), Some("Base"));
     let d = snapshot.output.unwrap();
     assert_eq!(d.path, Some(output));
-    assert_eq!(d.text, "merged\n");
+    assert_eq!(d.text, "", "an existing output file is not loaded; D is the merge, here one unresolved conflict");
+    assert!(snapshot.merge[0].is_unresolved());
     assert_eq!(snapshot.engine.id, kdiff4_core::BUILTIN_ENGINE_ID);
     let statuses: Vec<RegionStatus> = snapshot.comparison.regions.iter().map(|region| region.status.clone()).collect();
     assert_eq!(statuses, [RegionStatus::Merge(MergeStatus::Conflict)]);
@@ -140,10 +141,24 @@ fn edit_save_and_reload_go_through_deltas() {
     let snapshot = expect_snapshot(&client);
     expect_ok(&client, id);
     assert_eq!(snapshot.output.as_ref().unwrap().path, None);
+    assert!(snapshot.merge[0].is_unresolved());
+
+    let target = dir.join("saved.txt");
+    let id = client.send(Command::SaveAs(target.clone())).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response");
+    };
+    assert_eq!(response.id, id);
+    assert!(response.result.unwrap_err().message.contains("unresolved"));
 
     let id = client.send(Command::EditOutput(OutputEdit { base: snapshot.revision.clone(), range: 0..0, text: "x\n".to_string() })).unwrap();
     let delta = expect_delta(&client);
-    assert_eq!(delta, Delta { revision: Revision(2), cause: Some(id.clone()), change: Change::OutputEdited { range: 0..0, text: "x\n".to_string(), modified: true } });
+    assert_eq!((delta.revision.clone(), delta.cause.clone()), (Revision(2), Some(id.clone())));
+    let Change::OutputEdited { range, text, modified, merge } = delta.change else {
+        panic!("expected an output change");
+    };
+    assert_eq!((range, text.as_str(), modified), (0..0, "x\n", true));
+    assert!(merge.merge[0].edited);
     expect_ok(&client, id);
 
     let stale = client.send(Command::EditOutput(OutputEdit { base: Revision(1), range: 0..0, text: "y".to_string() })).unwrap();
@@ -153,38 +168,47 @@ fn edit_save_and_reload_go_through_deltas() {
     assert_eq!(response.id, stale);
     assert!(response.result.is_err());
 
-    let target = dir.join("saved.txt");
     let id = client.send(Command::SaveAs(target.clone())).unwrap();
     assert_eq!(expect_delta(&client).change, Change::OutputSaved(target.clone()));
     expect_ok(&client, id);
     assert_eq!(fs::read(&target).unwrap(), b"x\r\n");
 
+    let id = client.send(Command::Undo).unwrap();
+    let Change::OutputEdited { range, text, modified, .. } = expect_delta(&client).change else {
+        panic!("expected an output change");
+    };
+    assert_eq!((range, text.as_str(), modified), (0..2, "", true));
+    expect_ok(&client, id);
+    let id = client.send(Command::Redo).unwrap();
+    let Change::OutputEdited { modified, .. } = expect_delta(&client).change else {
+        panic!("expected an output change");
+    };
+    assert!(!modified);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::SetChoice { base: Revision(5), region: 0, choice: Choice::Hunks(vec![Document::C]) }).unwrap();
+    let delta = expect_delta(&client);
+    assert!(matches!(delta.change, Change::OutputEdited { ref text, .. } if text == "c\n"));
+    expect_ok(&client, id);
+    let id = client.send(Command::ChooseForUnresolved { base: Revision(6), document: Document::B }).unwrap();
+    expect_ok(&client, id);
+
     let new_b = write(&dir, "b2.txt", "b2\n");
     let id = client.send(Command::LoadSource { document: Document::B, path: new_b }).unwrap();
-    let delta = expect_delta(&client);
-    assert_eq!(delta.revision, Revision(4));
-    let Change::SourceReplaced { text, comparison } = delta.change else {
-        panic!("expected a replaced source");
-    };
-    assert_eq!(text.line(0), "b2");
-    assert_eq!(comparison.regions.len(), 1);
-    assert_eq!(comparison.regions[0].status, RegionStatus::Merge(MergeStatus::Conflict));
+    let snapshot = expect_snapshot(&client);
+    assert_eq!(snapshot.revision, Revision(7));
+    assert_eq!(snapshot.documents[1].line(0), "b2");
+    assert_eq!(snapshot.comparison.regions.len(), 1);
+    assert_eq!(snapshot.comparison.regions[0].status, RegionStatus::Merge(MergeStatus::Conflict));
+    assert_eq!(snapshot.output.as_ref().unwrap().text, "");
     expect_ok(&client, id);
 
     let id = client.send(Command::Undo).unwrap();
-    let delta = expect_delta(&client);
-    assert_eq!(delta.change, Change::OutputEdited { range: 0..2, text: String::new(), modified: true });
-    expect_ok(&client, id);
-    let id = client.send(Command::Redo).unwrap();
-    assert_eq!(expect_delta(&client).change, Change::OutputEdited { range: 0..0, text: "x\n".to_string(), modified: false });
-    expect_ok(&client, id);
-    let id = client.send(Command::Redo).unwrap();
     expect_ok(&client, id);
 
     let id = client.send(Command::Resync).unwrap();
     let snapshot = expect_snapshot(&client);
-    assert_eq!(snapshot.revision, Revision(6));
-    assert_eq!(snapshot.output.unwrap().text, "x\n");
+    assert_eq!(snapshot.revision, Revision(7));
     expect_ok(&client, id);
 
     drop(client);

@@ -129,7 +129,7 @@ mod tests {
     fn client_receives_host_messages_in_order() {
         let (client, host) = in_process();
         assert_eq!(client.try_recv(), Ok(None));
-        let snapshot = HostMessage::Event(Event::Snapshot(Snapshot { revision: Revision(1), documents: Vec::new(), output: None, comparison: Comparison::default(), engine: EngineCapabilities::default() }));
+        let snapshot = HostMessage::Event(Event::Snapshot(Snapshot { revision: Revision(1), documents: Vec::new(), output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new() }));
         host.send(snapshot.clone()).unwrap();
         host.send(ok_response(RequestId(1))).unwrap();
         assert_eq!(client.try_recv(), Ok(Some(snapshot)));

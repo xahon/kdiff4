@@ -55,18 +55,28 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active(session)?.snapshot())));
             return Ok(());
         }
-        Command::LoadSource { document, path } => active(session)?.load_source(document, &path, registry.default_engine())?,
-        Command::EditOutput(edit) => active(session)?.edit_output(&edit)?,
+        Command::LoadSource { document, path } => {
+            let active = active(session)?;
+            active.load_source(document.clone(), &path, registry.default_engine())?;
+            log::info!("host: reloaded {} from {}", document.letter(), path.display());
+            let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
+            return Ok(());
+        }
+        Command::EditOutput(edit) => active(session)?.edit_output(&edit, registry.default_engine())?,
+        Command::SetChoice { base, region, choice } => active(session)?.set_choice(&base, region, choice)?,
+        Command::ChooseForUnresolved { base, document } => match active(session)?.choose_for_unresolved(&base, document)? {
+            Some(change) => change,
+            None => return Ok(()),
+        },
         Command::SetOutputPath(path) => active(session)?.set_output_path(path)?,
         Command::Save => active(session)?.save()?,
         Command::SaveAs(path) => active(session)?.save_as(&path)?,
     };
     let revision = active(session)?.revision();
     match &change {
-        Change::SourceReplaced { text, .. } => log::info!("host: reloaded {} from {}", text.document.letter(), text.path.display()),
         Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
         Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
-        Change::OutputEdited { range, text, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, revision {}", text.len(), revision.0),
+        Change::OutputEdited { range, text, merge, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, regions {}..{} by {}, revision {}", text.len(), merge.at, merge.at + merge.removed, merge.regions.len(), revision.0),
     }
     let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta { revision, cause: Some(id), change })));
     Ok(())

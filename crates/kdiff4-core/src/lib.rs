@@ -2,6 +2,7 @@ mod builtin_engine;
 mod engine_registry;
 mod error;
 mod host;
+mod merge;
 mod normalizer;
 mod session;
 mod text;

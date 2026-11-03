@@ -1,3 +1,4 @@
+use kdiff4_protocol::RegionMerge;
 use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, Region, RegionStatus};
 
 
@@ -47,6 +48,31 @@ impl RowMap {
         }
         if row_of_line.len() != line_count {
             return RowMap::fallback(line_count, "lines missing");
+        }
+        RowMap { rows, row_of_line }
+    }
+
+
+    /// D's rows: its lines, region by region, with a conflict-shaded void row for each unresolved conflict, which has no lines. Lines past the regions (the empty line after D's last line break) follow as plain rows.
+    pub fn for_output(merge: &[RegionMerge], line_count: usize) -> RowMap {
+        let mut rows = Vec::with_capacity(line_count + merge.len());
+        let mut row_of_line = Vec::with_capacity(line_count);
+        for state in merge {
+            if state.output_lines == 0 && state.is_unresolved() {
+                rows.push(PaneRow { line: None, shade: Some(Shade::Conflict) });
+                continue;
+            }
+            for _ in 0..state.output_lines {
+                if row_of_line.len() >= line_count {
+                    return RowMap::fallback(line_count, "more region lines than D has");
+                }
+                row_of_line.push(rows.len());
+                rows.push(PaneRow { line: Some(row_of_line.len() - 1), shade: None });
+            }
+        }
+        while row_of_line.len() < line_count {
+            row_of_line.push(rows.len());
+            rows.push(PaneRow { line: Some(row_of_line.len() - 1), shade: None });
         }
         RowMap { rows, row_of_line }
     }
@@ -275,6 +301,34 @@ mod tests {
         shuffled.regions.swap(0, 2);
         let map = RowMap::for_source(&shuffled, 0, 2);
         assert_eq!(Rows::Mapped(&map).row_of_line(1), 1);
+    }
+
+
+    fn state(output_lines: usize, unresolved: bool) -> RegionMerge {
+        let choice = if unresolved { kdiff4_protocol::Choice::Unresolved } else { kdiff4_protocol::Choice::Hunks(Vec::new()) };
+        RegionMerge { choice, edited: false, output_lines }
+    }
+
+
+    #[test]
+    fn output_rows_show_unresolved_conflicts_as_placeholders() {
+        let map = RowMap::for_output(&[state(1, false), state(0, true), state(0, false), state(2, false)], 4);
+        let rows = Rows::Mapped(&map);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.row(0), Some(PaneRow { line: Some(0), shade: None }));
+        assert_eq!(rows.row(1), Some(PaneRow { line: None, shade: Some(Shade::Conflict) }));
+        assert_eq!(rows.row(2), Some(PaneRow { line: Some(1), shade: None }));
+        assert_eq!(rows.row(4), Some(PaneRow { line: Some(3), shade: None }));
+        assert_eq!(rows.row_of_line(3), 4);
+        assert_eq!(rows.line_at_or_after(1), Some(1));
+    }
+
+
+    #[test]
+    fn output_rows_that_do_not_fit_fall_back_to_lines() {
+        let map = RowMap::for_output(&[state(3, false)], 2);
+        assert_eq!(Rows::Mapped(&map).len(), 2);
+        assert_eq!(Rows::Mapped(&map).row(1), Some(PaneRow { line: Some(1), shade: None }));
     }
 
 

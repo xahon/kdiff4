@@ -1,16 +1,31 @@
 use std::ops::Range;
 
 
-/// One undo step of D: at byte `start`, `removed` was replaced by `inserted`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step {
-    pub start: usize,
-    pub removed: String,
-    pub inserted: String,
+/// What a step changed besides D's text, e.g. the regions behind it.
+pub trait StepData: Clone {
+    /// The data of `self` followed by `next`, when the two may become one step; `None` keeps them apart.
+    fn joined(&self, next: &Self) -> Option<Self>;
 }
 
 
-impl Step {
+impl StepData for () {
+    fn joined(&self, _next: &()) -> Option<()> {
+        Some(())
+    }
+}
+
+
+/// One undo step of D: at byte `start`, `removed` was replaced by `inserted`, and `data` changed with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step<M> {
+    pub start: usize,
+    pub removed: String,
+    pub inserted: String,
+    pub data: M,
+}
+
+
+impl<M> Step<M> {
     /// The replacement that redoes the step: the range of `removed`, and the text to put there.
     pub fn forward(&self) -> (Range<usize>, &str) {
         (self.start..self.start + self.removed.len(), &self.inserted)
@@ -48,9 +63,9 @@ enum RunKind {
 
 
 /// The undo history of D. Steps before `position` are done, steps after it can be redone.
-#[derive(Debug, Clone, Default)]
-pub struct History {
-    steps: Vec<Step>,
+#[derive(Debug, Clone)]
+pub struct History<M> {
+    steps: Vec<Step<M>>,
     position: usize,
     /// The position whose text is on disk; `None` once that state can't be reached by undo or redo.
     saved: Option<usize>,
@@ -59,21 +74,28 @@ pub struct History {
 }
 
 
-impl History {
+impl<M: StepData> History<M> {
     /// A history whose starting text is the saved one.
-    pub fn new_saved() -> History {
-        History { saved: Some(0), ..History::default() }
+    pub fn new_saved() -> History<M> {
+        History { steps: Vec::new(), position: 0, saved: Some(0), run: None }
     }
 
 
-    /// Records an edit. Typing on one line is one step, and so is a run of Backspace or of Delete.
-    pub fn record(&mut self, step: Step) {
+    /// A history whose starting text is not on disk.
+    pub fn new_unsaved() -> History<M> {
+        History { steps: Vec::new(), position: 0, saved: None, run: None }
+    }
+
+
+    /// Records an edit. Typing on one line is one step, and so is a run of Backspace or of Delete, as long as their data joins too.
+    pub fn record(&mut self, step: Step<M>) {
         self.steps.truncate(self.position);
         if self.saved.is_some_and(|saved| saved > self.position) {
             self.saved = None;
         }
         let kind = step.run_kind();
-        if kind.is_some() && kind == self.run && let Some(last) = self.steps.last_mut() && join(last, &step) {
+        if kind.is_some() && kind == self.run && let Some(last) = self.steps.last_mut() && let Some(data) = last.data.joined(&step.data) && join(last, &step) {
+            last.data = data;
             return;
         }
         self.steps.push(step);
@@ -82,7 +104,7 @@ impl History {
     }
 
 
-    pub fn undo(&mut self) -> Option<&Step> {
+    pub fn undo(&mut self) -> Option<&Step<M>> {
         if self.position == 0 {
             return None;
         }
@@ -92,7 +114,7 @@ impl History {
     }
 
 
-    pub fn redo(&mut self) -> Option<&Step> {
+    pub fn redo(&mut self) -> Option<&Step<M>> {
         let step = self.steps.get(self.position)?;
         self.position += 1;
         self.run = None;
@@ -113,7 +135,7 @@ impl History {
 
 
 /// Grows `last` by `next` if `next` continues it in place: typing right after it, Backspace right before it, or Delete at its start.
-fn join(last: &mut Step, next: &Step) -> bool {
+fn join<M>(last: &mut Step<M>, next: &Step<M>) -> bool {
     if next.removed.is_empty() && next.start == last.start + last.inserted.len() {
         last.inserted.push_str(&next.inserted);
         return true;
@@ -136,13 +158,49 @@ mod tests {
     use super::*;
 
 
-    fn insert(start: usize, text: &str) -> Step {
-        Step { start, removed: String::new(), inserted: text.to_string() }
+    fn insert(start: usize, text: &str) -> Step<()> {
+        Step { start, removed: String::new(), inserted: text.to_string(), data: () }
     }
 
 
-    fn remove(start: usize, text: &str) -> Step {
-        Step { start, removed: text.to_string(), inserted: String::new() }
+    fn remove(start: usize, text: &str) -> Step<()> {
+        Step { start, removed: text.to_string(), inserted: String::new(), data: () }
+    }
+
+
+    /// Joins only steps with equal tags.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Tag(u8);
+
+
+    impl StepData for Tag {
+        fn joined(&self, next: &Tag) -> Option<Tag> {
+            (self == next).then(|| next.clone())
+        }
+    }
+
+
+    fn tagged(start: usize, text: &str, tag: u8) -> Step<Tag> {
+        Step { start, removed: String::new(), inserted: text.to_string(), data: Tag(tag) }
+    }
+
+
+    #[test]
+    fn typing_joins_only_when_the_data_joins() {
+        let mut history = History::new_saved();
+        history.record(tagged(0, "a", 1));
+        history.record(tagged(1, "b", 1));
+        history.record(tagged(2, "c", 2));
+        history.record(tagged(3, "d", 2));
+        assert_eq!(history.undo(), Some(&Step { start: 2, removed: String::new(), inserted: "cd".to_string(), data: Tag(2) }));
+        assert_eq!(history.undo(), Some(&Step { start: 0, removed: String::new(), inserted: "ab".to_string(), data: Tag(1) }));
+    }
+
+
+    #[test]
+    fn unsaved_history_starts_modified() {
+        let history: History<()> = History::new_unsaved();
+        assert!(history.is_modified());
     }
 
 
@@ -238,7 +296,7 @@ mod tests {
 
     #[test]
     fn modified_follows_the_saved_position() {
-        let mut history = History::new_saved();
+        let mut history: History<()> = History::new_saved();
         assert!(!history.is_modified());
         history.record(insert(0, "a"));
         assert!(history.is_modified());
@@ -269,7 +327,7 @@ mod tests {
 
     #[test]
     fn forward_and_backward_ranges() {
-        let step = Step { start: 3, removed: "xy".to_string(), inserted: "abc".to_string() };
+        let step = Step { start: 3, removed: "xy".to_string(), inserted: "abc".to_string(), data: () };
         assert_eq!(step.forward(), (3..5, "abc"));
         assert_eq!(step.backward(), (3..6, "xy"));
     }

@@ -29,6 +29,11 @@ None yet. The owner decides which kdiff3 bugs get fixed. When you find one while
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
 - Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
 
+### Merge result
+
+- A hand edit that crosses region boundaries joins the touched regions into one edited region; undo restores them (see Merge model in `ARCHITECTURE.md`).
+- Typing on an unresolved conflict's placeholder line is not possible yet; kdiff3 lets the user type over its "<Merge Conflict>" line. Choose a hunk first, then edit it.
+
 ### Manual alignment
 
 kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHITECTURE.md`):
@@ -52,7 +57,6 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 ### Open dialog
 
 - Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.
-- Until the merge engine exists, D starts with the existing output file's contents (or empty), not with a merge result.
 - File dialogs remember the directory of the last confirmed file between sessions.
 
 ### Configuration

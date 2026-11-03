@@ -25,6 +25,12 @@ const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND
 const REDO_ALT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
+/// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
+const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
+    (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
+    (Document::B, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)),
+    (Document::C, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)),
+];
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
 const SETTINGS_WINDOW_SIZE: [f32; 2] = [640.0, 400.0];
@@ -42,6 +48,8 @@ enum Pending {
     Resync,
     /// Undo or redo; its delta moves the caret to the changed text.
     UndoRedo,
+    /// A choice for one region or for every unresolved one.
+    Choose,
 }
 
 
@@ -310,7 +318,7 @@ impl KdiffApp {
                             Status { text: format!("Saved {}", path.display()), is_error: false }
                         }),
                     Pending::Edit | Pending::Resync | Pending::UndoRedo => self.status.take(),
-                    Pending::Open | Pending::LoadSource(_) => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
+                    Pending::Open | Pending::LoadSource(_) | Pending::Choose => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
                     Pending::SetOutputPath => None,
                 };
                 return;
@@ -329,6 +337,7 @@ impl KdiffApp {
             Pending::LoadSource(document) => self.report_error(format!("Cannot load {}: {}", document.letter(), error.message)),
             Pending::SetOutputPath => self.report_error(format!("Cannot change the output path: {}", error.message)),
             Pending::Save => self.report_error(format!("Cannot save: {}", error.message)),
+            Pending::Choose => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
         }
@@ -573,6 +582,43 @@ impl KdiffApp {
     }
 
 
+    /// Toggles `document` in the region of the line with the caret, in any pane.
+    fn choose_current(&mut self, document: Document) {
+        let Some((caret_document, cursor)) = self.panes.caret else {
+            self.report_error("Put the caret in a region to choose for it".to_string());
+            return;
+        };
+        let Some(mirror) = self.mirror.as_ref() else { return };
+        let Some(base) = mirror.choice_base() else { return };
+        let Some(region) = mirror.region_at(caret_document, cursor.head.line) else {
+            self.report_error("The caret is not in a region".to_string());
+            return;
+        };
+        let Some(choice) = mirror.toggled_choice(region, document) else { return };
+        self.send(Command::SetChoice { base, region, choice }, Pending::Choose);
+    }
+
+
+    fn choose_for_unresolved(&mut self, document: Document) {
+        let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
+        self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose);
+    }
+
+
+    /// A, B and, in a 3-way merge, C: the documents a choice can take hunks from.
+    fn choosable(&self) -> Vec<Document> {
+        if !self.is_merge() {
+            return Vec::new();
+        }
+        let count = self.mirror.as_ref().map_or(0, |mirror| mirror.documents().len());
+        Document::ALL
+            .iter()
+            .take(count.min(3))
+            .cloned()
+            .collect()
+    }
+
+
     /// Undo and redo act on D, wherever the caret is. While a text field has the keyboard, they are left to the field.
     fn undo_redo(&mut self, ctx: &egui::Context, command: Command) {
         if self.is_merge() && !ctx.text_edit_focused() {
@@ -588,6 +634,17 @@ impl KdiffApp {
             }
             if ctx.input_mut(|input| input.consume_shortcut(&UNDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Undo);
+            }
+            for document in self.choosable() {
+                let shortcut = CHOOSE_SHORTCUTS
+                    .iter()
+                    .find(|(choosable, _)| *choosable == document)
+                    .map(|(_, shortcut)| shortcut.clone());
+                if let Some(shortcut) = shortcut
+                    && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+                {
+                    self.choose_current(document);
+                }
             }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN_SHORTCUT)) {
@@ -662,6 +719,22 @@ impl KdiffApp {
                     let redo = egui::Button::new("Redo").shortcut_text(ctx.format_shortcut(&REDO_SHORTCUT));
                     if ui.add_enabled(is_merge, redo).clicked() {
                         self.undo_redo(&ctx, Command::Redo);
+                    }
+                });
+                let choosable = self.choosable();
+                ui.menu_button("Merge", |ui| {
+                    for (document, shortcut) in CHOOSE_SHORTCUTS.iter() {
+                        let button = egui::Button::new(format!("Choose {} Here", document.letter())).shortcut_text(ui.ctx().format_shortcut(shortcut));
+                        if ui.add_enabled(choosable.contains(document), button).clicked() {
+                            self.choose_current(document.clone());
+                        }
+                    }
+                    ui.separator();
+                    for document in CHOOSE_SHORTCUTS.iter().map(|(document, _)| document) {
+                        let button = egui::Button::new(format!("Choose {} for All Unresolved", document.letter()));
+                        if ui.add_enabled(choosable.contains(document), button).clicked() {
+                            self.choose_for_unresolved(document.clone());
+                        }
                     }
                 });
                 ui.menu_button("Settings", |ui| {
