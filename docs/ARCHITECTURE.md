@@ -332,7 +332,7 @@ kdiff3 reference: manual diff help in `diff.cpp`. Differences are listed in `DEV
   - Whitespace conflict: the configured default side, if one is set; otherwise unresolved.
   - Conflict: unresolved.
 - 2-way merge (two files and an output): Unchanged Diff Regions take hunk A; every other Diff Region is unresolved, except whitespace-only differences when a 2-way default side is configured.
-- Editing D inside a region turns it into an edited region.
+- Editing D inside a region turns it into an edited region. Inside an unedited region whose hunks are equal, the region is split instead: each line the edit touches becomes an edited region of its own, spanning that line in every source, so the region count stays the same across documents. New lines beyond the touched ones get regions with no lines in the sources; touched lines left without new text get regions with no text in D. The lines around the edit stay as they were. Choosing a single hunk for such a line drops the edit and joins it back with the unedited regions around it that it continues.
 - Undo/redo: every mutation is a merge op with a stored inverse. Groups of ops (e.g. "choose B everywhere") are one undo step.
 - Save writes D with the encoding, BOM and EOL style of the output reference (A by default, configurable), atomically via temp file + rename.
 - Implemented so far:

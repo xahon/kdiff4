@@ -233,6 +233,13 @@ impl Session {
         region_text.push_str(&inserted);
         region_text.push_str(&output.text[range.end..span.end]);
         let before = self.merge.entries(touched.clone());
+        if let [(region, state)] = before.as_slice() {
+            let relative = range.start - span.start..range.end - span.start;
+            let split = merge::split_stable(region, state, &output.text[span.clone()], relative, &inserted);
+            if let Some(after) = split {
+                return Ok(self.apply(range, inserted, MergeStep { at: touched.start, before, after }));
+            }
+        }
         let (region, choice) = match before.as_slice() {
             [(region, state)] => (region.clone(), state.merge.choice.clone()),
             _ => (merge::join(&self.merge.regions()[touched.clone()], &source_lines(&self.sources), engine)?, Choice::Unresolved),
@@ -242,7 +249,7 @@ impl Session {
     }
 
 
-    /// Sets the choice of one region and drops its hand edits.
+    /// Sets the choice of one region and drops its hand edits. A region whose hunks are equal is joined back with unedited neighbors like it, undoing the split of a hand edit.
     pub fn set_choice(&mut self, base: &Revision, index: usize, choice: Choice) -> Result<Change, CoreError> {
         self.check_base(base)?;
         self.output.as_ref().ok_or(CoreError::NotAMerge)?;
@@ -255,8 +262,30 @@ impl Session {
         let region = self.merge.regions()[index].clone();
         let text = merge::render(&region, &choice, &source_lines(&self.sources));
         let state = RegionState { merge: RegionMerge { choice, edited: false, output_lines: merge::line_count(&text) }, text_len: text.len() };
-        let step = MergeStep { at: index, before: self.merge.entries(index..index + 1), after: vec![(region, state)] };
-        Ok(self.apply(offsets[index]..offsets[index + 1], text, step))
+        let mut entry = (region, state);
+        let mut text = text;
+        let mut first = index;
+        let mut last = index;
+        if index > 0 {
+            let previous = self.merge.entries(index - 1..index).remove(0);
+            if merge::joins_stable(&previous, &entry) {
+                let output = self.output.as_ref().ok_or(CoreError::NotAMerge)?;
+                text = format!("{}{}", &output.text[offsets[index - 1]..offsets[index]], text);
+                entry = merge::join_stable(&previous, &entry);
+                first = index - 1;
+            }
+        }
+        if index + 1 < count {
+            let next = self.merge.entries(index + 1..index + 2).remove(0);
+            if merge::joins_stable(&entry, &next) {
+                let output = self.output.as_ref().ok_or(CoreError::NotAMerge)?;
+                text.push_str(&output.text[offsets[index + 1]..offsets[index + 2]]);
+                entry = merge::join_stable(&entry, &next);
+                last = index + 1;
+            }
+        }
+        let step = MergeStep { at: first, before: self.merge.entries(first..last + 1), after: vec![entry] };
+        Ok(self.apply(offsets[first]..offsets[last + 1], text, step))
     }
 
 
@@ -1204,6 +1233,90 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.unresolved_count(), 2);
         assert_eq!(output_text(&session), "s\nX\ns2\n");
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn choosing_a_hunk_of_a_split_stable_line_joins_it_back() {
+        for document in [Document::A, Document::B, Document::C] {
+            let dir = temp_dir("rejoin-stable");
+            let mut session = merge_session(&dir, "aa
+bb
+cc
+");
+            let original = session.merge.entries(0..1);
+            session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
+            assert_eq!(session.merge.regions().len(), 3);
+            assert_eq!(output_text(&session), "aa
+bxb
+cc
+");
+            let change = session.set_choice(&session.revision(), 1, Choice::Hunks(vec![document])).unwrap();
+            let Change::OutputEdited { merge: update, .. } = &change else {
+                panic!("expected an output change");
+            };
+            assert_eq!((update.at, update.removed, update.merge.len()), (0, 3, 1));
+            assert_eq!(output_text(&session), "aa
+bb
+cc
+");
+            assert_eq!(session.merge.entries(0..1), original);
+            assert_eq!(session.current_region(), Some(0));
+            assert_consistent(&session);
+            session.undo().unwrap();
+            assert_eq!(session.merge.regions().len(), 3);
+            assert_eq!(output_text(&session), "aa
+bxb
+cc
+");
+            assert_consistent(&session);
+        }
+    }
+
+
+    #[test]
+    fn split_lines_join_back_one_at_a_time() {
+        let dir = temp_dir("rejoin-stable-lines");
+        let mut session = merge_session(&dir, "aa
+bb
+cc
+");
+        session.edit_output(&edit(&session, 0..8, "1
+2
+3"), &BuiltinEngine).unwrap();
+        assert_eq!(session.merge.regions().len(), 3);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        assert_eq!(session.merge.regions().len(), 3);
+        assert_eq!(output_text(&session), "1
+bb
+3
+");
+        session.set_choice(&session.revision(), 0, Choice::Hunks(vec![Document::C])).unwrap();
+        assert_eq!(session.merge.regions().len(), 2);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::A])).unwrap();
+        assert_eq!(session.merge.regions().len(), 1);
+        assert_eq!(output_text(&session), "aa
+bb
+cc
+");
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn choosing_nothing_for_a_split_line_keeps_it_apart() {
+        let dir = temp_dir("rejoin-stable-nothing");
+        let mut session = merge_session(&dir, "aa
+bb
+cc
+");
+        session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
+        session.set_choice(&session.revision(), 1, Choice::Hunks(Vec::new())).unwrap();
+        assert_eq!(session.merge.regions().len(), 3);
+        assert_eq!(output_text(&session), "aa
+cc
+");
         assert_consistent(&session);
     }
 

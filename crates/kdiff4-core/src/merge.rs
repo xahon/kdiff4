@@ -177,6 +177,63 @@ impl Merge {
 }
 
 
+/// A hand edit replacing `range` of `text`, the D text of an unedited region whose hunks are equal, with `inserted`. The region is split so each line the edit touches becomes an edited region of its own, spanning that line in every source; new lines beyond the touched ones get regions with no lines in the sources, and touched lines left without new text get regions with no text in D; the lines before and after stay as they were. `None` when the region doesn't qualify.
+pub fn split_stable(region: &Region, state: &RegionState, text: &str, range: Range<usize>, inserted: &str) -> Option<Vec<(Region, RegionState)>> {
+    let count = line_count(text);
+    let qualifies = !is_difference(&region.status) && !state.merge.edited && region.rows.len() == count && region.hunks.iter().all(|hunk| hunk.len() == count);
+    if !qualifies || range.start > range.end || range.end > text.len() {
+        return None;
+    }
+    let first = text[..range.start].bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = text[..range.start].rfind('\n').map_or(0, |position| position + 1);
+    let mut end = range.end;
+    let mut middle = format!("{}{}{}", &text[line_start..range.start], inserted, &text[range.end..end]);
+    let at_line_start = |position: usize| position == 0 || text.as_bytes()[position - 1] == b'\n';
+    while end < text.len() && (!at_line_start(end) || (!middle.is_empty() && !middle.ends_with('\n'))) {
+        end = text[end..].find('\n').map_or(text.len(), |position| end + position + 1);
+        middle = format!("{}{}{}", &text[line_start..range.start], inserted, &text[range.end..end]);
+    }
+    let last = line_count(&text[..end]).max(first);
+    let piece = |lines: Range<usize>, merge: RegionMerge, text_len: usize| {
+        let hunks = region.hunks.iter().map(|hunk| hunk.start + lines.start..hunk.start + lines.end).collect();
+        (Region { hunks, status: region.status.clone(), rows: region.rows[lines].to_vec() }, RegionState { merge, text_len })
+    };
+    let unedited = |lines: usize| RegionMerge { choice: state.merge.choice.clone(), edited: false, output_lines: lines };
+    let mut pieces = Vec::with_capacity(3);
+    if first > 0 {
+        pieces.push(piece(0..first, unedited(first), line_start));
+    }
+    let new_lines: Vec<&str> = middle.split_inclusive('\n').collect();
+    for index in 0..new_lines.len().max(last - first) {
+        let line = new_lines.get(index).cloned().unwrap_or("");
+        let start = (first + index).min(last);
+        let end = if index < last - first { start + 1 } else { start };
+        pieces.push(piece(start..end, RegionMerge { choice: state.merge.choice.clone(), edited: true, output_lines: line_count(line) }, line.len()));
+    }
+    if last < count {
+        pieces.push(piece(last..count, unedited(count - last), text.len() - end));
+    }
+    Some(pieces)
+}
+
+
+/// Whether `next` continues `previous` as one unedited region whose hunks are equal: both take a single hunk, so D holds the same text whichever one, and their hunks are adjacent in every source.
+pub fn joins_stable(previous: &(Region, RegionState), next: &(Region, RegionState)) -> bool {
+    let stable = |(region, state): &(Region, RegionState)| !is_difference(&region.status) && !state.merge.edited && matches!(&state.merge.choice, Choice::Hunks(documents) if documents.len() == 1);
+    let adjacent = previous.0.hunks.len() == next.0.hunks.len() && previous.0.hunks.iter().zip(&next.0.hunks).all(|(left, right)| left.end == right.start);
+    stable(previous) && stable(next) && previous.0.status == next.0.status && adjacent
+}
+
+
+/// One unedited region spanning `previous` and `next`, which must pass `joins_stable`. It keeps the choice of `previous`.
+pub fn join_stable(previous: &(Region, RegionState), next: &(Region, RegionState)) -> (Region, RegionState) {
+    let hunks = previous.0.hunks.iter().zip(&next.0.hunks).map(|(left, right)| left.start..right.end).collect();
+    let rows = previous.0.rows.iter().chain(&next.0.rows).cloned().collect();
+    let merge = RegionMerge { choice: previous.1.merge.choice.clone(), edited: false, output_lines: previous.1.merge.output_lines + next.1.merge.output_lines };
+    (Region { hunks, status: previous.0.status.clone(), rows }, RegionState { merge, text_len: previous.1.text_len + next.1.text_len })
+}
+
+
 /// The choice auto-resolve makes for a region with this status.
 pub fn auto_choice(status: &RegionStatus) -> Choice {
     match status {
@@ -424,6 +481,64 @@ mod tests {
         assert_eq!(joined.hunks, [0..2, 0..2, 0..2]);
         assert_eq!(joined.rows.len(), 2);
         assert_eq!(joined.status, RegionStatus::Merge(MergeStatus::Conflict));
+    }
+
+
+    fn stable() -> (Region, RegionState) {
+        let region = Region { hunks: vec![2..5, 0..3, 4..7], status: RegionStatus::Merge(MergeStatus::Unchanged), rows: (0..3).map(|line| Row { lines: vec![Some(2 + line), Some(line), Some(4 + line)] }).collect() };
+        (region, RegionState { merge: RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 3 }, text_len: 9 })
+    }
+
+
+    fn split_shape(range: Range<usize>, inserted: &str) -> Vec<(Vec<Range<usize>>, bool, usize)> {
+        let (region, state) = stable();
+        split_stable(&region, &state, "aa\nbb\ncc\n", range, inserted)
+            .unwrap()
+            .into_iter()
+            .map(|(region, state)| (region.hunks, state.merge.edited, state.text_len))
+            .collect()
+    }
+
+
+    #[test]
+    fn editing_a_stable_line_splits_it_out() {
+        assert_eq!(split_shape(4..4, "x"), [(vec![2..3, 0..1, 4..5], false, 3), (vec![3..4, 1..2, 5..6], true, 4), (vec![4..5, 2..3, 6..7], false, 3)]);
+        assert_eq!(split_shape(0..1, ""), [(vec![2..3, 0..1, 4..5], true, 2), (vec![3..5, 1..3, 5..7], false, 6)]);
+        assert_eq!(split_shape(1..7, "1
+2
+"), [(vec![2..3, 0..1, 4..5], true, 3), (vec![3..4, 1..2, 5..6], true, 2), (vec![4..5, 2..3, 6..7], true, 2)]);
+        assert_eq!(split_shape(7..8, "z"), [(vec![2..4, 0..2, 4..6], false, 6), (vec![4..5, 2..3, 6..7], true, 3)]);
+    }
+
+
+    #[test]
+    fn inserted_lines_get_empty_hunks() {
+        assert_eq!(split_shape(3..3, "new\n"), [(vec![2..3, 0..1, 4..5], false, 3), (vec![3..3, 1..1, 5..5], true, 4), (vec![3..5, 1..3, 5..7], false, 6)]);
+    }
+
+
+    #[test]
+    fn removing_a_line_break_takes_in_the_next_line() {
+        assert_eq!(split_shape(2..3, ""), [(vec![2..3, 0..1, 4..5], true, 5), (vec![3..4, 1..2, 5..6], true, 0), (vec![4..5, 2..3, 6..7], false, 3)]);
+    }
+
+
+    #[test]
+    fn extra_new_lines_get_empty_hunks() {
+        assert_eq!(split_shape(0..2, "x
+y
+z"), [(vec![2..3, 0..1, 4..5], true, 2), (vec![3..3, 1..1, 5..5], true, 2), (vec![3..3, 1..1, 5..5], true, 2), (vec![3..5, 1..3, 5..7], false, 6)]);
+    }
+
+
+    #[test]
+    fn edited_or_differing_regions_dont_split() {
+        let (region, mut state) = stable();
+        state.merge.edited = true;
+        assert!(split_stable(&region, &state, "aa\nbb\ncc\n", 0..0, "x").is_none());
+        let (mut region, state) = stable();
+        region.status = RegionStatus::Merge(MergeStatus::Conflict);
+        assert!(split_stable(&region, &state, "aa\nbb\ncc\n", 0..0, "x").is_none());
     }
 
 
