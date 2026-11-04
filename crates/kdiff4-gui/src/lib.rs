@@ -8,6 +8,7 @@ mod open_dialog;
 mod panes;
 mod paths;
 mod rows;
+mod scroll;
 mod settings_dialog;
 mod text_view;
 mod theme;

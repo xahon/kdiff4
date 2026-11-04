@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::path::Path;
 
 use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
@@ -8,7 +9,8 @@ use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::rows::Rows;
-use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewStyle, Viewport};
+use crate::scroll::{ScrollMotion, SmoothScroll};
+use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
 
@@ -16,6 +18,10 @@ const SPLITTER_HEIGHT: f32 = 6.0;
 const MIN_MERGE_FRACTION: f32 = 0.1;
 const MAX_MERGE_FRACTION: f32 = 0.9;
 pub const DEFAULT_MERGE_FRACTION: f32 = 0.5;
+/// A pane that ended a frame this many pixels away from the offset it was given was scrolled by the user or revealed the caret.
+const MOVED_BY_PANE: f32 = 0.5;
+/// Longest frame a scroll animation steps by, so a stall doesn't skip it.
+const MAX_SCROLL_STEP: f32 = 0.1;
 
 
 /// What the user did in the panes; the app turns these into caret moves and commands.
@@ -44,10 +50,8 @@ pub struct PaneState {
     pub void_row: Option<usize>,
     /// The caret is not drawn, as after a jump, until it is moved again.
     pub caret_hidden: bool,
-    /// A region to scroll every pane to on the next frame, with context rows above it, unless every pane already shows all of it.
+    /// A region to scroll every pane to, with context rows above it, unless every pane already shows all of it. Kept until every pane has been laid out once.
     pub jump: Option<usize>,
-    /// A region D scrolls into view on the next frame if it is out of view, unless D scrolls with the source panes.
-    pub reveal_region: Option<usize>,
     /// Scroll the caret into view on the next frame.
     pub reveal_caret: bool,
     /// Rows that fit in the pane with the caret, as of the last frame.
@@ -56,8 +60,10 @@ pub struct PaneState {
     pub merge_fraction: f32,
     /// Texts of the header path fields, in `Document::ALL` order.
     pub path_fields: [String; 4],
-    /// Vertical scroll offset shared by the source panes, which scroll together row by row.
-    pub source_offset: f32,
+    /// Vertical scrolling shared by the source panes, which scroll together row by row, and by D when it lines up with them.
+    pub source_scroll: SmoothScroll,
+    /// Vertical scrolling of D when it doesn't line up with the source panes.
+    pub output_scroll: SmoothScroll,
     /// What each pane showed in the last frame, in `Document::ALL` order.
     pub viewports: [Option<Viewport>; 4],
 }
@@ -65,7 +71,7 @@ pub struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_region: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0, viewports: [None; 4] }
+        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_scroll: SmoothScroll::default(), output_scroll: SmoothScroll::default(), viewports: [None; 4] }
     }
 }
 
@@ -109,6 +115,9 @@ pub struct PaneOptions {
     pub gutters: bool,
     pub current_region_color: Color32,
     pub jump_context_rows: usize,
+    /// Rows one wheel notch scrolls.
+    pub scroll_step_rows: usize,
+    pub scroll_motion: ScrollMotion,
     pub region_gap: f32,
     pub region_corner_radius: u8,
     pub char_diff: CharDiffLook,
@@ -116,52 +125,92 @@ pub struct PaneOptions {
 }
 
 
+/// Which scroll offset a pane follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollGroup {
+    Sources,
+    Output,
+}
+
+
+/// How a pane's vertical scrolling went in a frame: the offset it was given, where it ended up, the wheel scrolling over it and its largest offset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PaneScroll {
+    group: ScrollGroup,
+    given: f32,
+    after: f32,
+    wheel: Wheel,
+    max: f32,
+}
+
+
 /// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = &theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff, whitespace: options.whitespace.clone() };
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, scroll_step_rows: options.scroll_step_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff, whitespace: options.whitespace.clone() };
     let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
-    if state.jump.is_some_and(|region| region_in_view_everywhere(mirror, &state.viewports, region)) {
+    if let Some(region) = state.jump
+        && (region_in_view_everywhere(mirror, &state.viewports, region) || start_jump(mirror, state, region, options))
+    {
         state.jump = None;
     }
+    let dt = ui.input(|input| input.stable_dt).min(MAX_SCROLL_STEP);
+    state.source_scroll.step(dt.clone(), options.scroll_motion);
+    state.output_scroll.step(dt, options.scroll_motion);
     egui::CentralPanel::default().show(ui, |ui| {
         let total = ui.available_size();
-        let shared = state.source_offset.clone();
-        let mut offsets = Vec::new();
+        let mut scrolls = Vec::new();
         if mirror.output().is_none() {
-            source_columns(ui, &source_style, mirror, state, &mut actions, &mut offsets);
+            source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls);
         } else {
             let usable = (total.y - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
             let merge_height = (usable * state.merge_fraction).round();
-            ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut offsets));
+            ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
             splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
-            ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut offsets));
+            ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut scrolls));
         }
-        state.source_offset = next_shared_offset(shared.clone(), &offsets);
-        if state.source_offset != shared {
-            ui.ctx().request_repaint();
+        follow_panes(&mut state.source_scroll, ScrollGroup::Sources, &scrolls, options.scroll_motion);
+        follow_panes(&mut state.output_scroll, ScrollGroup::Output, &scrolls, options.scroll_motion);
+        if mirror.is_aligned() {
+            state.output_scroll = state.source_scroll.clone();
         }
     });
-    state.jump = None;
-    state.reveal_region = None;
+    if state.source_scroll.offset != state.source_scroll.target || state.output_scroll.offset != state.output_scroll.target || state.jump.is_some() {
+        ui.ctx().request_repaint();
+    }
     actions
 }
 
 
 /// Whether every pane of the session showed all rows of `region` in the last frame. A pane with no viewport yet does not.
 fn region_in_view_everywhere(mirror: &Mirror, viewports: &[Option<Viewport>; 4], region: usize) -> bool {
-    let sources = mirror
+    scroll_groups(mirror)
+        .into_iter()
+        .flat_map(|(_, panes)| panes)
+        .all(|(document, rows)| region_in_view(Some(rows), viewports[document_index(document)], region))
+}
+
+
+/// The panes of the session with their rows, by the scroll offset they follow: the source panes, with D when it lines up with them, and D on its own otherwise. Panes without row maps can't be jumped in and are left out.
+fn scroll_groups(mirror: &Mirror) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>)> {
+    let mut sources: Vec<(Document, Rows<'_>)> = mirror
         .documents()
         .iter()
-        .map(|text| (text.document.clone(), mirror.rows(text.document.clone()).map(Rows::Mapped)));
+        .filter_map(|text| mirror.rows(text.document.clone()).map(|rows| (text.document.clone(), Rows::Mapped(rows))))
+        .collect();
     let output = mirror
         .output()
-        .map(|_| (Document::D, Some(Rows::Mapped(mirror.output_rows()))));
-    sources
-        .chain(output)
-        .all(|(document, rows)| region_in_view(rows, viewports[document_index(document)], region))
+        .map(|_| (Document::D, Rows::Mapped(mirror.output_rows())));
+    let mut groups = Vec::new();
+    match output {
+        Some(output) if mirror.is_aligned() => sources.push(output),
+        Some(output) => groups.push((ScrollGroup::Output, vec![output])),
+        None => {}
+    }
+    groups.insert(0, (ScrollGroup::Sources, sources));
+    groups
 }
 
 
@@ -170,6 +219,109 @@ fn region_in_view(rows: Option<Rows<'_>>, viewport: Option<Viewport>, region: us
     match rows.and_then(|rows| rows.region_rows(region)) {
         Some(range) => viewport.is_some_and(|viewport| viewport.shows(range)),
         None => true,
+    }
+}
+
+
+/// Where a jump scrolls one group of panes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum JumpTarget {
+    /// A pane of the group has not been laid out yet.
+    NotReady,
+    /// The group has no rows for the region.
+    Nowhere,
+    Offset { offset: f32, max: f32 },
+}
+
+
+/// Starts scrolling every group of panes to `region`. Returns false, scrolling nothing, while a pane has not been laid out yet.
+fn start_jump(mirror: &Mirror, state: &mut PaneState, region: usize, options: &PaneOptions) -> bool {
+    let targets: Vec<(ScrollGroup, JumpTarget)> = scroll_groups(mirror)
+        .into_iter()
+        .map(|(group, panes)| {
+            let panes: Vec<(Rows<'_>, Option<Viewport>)> = panes
+                .into_iter()
+                .map(|(document, rows)| (rows, state.viewports[document_index(document)]))
+                .collect();
+            (group, jump_target(&panes, region, options.jump_context_rows))
+        })
+        .collect();
+    if targets.iter().any(|(_, target)| *target == JumpTarget::NotReady) {
+        return false;
+    }
+    for (group, target) in targets {
+        if let JumpTarget::Offset { offset, max } = target {
+            let scroll = match group {
+                ScrollGroup::Sources => &mut state.source_scroll,
+                ScrollGroup::Output => &mut state.output_scroll,
+            };
+            scroll.scroll_to(offset, max, options.scroll_motion);
+        }
+    }
+    true
+}
+
+
+/// Where a group of panes that scroll together goes for a jump to `region`: as in its shortest pane, which every pane can follow.
+fn jump_target(panes: &[(Rows<'_>, Option<Viewport>)], region: usize, context: usize) -> JumpTarget {
+    if panes.iter().any(|(_, viewport)| viewport.is_none()) {
+        return JumpTarget::NotReady;
+    }
+    let rows = panes
+        .iter()
+        .find_map(|(rows, _)| rows.region_rows(region));
+    let shortest = panes
+        .iter()
+        .filter_map(|(_, viewport)| *viewport)
+        .min_by(|left, right| left.height.total_cmp(&right.height));
+    match (rows, shortest) {
+        (Some(rows), Some(viewport)) => {
+            let max = panes
+                .iter()
+                .filter_map(|(_, viewport)| viewport.map(|viewport| viewport.max_offset()))
+                .fold(f32::INFINITY, f32::min);
+            JumpTarget::Offset { offset: jump_offset(rows, context, viewport), max }
+        }
+        _ => JumpTarget::Nowhere,
+    }
+}
+
+
+/// The scroll offset that shows `rows` with `context` rows above them. A pane too short for that keeps fewer, splitting the rows the region leaves free above and below it; a region taller than the pane starts at its top.
+pub fn jump_offset(rows: Range<usize>, context: usize, viewport: Viewport) -> f32 {
+    let length = rows.len().max(1);
+    let context = context.min(viewport.page_rows().saturating_sub(length) / 2);
+    rows.start.saturating_sub(context) as f32 * viewport.row_height
+}
+
+
+/// After a frame: a pane of `group` that ended up away from its given offset, because the user dragged its scroll bar or it revealed the caret, takes the group's offset with it; otherwise the wheel over the group's panes scrolls them.
+fn follow_panes(scroll: &mut SmoothScroll, group: ScrollGroup, panes: &[PaneScroll], motion: ScrollMotion) {
+    let panes: Vec<&PaneScroll> = panes
+        .iter()
+        .filter(|pane| pane.group == group)
+        .collect();
+    if let Some(moved) = panes.iter().find(|pane| (pane.after - pane.given).abs() > MOVED_BY_PANE) {
+        scroll.set(moved.after.clone());
+        return;
+    }
+    let stepped: f32 = panes
+        .iter()
+        .map(|pane| pane.wheel.stepped)
+        .sum();
+    let direct: f32 = panes
+        .iter()
+        .map(|pane| pane.wheel.direct)
+        .sum();
+    let max = panes
+        .iter()
+        .map(|pane| pane.max)
+        .fold(f32::INFINITY, f32::min);
+    if stepped != 0.0 {
+        scroll.scroll_by(stepped, max.clone(), motion);
+    }
+    if direct != 0.0 {
+        scroll.shift(direct, max);
     }
 }
 
@@ -187,48 +339,37 @@ fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, frac
 }
 
 
-/// The source panes are forced to one scroll offset; the pane the user scrolled this frame, or the one that revealed the caret, sets it for the next. Each pushes its offset after this frame to `offsets`.
-fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, offsets: &mut Vec<f32>) {
+/// The source panes all show the shared scroll offset. Each reports how its scrolling went to `scrolls`.
+fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
     let count = mirror.documents().len().max(1);
-    let shared = state.source_offset.clone();
+    let given = state.source_scroll.offset.clone();
     ui.columns(count, |columns| {
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines { text: &text.text, ranges: &text.lines };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
             let char_runs = mirror.char_diffs(text.document.clone()).map(|runs| CharRuns { document: text.document.clone(), lines: runs, sources: mirror.documents().len() });
-            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, Some(shared.clone()), None, state, actions));
+            scrolls.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, ScrollGroup::Sources, given.clone(), state, actions));
         }
     });
 }
 
 
-fn next_shared_offset(shared: f32, offsets: &[f32]) -> f32 {
-    offsets
-        .iter()
-        .find(|offset| **offset != shared)
-        .cloned()
-        .unwrap_or(shared)
-}
-
-
 /// D scrolls on its own, unless it is lined up with the source panes: then it shares their offset.
-fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, offsets: &mut Vec<f32>) {
+fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
     if let Some(output) = mirror.output() {
         let lines = output.lines();
-        let aligned = mirror.is_aligned();
-        let offset = aligned.then(|| state.source_offset.clone());
+        let (group, given) = match mirror.is_aligned() {
+            true => (ScrollGroup::Sources, state.source_scroll.offset.clone()),
+            false => (ScrollGroup::Output, state.output_scroll.offset.clone()),
+        };
         let rows = Rows::Mapped(mirror.output_rows());
-        let reveal_row = state.reveal_region.filter(|_| !aligned).and_then(|region| rows.region_start(region));
-        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, offset, reveal_row, state, actions);
-        if aligned {
-            offsets.push(after);
-        }
+        scrolls.push(pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, group, given, state, actions));
     }
 }
 
 
-/// `reveal_row` is scrolled into view if it is out of view. Returns the pane's vertical scroll offset after this frame.
-fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, offset: Option<f32>, reveal_row: Option<usize>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
+/// Shows one pane at the vertical scroll offset `given`, and reports how its scrolling went.
+fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, group: ScrollGroup, given: f32, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> PaneScroll {
     let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
@@ -237,8 +378,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
-                    let jump_row = state.jump.and_then(|region| rows.region_start(region));
-                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), jump_row, reveal_row, offset, style);
+                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), Some(given.clone()), style);
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }
@@ -251,13 +391,12 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
                         None => {}
                     }
-                    response.viewport.offset
+                    PaneScroll { group, given, after: response.viewport.offset, wheel: response.wheel, max: response.viewport.max_offset() }
                 })
                 .inner
         })
         .inner
 }
-
 
 /// Letter, label, editable path and Browse button. The field shows the document's path unless the user is editing it.
 fn header(ui: &mut Ui, palette: &Palette, radius: u8, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
@@ -346,7 +485,7 @@ mod tests {
         };
         let map = RowMap::for_source(&comparison, 0, 12, None);
         let rows = Some(Rows::Mapped(&map));
-        let viewport = |offset: f32| Some(Viewport { offset, height: 50.0, row_height: 10.0 });
+        let viewport = |offset: f32| Some(Viewport { offset, height: 50.0, row_height: 10.0, content_height: 120.0 });
         assert!(region_in_view(rows, viewport(80.0), 1));
         assert!(region_in_view(rows, viewport(70.0), 1));
         assert!(!region_in_view(rows, viewport(69.0), 1));
@@ -358,13 +497,94 @@ mod tests {
     }
 
 
+    const INSTANT: ScrollMotion = ScrollMotion { smooth: false, duration: 0.0 };
+
+
+    fn scroll(group: ScrollGroup, given: f32, after: f32, wheel: f32) -> PaneScroll {
+        PaneScroll { group, given, after, wheel: Wheel { stepped: wheel, direct: 0.0 }, max: 500.0 }
+    }
+
+
     #[test]
     fn shared_offset_follows_the_pane_that_moved() {
-        assert_eq!(next_shared_offset(10.0, &[10.0, 10.0, 10.0]), 10.0);
-        assert_eq!(next_shared_offset(10.0, &[10.0, 42.0, 10.0]), 42.0);
-        assert_eq!(next_shared_offset(10.0, &[3.0, 3.0]), 3.0);
-        assert_eq!(next_shared_offset(10.0, &[]), 10.0);
+        let mut shared = SmoothScroll { offset: 10.0, target: 10.0 };
+        follow_panes(&mut shared, ScrollGroup::Sources, &[scroll(ScrollGroup::Sources, 10.0, 10.0, 0.0), scroll(ScrollGroup::Sources, 10.0, 42.0, 0.0)], INSTANT);
+        assert_eq!(shared, SmoothScroll { offset: 42.0, target: 42.0 });
+        follow_panes(&mut shared, ScrollGroup::Sources, &[scroll(ScrollGroup::Output, 42.0, 7.0, 0.0)], INSTANT);
+        assert_eq!(shared.offset, 42.0);
+        follow_panes(&mut shared, ScrollGroup::Sources, &[], INSTANT);
+        assert_eq!(shared.offset, 42.0);
     }
+
+
+    #[test]
+    fn wheel_over_any_pane_scrolls_its_group() {
+        let mut shared = SmoothScroll::default();
+        let panes = [scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0), scroll(ScrollGroup::Sources, 0.0, 0.0, 45.0), scroll(ScrollGroup::Output, 0.0, 0.0, 900.0)];
+        follow_panes(&mut shared, ScrollGroup::Sources, &panes, INSTANT);
+        assert_eq!(shared.offset, 45.0);
+        let mut output = SmoothScroll::default();
+        follow_panes(&mut output, ScrollGroup::Output, &panes, INSTANT);
+        assert_eq!(output.offset, 500.0);
+    }
+
+
+    #[test]
+    fn trackpad_scrolling_is_never_animated() {
+        let smooth = ScrollMotion { smooth: true, duration: 0.2 };
+        let mut shared = SmoothScroll::default();
+        let pane = PaneScroll { group: ScrollGroup::Sources, given: 0.0, after: 0.0, wheel: Wheel { stepped: 0.0, direct: 12.0 }, max: 500.0 };
+        follow_panes(&mut shared, ScrollGroup::Sources, &[pane], smooth);
+        assert_eq!(shared, SmoothScroll { offset: 12.0, target: 12.0 });
+    }
+
+
+
+    #[test]
+    fn jumps_keep_context_rows_above_when_the_pane_has_room() {
+        let tall = Viewport { offset: 0.0, height: 400.0, row_height: 10.0, content_height: 2000.0 };
+        assert_eq!(jump_offset(30..32, 12, tall), 180.0);
+        assert_eq!(jump_offset(5..6, 12, tall), 0.0);
+        assert_eq!(jump_offset(30..32, 0, tall), 300.0);
+    }
+
+
+    // Regression: with 12 context rows a region landed below the bottom of a short merge pane, so the jump missed it.
+    #[test]
+    fn jumps_in_short_panes_keep_the_region_in_view() {
+        let short = Viewport { offset: 0.0, height: 80.0, row_height: 10.0, content_height: 2000.0 };
+        let offset = jump_offset(30..32, 12, short);
+        assert_eq!(offset, 270.0);
+        assert!(Viewport { offset, ..short }.shows(30..32));
+        let one_row = jump_offset(10..11, 12, short);
+        assert!(Viewport { offset: one_row, ..short }.shows(10..11));
+        assert_eq!(jump_offset(30..50, 12, short), 300.0);
+        assert_eq!(jump_offset(30..30, 12, short), 270.0);
+    }
+
+
+    fn two_region_map() -> RowMap {
+        let comparison = Comparison {
+            regions: vec![
+                Region { hunks: vec![0..30, 0..30], status: RegionStatus::Diff(HunkChange::Unchanged), rows: (0..30).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+                Region { hunks: vec![30..32, 30..32], status: RegionStatus::Diff(HunkChange::Modified), rows: (30..32).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+            ],
+        };
+        RowMap::for_source(&comparison, 0, 32, None)
+    }
+
+
+    #[test]
+    fn group_jumps_follow_their_shortest_pane() {
+        let map = two_region_map();
+        let tall = Viewport { offset: 0.0, height: 400.0, row_height: 10.0, content_height: 320.0 };
+        let short = Viewport { height: 80.0, content_height: 320.0, ..tall };
+        assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(tall)), (Rows::Mapped(&map), Some(short))], 1, 12), JumpTarget::Offset { offset: 270.0, max: 0.0 });
+        assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(short)), (Rows::Mapped(&map), None)], 1, 12), JumpTarget::NotReady);
+        assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(short))], 9, 12), JumpTarget::Nowhere);
+        assert_eq!(jump_target(&[(Rows::PerLine(32), Some(short))], 1, 12), JumpTarget::Nowhere);
+    }
+
 
 
     #[test]

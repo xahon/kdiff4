@@ -14,6 +14,7 @@ use crate::open_dialog::{self, FormAction, OpenForm};
 use crate::panes::{self, PaneAction, PaneOptions, PaneState};
 use crate::paths;
 use crate::rows::{self, Rows};
+use crate::scroll::ScrollMotion;
 use crate::settings_dialog::{SettingsAction, SettingsDialog};
 use crate::text_view::{self, Caret};
 use crate::theme;
@@ -69,7 +70,8 @@ enum Pending {
     /// A move to the next or previous difference or conflict; becomes `Navigated` when the current region moved.
     Navigate(Navigation),
     Navigated,
-    /// A click on a gutter: makes its region current without jumping there.
+    /// A click on a gutter: makes its region current and scrolls there like a jump, keeping the caret where the click put it.
+
     SelectRegion,
     ComparisonOptions,
 }
@@ -337,7 +339,7 @@ impl KdiffApp {
                 }
                 if applied && let Some(region) = current.region {
                     if selected {
-                        self.panes.reveal_region = Some(region);
+                        self.panes.jump = Some(region);
                     } else {
                         self.jump_to(region);
                     }
@@ -922,7 +924,7 @@ impl KdiffApp {
         let [r, g, b, a] = view.current_region_color;
         let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
         let char_diff = CharDiffLook { red: rgb(view.char_diff_red), blue: rgb(view.char_diff_blue), green: rgb(view.char_diff_green), corner_radius: view.char_diff_corner_radius.clone() };
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff, whitespace: view.whitespace.clone() }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff, whitespace: view.whitespace.clone() }
     }
 
 

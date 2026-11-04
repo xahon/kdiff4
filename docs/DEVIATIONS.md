@@ -58,7 +58,10 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 
 ### Navigation
 
-- A jump scrolls only when some pane doesn't show all rows of the region yet, and then leaves 12 lines above it by default. The caret moves to the region's start but stays hidden until it is moved again. kdiff3 always scrolls to the difference and shows its cursor there.
+- A jump scrolls only when some pane doesn't show all rows of the region yet, and then leaves 12 lines above it by default, fewer in a pane too short to show the region below them. The caret moves to the region's start but stays hidden until it is moved again. kdiff3 always scrolls to the difference and shows its cursor there.
+- Clicking a gutter block makes its region current and scrolls every pane there like a jump, from the source panes and from D alike.
+- Wheel scrolling and jumps can be smooth, with a configurable duration, and the rows a wheel notch scrolls are configurable. kdiff3 scrolls at once, by the system's wheel step.
+
 
 ### Appearance
 

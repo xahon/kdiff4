@@ -1,7 +1,7 @@
-use egui::{Button, Checkbox, Color32, ComboBox, DragValue, RichText, ScrollArea, Theme, Ui};
+use egui::{Button, Checkbox, Color32, ComboBox, DragValue, Label, RichText, ScrollArea, Theme, Ui};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
-use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MIN_FONT_SIZE, ThemeChoice, ViewConfig};
+use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MAX_SCROLL_STEP_LINES, MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig};
 use crate::fonts::MonospaceFamily;
 use crate::theme;
 
@@ -177,7 +177,23 @@ impl SettingsDialog {
             ui.add(DragValue::new(&mut self.draft.jump_context_lines).range(0..=MAX_JUMP_CONTEXT_LINES).speed(0.1).suffix(" lines")).on_hover_text("Lines kept above a difference or conflict that navigation jumps to.");
             ui.end_row();
 
+            ui.label("Scrolling:");
+            ui.vertical(|ui| {
+                ui.checkbox(&mut self.draft.smooth_scrolling, "Smooth scrolling").on_hover_text("Wheel scrolling and jumps glide to where they go. Off, they move at once.");
+                let smooth = self.draft.smooth_scrolling;
+                ui.horizontal(|ui| {
+                    ui.add_enabled(smooth, Label::new("Duration"));
+                    ui.add_enabled(smooth, DragValue::new(&mut self.draft.smooth_scroll_ms).range(MIN_SMOOTH_SCROLL_MS..=MAX_SMOOTH_SCROLL_MS).speed(2.0).suffix(" ms")).on_hover_text("How long a smooth scroll takes: shorter is snappier, longer is smoother.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Wheel step");
+                    ui.add(DragValue::new(&mut self.draft.scroll_step_lines).range(MIN_SCROLL_STEP_LINES..=MAX_SCROLL_STEP_LINES).speed(0.1).suffix(" lines")).on_hover_text("Lines one notch of the mouse wheel scrolls.");
+                });
+            });
+            ui.end_row();
+
             ui.label("Jumped-to region:");
+
             ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color).on_hover_text("The background of the region navigation is at, in every pane, void space included.");
             ui.end_row();
 

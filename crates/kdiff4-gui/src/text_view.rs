@@ -53,8 +53,8 @@ pub struct ViewStyle<'a> {
     pub margin: MarginKind,
     pub current_region: Option<usize>,
     pub current_region_color: Color32,
-    /// Rows kept above a region the view jumps to.
-    pub jump_context_rows: usize,
+    /// Rows one wheel notch scrolls.
+    pub scroll_step_rows: usize,
     /// Space between the boxes of adjacent regions, in pixels.
     pub region_gap: f32,
     pub region_corner_radius: u8,
@@ -140,15 +140,26 @@ pub struct ViewResponse {
     /// How many whole rows fit in the view: the step of PageUp and PageDown.
     pub page_rows: usize,
     pub viewport: Viewport,
+    /// The wheel scrolling over the view this frame; the caller scrolls the view, so panes that scroll together move as one.
+    pub wheel: Wheel,
 }
 
 
-/// The rows a view shows after a frame: its vertical scroll offset and height, in pixels, and the height of a row.
+/// Pixels the wheel asked to scroll down in a frame, negative for up: `stepped` by mouse wheel notches, which may scroll smoothly, and `direct` by a trackpad, which follows the fingers at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Wheel {
+    pub stepped: f32,
+    pub direct: f32,
+}
+
+
+/// The rows a view shows after a frame: its vertical scroll offset and height, the height of a row and of all rows, in pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Viewport {
     pub offset: f32,
     pub height: f32,
     pub row_height: f32,
+    pub content_height: f32,
 }
 
 
@@ -159,6 +170,18 @@ impl Viewport {
         let top = rows.start as f32 * self.row_height;
         let bottom = rows.end.max(rows.start) as f32 * self.row_height;
         top + TOLERANCE >= self.offset && bottom <= self.offset + self.height + TOLERANCE
+    }
+
+
+    /// The largest vertical scroll offset.
+    pub fn max_offset(&self) -> f32 {
+        (self.content_height - self.height).max(0.0)
+    }
+
+
+    /// How many whole rows fit in the view, at least one.
+    pub fn page_rows(&self) -> usize {
+        if self.row_height > 0.0 { ((self.height / self.row_height).floor() as usize).max(1) } else { 1 }
     }
 }
 
@@ -178,8 +201,8 @@ impl Margin {
 }
 
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows; `reveal_row` scrolls that row into view if it is out of view. `offset` forces the vertical scroll offset, so several views can scroll together.
-pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, reveal_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset, so several views can scroll together. Vertical wheel scrolling is not applied but reported, for the caller to scroll with.
+pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, caret: Option<Caret>, reveal_caret: bool, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING;
@@ -195,14 +218,13 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
             .map(|state| state.clamped_offset().y)
             .unwrap_or(0.0)
     });
-    let jumped = jump_row.map(|row| jump_offset(row, style.jump_context_rows, row_height));
     let revealed = caret
         .filter(|_| reveal_caret)
         .and_then(|caret| reveal_offset(caret_row(rows, caret), row_height, viewport_height, current));
-    let revealed_row = reveal_row.and_then(|row| reveal_offset(row, row_height, viewport_height, current));
-    if let Some(target) = jumped.or(revealed).or(revealed_row).or(offset) {
+    if let Some(target) = revealed.or(offset) {
         area = area.vertical_scroll_offset(target);
     }
+    let wheel = take_vertical_wheel(ui, row_height, viewport_height, style.scroll_step_rows);
 
     let output = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -310,8 +332,45 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
         }
         _ => None,
     };
-    let viewport = Viewport { offset: scroll.y, height: output.inner_rect.height(), row_height };
-    ViewResponse { pointer, page_rows, viewport }
+    let viewport = Viewport { offset: scroll.y, height: output.inner_rect.height(), row_height, content_height: output.content_size.y };
+    ViewResponse { pointer, page_rows, viewport, wheel }
+}
+
+
+/// The vertical wheel scrolling over the view this frame, taken from egui so its scroll area doesn't apply it too. A line of a mouse wheel scrolls `step_rows` rows; trackpads scroll by their pixels. With Ctrl (zoom) or Shift (sideways) held, egui keeps the wheel.
+fn take_vertical_wheel(ui: &mut Ui, row_height: f32, page_height: f32, step_rows: usize) -> Wheel {
+    if !ui.rect_contains_pointer(ui.available_rect_before_wrap()) {
+        return Wheel::default();
+    }
+    ui.input_mut(|input| {
+        let mut wheel = Wheel::default();
+        for event in &input.events {
+            if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event
+                && !modifiers.command
+                && !modifiers.shift
+            {
+                let pixels = wheel_pixels(unit.clone(), -delta.y, row_height, page_height, step_rows);
+                match unit {
+                    egui::MouseWheelUnit::Point => wheel.direct += pixels,
+                    egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => wheel.stepped += pixels,
+                }
+            }
+        }
+        if !input.modifiers.command && !input.modifiers.shift {
+            input.smooth_scroll_delta.y = 0.0;
+        }
+        wheel
+    })
+}
+
+
+/// Pixels to scroll down for `lines` wheel units down.
+pub fn wheel_pixels(unit: egui::MouseWheelUnit, lines: f32, row_height: f32, page_height: f32, step_rows: usize) -> f32 {
+    match unit {
+        egui::MouseWheelUnit::Point => lines,
+        egui::MouseWheelUnit::Line => lines * step_rows.max(1) as f32 * row_height,
+        egui::MouseWheelUnit::Page => lines * page_height,
+    }
 }
 
 
@@ -626,12 +685,6 @@ pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current
 }
 
 
-/// The scroll offset that shows `row` with `context` rows above it, or at the top when there are fewer.
-pub fn jump_offset(row: usize, context: usize, row_height: f32) -> f32 {
-    row.saturating_sub(context) as f32 * row_height
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,16 +773,28 @@ mod tests {
 
 
     #[test]
-    fn jumps_keep_context_rows_above() {
-        assert_eq!(jump_offset(10, 3, 10.0), 70.0);
-        assert_eq!(jump_offset(2, 3, 10.0), 0.0);
-        assert_eq!(jump_offset(5, 0, 10.0), 50.0);
+    fn wheel_lines_scroll_by_the_step() {
+        assert_eq!(wheel_pixels(egui::MouseWheelUnit::Line, 1.0, 10.0, 200.0, 3), 30.0);
+        assert_eq!(wheel_pixels(egui::MouseWheelUnit::Line, -2.0, 10.0, 200.0, 1), -20.0);
+        assert_eq!(wheel_pixels(egui::MouseWheelUnit::Line, 1.0, 10.0, 200.0, 0), 10.0);
+        assert_eq!(wheel_pixels(egui::MouseWheelUnit::Point, 7.5, 10.0, 200.0, 3), 7.5);
+        assert_eq!(wheel_pixels(egui::MouseWheelUnit::Page, -1.0, 10.0, 200.0, 3), -200.0);
+    }
+
+
+    #[test]
+    fn viewport_knows_its_pages_and_scroll_range() {
+        let viewport = Viewport { offset: 0.0, height: 55.0, row_height: 10.0, content_height: 300.0 };
+        assert_eq!(viewport.page_rows(), 5);
+        assert_eq!(viewport.max_offset(), 245.0);
+        assert_eq!(Viewport { content_height: 20.0, ..viewport }.max_offset(), 0.0);
+        assert_eq!(Viewport { row_height: 0.0, ..viewport }.page_rows(), 1);
     }
 
 
     #[test]
     fn viewport_shows_rows_that_fit_entirely() {
-        let viewport = Viewport { offset: 100.0, height: 50.0, row_height: 10.0 };
+        let viewport = Viewport { offset: 100.0, height: 50.0, row_height: 10.0, content_height: 1000.0 };
         assert!(viewport.shows(10..15));
         assert!(viewport.shows(12..13));
         assert!(!viewport.shows(9..12));
@@ -756,7 +821,7 @@ mod tests {
 
 
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
     }
 
 
