@@ -21,3 +21,4 @@ skrifa.workspace = true
 [dev-dependencies]
 insta.workspace = true
 proptest.workspace = true
+egui_kittest.workspace = true

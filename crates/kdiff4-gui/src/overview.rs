@@ -321,8 +321,15 @@ mod tests {
     use kdiff4_protocol::engine::{CharRun, Comparison, ComparisonOptions, EngineCapabilities, HunkChange, Region, RegionStatus, Row};
     use kdiff4_protocol::{Choice, DocumentText, EolStyle, OutputDocument, RegionMerge, Revision, Snapshot};
 
+    use egui::{Color32, Event, Modifiers, PointerButton};
+    use egui_kittest::Harness;
+
     use super::*;
+    use crate::char_diff::CharDiffLook;
+    use crate::config::WhitespaceConfig;
     use crate::rows::{self, RowMap};
+    use crate::text_view::MarginKind;
+    use crate::theme::LIGHT;
 
 
     fn region(status: HunkChange, a: Range<usize>, b: Range<usize>, rows: &[(Option<usize>, Option<usize>)]) -> Region {
@@ -416,8 +423,14 @@ mod tests {
 
 
     fn mirror(current_region: Option<usize>) -> Mirror {
+        mirror_with_a3("a3", current_region)
+    }
+
+
+    /// The merge of `comparison` and `merge`, with `a3` as A's fourth line.
+    fn mirror_with_a3(a3: &str, current_region: Option<usize>) -> Mirror {
         let output = OutputDocument { path: None, text: "s0\ns1\nb2\ns3".to_string(), modified: false };
-        let documents = vec![text(Document::A, &["s0", "s1", "a2", "a3", "a4", "s3"]), text(Document::B, &["s0", "s1", "b2", "s3"])];
+        let documents = vec![text(Document::A, &["s0", "s1", "a2", a3, "a4", "s3"]), text(Document::B, &["s0", "s1", "b2", "s3"])];
         let snapshot = Snapshot { revision: Revision(1), documents, output: Some(output), comparison: comparison(), engine: EngineCapabilities::default(), merge: merge(), options: ComparisonOptions::default(), current_region, char_diffs: vec![char_runs(6), char_runs(4)] };
         Mirror::from_snapshot(snapshot, false)
     }
@@ -473,5 +486,143 @@ mod tests {
         assert_eq!(press(&lenses[0], 2, true), Some(PaneAction::Press { document: Document::A, position: Position { line: 3, column: 2 }, void_row: None, extend: true }));
         assert_eq!(press(&lenses[1], 2, false), Some(PaneAction::Press { document: Document::B, position: Position { line: 3, column: 0 }, void_row: Some(3), extend: false }));
         assert_eq!(press(&lenses[2], 2, false), None);
+    }
+
+
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN, corner_radius: 0 };
+
+
+    /// The strip in a test harness, and what its frames did: the actions it returned, the rect it took, the height `height` reserves for it, and its row height and line count.
+    struct StripTest {
+        mirror: Mirror,
+        panes: PaneState,
+        actions: Vec<PaneAction>,
+        rect: Rect,
+        height: f32,
+        row_height: f32,
+        lines: usize,
+    }
+
+
+    fn harness(mirror: Mirror, panes: PaneState) -> Harness<'static, StripTest> {
+        let test = StripTest { mirror, panes, actions: Vec::new(), rect: Rect::NOTHING, height: 0.0, row_height: 0.0, lines: 0 };
+        let mut harness = Harness::builder()
+            .with_size(vec2(400.0, 200.0))
+            .with_step_dt(0.01)
+            .build_ui_state(
+                |ui, test: &mut StripTest| {
+                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() };
+                    let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
+                    test.actions.extend(shown.inner);
+                    test.rect = shown.response.rect;
+                    test.lines = lenses(&test.mirror, &test.panes).len();
+                    test.height = height(ui, test.lines.clone());
+                    test.row_height = text_view::row_height(ui);
+                },
+                test,
+            );
+        harness.run_steps(4);
+        harness
+    }
+
+
+    /// A point near the right edge of the strip on its line `index`: past the end of a short line.
+    fn right_of(test: &StripTest, index: usize) -> Pos2 {
+        let top = test.rect.center().y - test.lines as f32 * test.row_height / 2.0;
+        pos2(test.rect.right() - 20.0, top + (index as f32 + 0.5) * test.row_height)
+    }
+
+
+    /// Clicks `times` times at `pos` with `modifiers` held, then waits out the double-click delay, and returns the actions the strip returned meanwhile.
+    fn click(harness: &mut Harness<'_, StripTest>, pos: Pos2, times: usize, modifiers: Modifiers) -> Vec<PaneAction> {
+        harness.state_mut().actions.clear();
+        harness.hover_at(pos);
+        harness.event(Event::ModifiersChanged(modifiers));
+        for _ in 0..times {
+            harness.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers: modifiers.clone() });
+            harness.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: modifiers.clone() });
+        }
+        harness.event(Event::ModifiersChanged(Modifiers::NONE));
+        harness.step();
+        harness.run_steps(50);
+        std::mem::take(&mut harness.state_mut().actions)
+    }
+
+
+    /// The column of a single press on A's fourth line.
+    fn pressed_column(actions: &[PaneAction]) -> Option<usize> {
+        match actions {
+            [PaneAction::Press { document: Document::A, position: Position { line: 3, column }, .. }] => Some(column.clone()),
+            _ => None,
+        }
+    }
+
+
+    fn caret_on_a3(column: usize) -> PaneState {
+        let mut panes = PaneState::default();
+        panes.set_caret(Document::A, Cursor::at(Position { line: 3, column }), None);
+        panes
+    }
+
+
+    #[test]
+    fn drawn_strip_takes_the_height_reserved_for_it() {
+        let harness = harness(mirror(None), PaneState::default());
+        let test = harness.state();
+        assert_eq!(test.lines, 3);
+        assert_eq!(test.rect.height(), test.height);
+    }
+
+
+    #[test]
+    fn clicking_a_line_presses_its_document() {
+        let mut harness = harness(mirror(None), caret_on_a3(0));
+        let (a, b, d) = (right_of(harness.state(), 0), right_of(harness.state(), 1), right_of(harness.state(), 2));
+        assert_eq!(click(&mut harness, a, 1, Modifiers::NONE), [PaneAction::Press { document: Document::A, position: Position { line: 3, column: 2 }, void_row: None, extend: false }]);
+        assert_eq!(click(&mut harness, b, 1, Modifiers::NONE), [PaneAction::Press { document: Document::B, position: Position { line: 3, column: 0 }, void_row: Some(3), extend: false }]);
+        assert!(click(&mut harness, d, 1, Modifiers::NONE).is_empty(), "D has no row that lines up with A's fourth line");
+        assert_eq!(click(&mut harness, a, 1, Modifiers::SHIFT), [PaneAction::Press { document: Document::A, position: Position { line: 3, column: 2 }, void_row: None, extend: true }]);
+    }
+
+
+    #[test]
+    fn double_click_selects_a_word_and_triple_click_a_line() {
+        let mut harness = harness(mirror(None), caret_on_a3(0));
+        let a = right_of(harness.state(), 0);
+        assert_eq!(click(&mut harness, a, 2, Modifiers::NONE).last(), Some(&PaneAction::SelectWord(Document::A, Position { line: 3, column: 2 })));
+        assert_eq!(click(&mut harness, a, 3, Modifiers::NONE).last(), Some(&PaneAction::SelectLine(Document::A, 3)));
+    }
+
+
+    #[test]
+    fn drag_stays_on_the_line_it_started_on() {
+        let mut panes = PaneState::default();
+        panes.set_caret(Document::D, Cursor::at(Position { line: 2, column: 0 }), None);
+        let mut harness = harness(mirror(None), panes);
+        let (a, b) = (right_of(harness.state(), 0), right_of(harness.state(), 1));
+        harness.hover_at(a);
+        harness.drag_at(a);
+        harness.hover_at(b);
+        harness.step();
+        let actions = std::mem::take(&mut harness.state_mut().actions);
+        assert_eq!(actions.first(), Some(&PaneAction::Press { document: Document::A, position: Position { line: 2, column: 2 }, void_row: None, extend: false }));
+        assert_eq!(actions.last(), Some(&PaneAction::Drag { document: Document::A, position: Position { line: 2, column: 2 }, void_row: None }));
+        harness.drop_at(b);
+        harness.step();
+        assert!(harness.state().actions.is_empty());
+    }
+
+
+    #[test]
+    fn strip_scrolls_sideways_to_the_caret_when_it_moves() {
+        let long = format!("a3{}", "x".repeat(300));
+        let mut harness = harness(mirror_with_a3(&long, None), caret_on_a3(0));
+        let a = right_of(harness.state(), 0);
+        let column = pressed_column(&click(&mut harness, a, 1, Modifiers::NONE)).unwrap();
+        assert!(column < 100, "the start of the line is in view, column {column} is under the pointer");
+        harness.state_mut().panes = caret_on_a3(302);
+        harness.run_steps(50);
+        let column = pressed_column(&click(&mut harness, a, 1, Modifiers::NONE)).unwrap();
+        assert!(column > 250, "the caret at the end of the line is in view, column {column} is under the pointer");
     }
 }

@@ -88,6 +88,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | Log output | `flexi_logger` | bin |
 | Snapshot tests | `insta` | dev |
 | Property tests | `proptest` | dev |
+| GUI interaction tests | `egui_kittest` | dev |
 
 
 ## Glossary
