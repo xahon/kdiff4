@@ -232,7 +232,7 @@ impl Mirror {
         self.row_maps = self.documents
             .iter()
             .enumerate()
-            .map(|(index, text)| RowMap::for_source(&self.comparison, index, text.line_count(), heights.as_deref()))
+            .map(|(index, text)| RowMap::for_source(&self.comparison, &self.merge, index, text.line_count(), heights.as_deref()))
             .collect();
         self.refresh_output_rows();
     }

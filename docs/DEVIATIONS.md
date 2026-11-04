@@ -33,6 +33,7 @@ None yet. The owner decides which kdiff3 bugs get fixed. When you find one while
 ### Merge result
 
 - A hand edit that crosses region boundaries joins the touched regions into one edited region; undo restores them (see Merge model in `ARCHITECTURE.md`).
+- A hand edit inside a region whose hunks are all equal splits each touched line into an edited region of its own, boxed with a gutter block in every pane and reached by Previous and Next Difference; choosing A, B or C for it joins it back with the regions around it (see Merge model in `ARCHITECTURE.md`). kdiff3 keeps the edited lines inside the unchanged block, which navigation skips.
 - Toggling off the last chosen hunk of a region (Ctrl+1, Ctrl+2, Ctrl+3) makes it an unresolved conflict again, so D can't be saved until it is resolved. kdiff3 keeps such a region with no lines, shown as "<No src line>", which counts as resolved.
 - A region that differs but has no lines in D is shown as a hatched void row, without kdiff3's "<No src line>" text, so D has a region box wherever the source panes have one. Typing on it gives the region the typed lines and marks it hand-edited, as typing over "<No src line>" does in kdiff3.
 - Typing on an unresolved conflict's placeholder line is not possible yet; kdiff3 lets the user type over its "<Merge Conflict>" line. Choose a hunk first, then edit it.

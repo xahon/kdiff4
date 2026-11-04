@@ -1275,7 +1275,7 @@ mod tests {
         use kdiff4_protocol::engine::{Comparison, HunkChange, Region, RegionStatus, Row};
         let region = |hunk: std::ops::Range<usize>, line: Option<usize>| Region { hunks: vec![hunk.clone(), hunk], status: RegionStatus::Diff(HunkChange::Unchanged), rows: vec![Row { lines: vec![line, line] }] };
         let comparison = Comparison { regions: vec![region(0..1, Some(0)), region(1..1, None), region(1..2, Some(1))] };
-        rows::RowMap::for_source(&comparison, 0, 2, None)
+        rows::RowMap::for_source(&comparison, &[], 0, 2, None)
     }
 
 

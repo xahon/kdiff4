@@ -483,7 +483,7 @@ mod tests {
                 Region { hunks: vec![10..12, 10..12], status: RegionStatus::Diff(HunkChange::Modified), rows: (10..12).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
             ],
         };
-        let map = RowMap::for_source(&comparison, 0, 12, None);
+        let map = RowMap::for_source(&comparison, &[], 0, 12, None);
         let rows = Some(Rows::Mapped(&map));
         let viewport = |offset: f32| Some(Viewport { offset, height: 50.0, row_height: 10.0, content_height: 120.0 });
         assert!(region_in_view(rows, viewport(80.0), 1));
@@ -570,7 +570,7 @@ mod tests {
                 Region { hunks: vec![30..32, 30..32], status: RegionStatus::Diff(HunkChange::Modified), rows: (30..32).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
             ],
         };
-        RowMap::for_source(&comparison, 0, 32, None)
+        RowMap::for_source(&comparison, &[], 0, 32, None)
     }
 
 

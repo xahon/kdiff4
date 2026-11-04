@@ -151,10 +151,11 @@ impl Session {
     }
 
 
-    /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. `Ok(None)` when there is none; the current region stays.
+    /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. Differences include hand-edited regions, so a line split out of a stable region by an edit can be reached. `Ok(None)` when there is none; the current region stays.
     pub fn navigate(&mut self, base: &Revision, from: Option<usize>, to: Navigation) -> Result<Option<usize>, CoreError> {
         self.check_base(base)?;
         let regions = self.merge.regions();
+        let states = self.merge.states();
         let count = regions.len();
         if let Some(index) = from
             && index >= count
@@ -163,7 +164,7 @@ impl Session {
         }
         let from = from.or(self.current.clone()).filter(|index| *index < count);
         let wanted = |index: &usize| match to {
-            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status),
+            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states[*index].merge.edited,
             Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
         };
         let found = match to {
@@ -1114,6 +1115,22 @@ mod tests {
         assert_eq!(session.navigate(&base, Some(3), Navigation::PreviousConflict).unwrap(), None);
         assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict).unwrap(), None);
         assert_eq!(session.revision(), base);
+    }
+
+
+    #[test]
+    fn navigation_finds_hand_edited_stable_lines() {
+        let dir = temp_dir("navigate-split");
+        let mut session = merge_session(&dir, "aa
+bb
+cc
+");
+        session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
+        let base = session.revision();
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousDifference).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(1), Navigation::NextDifference).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict).unwrap(), None);
     }
 
 
