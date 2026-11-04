@@ -12,9 +12,13 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const MAX_CORNER_RADIUS: u8 = 12;
 pub const DEFAULT_CORNER_RADIUS: u8 = 2;
 pub const MAX_JUMP_CONTEXT_LINES: u8 = 20;
-pub const DEFAULT_JUMP_CONTEXT_LINES: u8 = 3;
-/// A light blue wash: visible on every shade, and text keeps its contrast.
-pub const DEFAULT_CURRENT_REGION_COLOR: [u8; 4] = [40, 110, 255, 28];
+pub const DEFAULT_JUMP_CONTEXT_LINES: u8 = 12;
+/// A translucent yellow: text keeps its contrast on both themes.
+pub const DEFAULT_CURRENT_REGION_COLOR: [u8; 4] = [255, 214, 0, 72];
+pub const MAX_REGION_GAP: u8 = 8;
+pub const DEFAULT_REGION_GAP: u8 = 3;
+pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
+pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
 
 
 #[derive(Debug, Error)]
@@ -67,14 +71,18 @@ pub struct ViewConfig {
     pub align_output: bool,
     /// Rows kept above a region that navigation jumps to.
     pub jump_context_lines: u8,
-    /// RGBA wash over the rows of the current region.
+    /// RGBA background of the jumped-to region, void space included.
     pub current_region_color: [u8; 4],
+    /// Space between the boxes of adjacent regions, in pixels.
+    pub region_gap: u8,
+    /// Rounding of the region boxes, in pixels.
+    pub region_corner_radius: u8,
 }
 
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS }
     }
 }
 
@@ -85,6 +93,8 @@ impl ViewConfig {
         self.font_size = if self.font_size.is_finite() { self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) } else { DEFAULT_FONT_SIZE };
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
+        self.region_gap = self.region_gap.min(MAX_REGION_GAP);
+        self.region_corner_radius = self.region_corner_radius.min(MAX_REGION_CORNER_RADIUS);
         if self.font_family.as_deref().is_some_and(|family| family.trim().is_empty()) {
             self.font_family = None;
         }
@@ -178,7 +188,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4] };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4 };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -210,9 +220,10 @@ mod tests {
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nregion_gap = 50\nregion_corner_radius = 50\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
+        assert_eq!((view.region_gap, view.region_corner_radius), (MAX_REGION_GAP, MAX_REGION_CORNER_RADIUS));
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
         assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!(view.font_size, MAX_FONT_SIZE);

@@ -56,6 +56,10 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 - kdiff3 lets the user pick any installed font, style and weight. Kdiff4 offers only monospace families, in their regular face.
 - Font hinting and subpixel glyph positioning can be switched off; kdiff3 has no such options.
 
+### Navigation
+
+- A jump scrolls only when some pane doesn't show all rows of the region yet, and then leaves 12 lines above it by default. The caret moves to the region's start but stays hidden until it is moved again. kdiff3 always scrolls to the difference and shows its cursor there.
+
 ### Open dialog
 
 - Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.

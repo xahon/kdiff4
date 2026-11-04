@@ -1,8 +1,10 @@
+use std::ops::Range;
+
 use egui::epaint::text::cursor::CCursor;
-use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, TextStyle, Ui, pos2, vec2};
+use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
 
 use crate::editing::{self, Cursor, Lines, Position};
-use crate::rows::{Mark, PaneRow, Rows, Shade};
+use crate::rows::{Mark, PaneRow, Rows};
 use crate::theme::Palette;
 
 
@@ -21,6 +23,7 @@ const GUTTER_INSET: f32 = 2.0;
 /// Space between the margin and the text.
 const TEXT_GAP: f32 = 4.0;
 const CONFLICT_MARKER: &str = "<Merge Conflict>";
+const REGION_BORDER_WIDTH: f32 = 1.0;
 
 
 /// What a pane shows left of its text, after the line numbers.
@@ -34,7 +37,7 @@ pub enum MarginKind {
 }
 
 
-/// How a view draws: colors, its margin and the current region.
+/// How a view draws: colors, its margin, the region boxes and the current region.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewStyle<'a> {
     pub palette: &'a Palette,
@@ -44,6 +47,9 @@ pub struct ViewStyle<'a> {
     pub current_region_color: Color32,
     /// Rows kept above a region the view jumps to.
     pub jump_context_rows: usize,
+    /// Space between the boxes of adjacent regions, in pixels.
+    pub region_gap: f32,
+    pub region_corner_radius: u8,
 }
 
 
@@ -74,8 +80,27 @@ pub struct ViewResponse {
     pub pointer: Option<PointerAction>,
     /// How many whole rows fit in the view: the step of PageUp and PageDown.
     pub page_rows: usize,
-    /// The vertical scroll offset after this frame, in pixels.
+    pub viewport: Viewport,
+}
+
+
+/// The rows a view shows after a frame: its vertical scroll offset and height, in pixels, and the height of a row.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Viewport {
     pub offset: f32,
+    pub height: f32,
+    pub row_height: f32,
+}
+
+
+impl Viewport {
+    /// Whether every row of `rows` is fully visible. Rows that are empty count as visible when the place they would be is.
+    pub fn shows(&self, rows: Range<usize>) -> bool {
+        const TOLERANCE: f32 = 0.5;
+        let top = rows.start as f32 * self.row_height;
+        let bottom = rows.end.max(rows.start) as f32 * self.row_height;
+        top + TOLERANCE >= self.offset && bottom <= self.offset + self.height + TOLERANCE
+    }
 }
 
 
@@ -94,7 +119,7 @@ impl Margin {
 }
 
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its region's shade, or hatching for a void, behind a margin of line numbers and gutters. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows. `offset` forces the vertical scroll offset, so several views can scroll together.
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows. `offset` forces the vertical scroll offset, so several views can scroll together.
 pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
@@ -125,6 +150,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
             let viewport = ui.clip_rect();
             let text_clip = Rect::from_min_max(pos2(viewport.left() + margin.total(), viewport.top()), viewport.max);
             let text_painter = ui.painter().with_clip_rect(text_clip);
+            let mut boxes = Vec::new();
+            let mut previous_region = None;
             for row in visible {
                 let pane_row = rows.row(row).unwrap_or_default();
                 let galley = pane_row.line.map(|line| layout(ui, lines, line, &font_id, palette));
@@ -132,12 +159,18 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
                 let width = (margin.total() + text_width + CARET_WIDTH * 2.0).max(ui.available_width());
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
                 let text_rect = Rect::from_min_max(pos2(rect.left() + margin.total(), rect.top()), pos2(rect.right().max(viewport.right()), rect.bottom()));
-                if let Some(shade) = pane_row.shade {
-                    text_painter.rect_filled(text_rect, 0.0, shade_color(palette, shade));
+                if let Some(region) = pane_row.region
+                    && pane_row.region != previous_region
+                    && let Some(region_rect) = rows.region_rows(region).and_then(|range| region_box(range, row, rect.top(), row_height, viewport.x_range(), style.region_gap))
+                {
+                    if pane_row.region == style.current_region {
+                        ui.painter().rect_filled(region_rect, style.region_corner_radius, style.current_region_color);
+                    }
+                    if pane_row.boxed {
+                        boxes.push(region_rect);
+                    }
                 }
-                if pane_row.region.is_some() && pane_row.region == style.current_region {
-                    ui.painter().rect_filled(Rect::from_min_max(pos2(viewport.left(), rect.top()), pos2(viewport.right(), rect.bottom())), 0.0, style.current_region_color);
-                }
+                previous_region = pane_row.region;
                 paint_margin(ui, rows, row, &pane_row, viewport.left(), rect, margin, style, &font_id);
                 let caret_on_void = caret.and_then(|caret| caret.void_row) == Some(row);
                 let (Some(line), Some(galley)) = (pane_row.line, galley) else {
@@ -162,6 +195,9 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
                 if let Some(x) = caret_x {
                     paint_caret(&text_painter, x, rect, palette);
                 }
+            }
+            for region_rect in boxes {
+                ui.painter().rect_stroke(region_rect, style.region_corner_radius, Stroke::new(REGION_BORDER_WIDTH, palette.region_border), StrokeKind::Inside);
             }
         })
     });
@@ -194,7 +230,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
         }
         _ => None,
     };
-    ViewResponse { pointer, page_rows, offset: scroll.y }
+    let viewport = Viewport { offset: scroll.y, height: output.inner_rect.height(), row_height };
+    ViewResponse { pointer, page_rows, viewport }
 }
 
 
@@ -279,13 +316,15 @@ fn paint_caret(painter: &Painter, x: f32, rect: Rect, palette: &Palette) {
 }
 
 
-fn shade_color(palette: &Palette, shade: Shade) -> Color32 {
-    match shade {
-        Shade::Removed => palette.removed_bg,
-        Shade::Added => palette.added_bg,
-        Shade::Modified => palette.modified_bg,
-        Shade::Conflict => palette.conflict_bg,
+/// The box of a region spanning `rows`, as wide as `x_range`, given that its row `row` starts at `row_top`. Half the gap is taken off its top and bottom, so adjacent boxes are `gap` apart. `None` when the region has no rows.
+fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_range: Rangef, gap: f32) -> Option<Rect> {
+    if !rows.contains(&row) {
+        return None;
     }
+    let top = row_top - (row - rows.start) as f32 * row_height;
+    let bottom = row_top + (rows.end - row) as f32 * row_height;
+    let inset = (gap / 2.0).clamp(0.0, ((bottom - top) / 2.0 - REGION_BORDER_WIDTH).max(0.0));
+    Some(Rect::from_x_y_ranges(x_range, Rangef::new(top + inset, bottom - inset)))
 }
 
 
@@ -439,8 +478,36 @@ mod tests {
     }
 
 
+    #[test]
+    fn viewport_shows_rows_that_fit_entirely() {
+        let viewport = Viewport { offset: 100.0, height: 50.0, row_height: 10.0 };
+        assert!(viewport.shows(10..15));
+        assert!(viewport.shows(12..13));
+        assert!(!viewport.shows(9..12));
+        assert!(!viewport.shows(14..16));
+        assert!(!viewport.shows(0..30));
+        assert!(viewport.shows(15..15));
+        assert!(!viewport.shows(16..16));
+        assert!(Viewport { offset: 100.2, ..viewport }.shows(10..15));
+    }
+
+
+    #[test]
+    fn region_boxes_span_the_region_less_half_the_gap() {
+        let x_range = Rangef::new(0.0, 200.0);
+        let rect = region_box(4..7, 5, 50.0, 10.0, x_range, 4.0).unwrap();
+        assert_eq!(rect, Rect::from_min_max(pos2(0.0, 42.0), pos2(200.0, 68.0)));
+        assert_eq!(region_box(4..7, 4, 40.0, 10.0, x_range, 4.0), Some(rect));
+        assert_eq!(region_box(4..7, 4, 40.0, 10.0, x_range, 0.0), Some(Rect::from_min_max(pos2(0.0, 40.0), pos2(200.0, 70.0))));
+        let thin = region_box(0..1, 0, 0.0, 4.0, x_range, 8.0).unwrap();
+        assert_eq!(thin.y_range(), Rangef::new(1.0, 3.0));
+        assert_eq!(region_box(3..3, 3, 0.0, 10.0, x_range, 2.0), None);
+        assert_eq!(region_box(3..5, 7, 0.0, 10.0, x_range, 2.0), None);
+    }
+
+
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0 }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0 }
     }
 
 

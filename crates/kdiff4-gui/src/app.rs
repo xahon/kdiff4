@@ -333,7 +333,7 @@ impl KdiffApp {
     }
 
 
-    /// Scrolls every pane to `region`, with context rows above it, and puts the caret at its start in the pane that has it (A when none does).
+    /// Scrolls every pane to `region`, with context rows above it, unless every pane already shows all of it, and puts the caret, hidden, at its start in the pane that has it (A when none does).
     fn jump_to(&mut self, region: usize) {
         self.panes.jump = Some(region);
         let document = self.panes.caret.map_or(Document::A, |(document, _)| document);
@@ -343,7 +343,7 @@ impl KdiffApp {
             .and_then(|(lines, rows)| Some((lines, rows, rows.region_start(region)?)));
         if let Some((lines, rows, row)) = target {
             let (position, void_row) = rows.caret_at_row(row, 0, text_end(lines));
-            self.panes.set_caret(document, Cursor::at(editing::clamp(lines, position)), void_row);
+            self.panes.set_hidden_caret(document, Cursor::at(editing::clamp(lines, position)), void_row);
         }
     }
 
@@ -873,7 +873,7 @@ impl KdiffApp {
     fn pane_options(&self) -> PaneOptions {
         let view = self.view();
         let [r, g, b, a] = view.current_region_color;
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius }
     }
 
 

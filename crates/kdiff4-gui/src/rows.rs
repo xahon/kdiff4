@@ -1,17 +1,9 @@
+use std::ops::Range;
+
 use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, Region, RegionStatus};
 use kdiff4_protocol::{Choice, Document, RegionMerge};
 
 use crate::editing::Position;
-
-
-/// Background of a pane's rows in a changed region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shade {
-    Removed,
-    Added,
-    Modified,
-    Conflict,
-}
 
 
 /// Where a line of D came from: a chosen hunk, or a hand edit.
@@ -22,12 +14,12 @@ pub enum Mark {
 }
 
 
-/// One row of a pane: its line, or `None` for a void, the region it belongs to and the region's shade in this pane. In D, `mark` says where the line came from, and `conflict_marker` is the placeholder of an unresolved conflict.
+/// One row of a pane: its line, or `None` for a void, the region it belongs to and whether that region is a difference, drawn as a bordered box. In D, `mark` says where the line came from, and `conflict_marker` is the placeholder of an unresolved conflict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRow {
     pub line: Option<usize>,
-    pub shade: Option<Shade>,
     pub region: Option<usize>,
+    pub boxed: bool,
     pub mark: Option<Mark>,
     pub conflict_marker: bool,
 }
@@ -44,14 +36,14 @@ pub struct RowMap {
 
 
 impl RowMap {
-    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. Falls back to one unshaded row per line when the comparison doesn't hold every line of the document exactly once, in order.
+    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. Falls back to one plain row per line when the comparison doesn't hold every line of the document exactly once, in order.
     pub fn for_source(comparison: &Comparison, document_index: usize, line_count: usize, heights: Option<&[usize]>) -> RowMap {
         let mut rows = Vec::new();
         let mut row_of_line = Vec::with_capacity(line_count);
         let mut region_starts = Vec::with_capacity(comparison.regions.len());
         for (index, region) in comparison.regions.iter().enumerate() {
             region_starts.push(rows.len());
-            let shade = shade(region, document_index);
+            let boxed = is_difference(region);
             for row in &region.rows {
                 let line = row.lines.get(document_index).cloned().flatten();
                 if let Some(line) = line {
@@ -60,9 +52,9 @@ impl RowMap {
                     }
                     row_of_line.push(rows.len());
                 }
-                rows.push(PaneRow { line, shade, region: Some(index), ..PaneRow::default() });
+                rows.push(PaneRow { line, region: Some(index), boxed, ..PaneRow::default() });
             }
-            pad(&mut rows, index, region_starts[index], heights);
+            pad(&mut rows, index, region_starts[index], heights, boxed);
         }
         if row_of_line.len() != line_count {
             return RowMap::fallback(line_count, "lines missing");
@@ -71,15 +63,16 @@ impl RowMap {
     }
 
 
-    /// D's rows: its lines, region by region, each marked with where it came from, and a conflict-shaded placeholder row for each unresolved conflict, which has no lines. `heights` pads regions like `for_source`. Lines past the regions (the empty line after D's last line break) follow as plain rows.
+    /// D's rows: its lines, region by region, each marked with where it came from, and a placeholder row for each unresolved conflict, which has no lines. `heights` pads regions like `for_source`. Lines past the regions (the empty line after D's last line break) follow as plain rows.
     pub fn for_output(merge: &[RegionMerge], regions: &[Region], line_count: usize, heights: Option<&[usize]>) -> RowMap {
         let mut rows = Vec::with_capacity(line_count + merge.len());
         let mut row_of_line = Vec::with_capacity(line_count);
         let mut region_starts = Vec::with_capacity(merge.len());
         for (index, state) in merge.iter().enumerate() {
             region_starts.push(rows.len());
+            let boxed = regions.get(index).is_some_and(is_difference);
             if state.output_lines == 0 && state.is_unresolved() {
-                rows.push(PaneRow { shade: Some(Shade::Conflict), region: Some(index), conflict_marker: true, ..PaneRow::default() });
+                rows.push(PaneRow { region: Some(index), boxed, conflict_marker: true, ..PaneRow::default() });
             }
             let marks = marks(state, regions.get(index));
             for mark in marks {
@@ -87,9 +80,9 @@ impl RowMap {
                     return RowMap::fallback(line_count, "more region lines than D has");
                 }
                 row_of_line.push(rows.len());
-                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), mark, ..PaneRow::default() });
+                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), boxed, mark, ..PaneRow::default() });
             }
-            pad(&mut rows, index, region_starts[index], heights);
+            pad(&mut rows, index, region_starts[index], heights, boxed);
         }
         while row_of_line.len() < line_count {
             row_of_line.push(rows.len());
@@ -110,10 +103,10 @@ impl RowMap {
 
 
 /// Pads the rows of region `index`, which started at row `start`, with void rows up to its height.
-fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>) {
+fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>, boxed: bool) {
     let height = heights.and_then(|heights| heights.get(index)).cloned().unwrap_or(0);
     while rows.len() - start < height {
-        rows.push(PaneRow { region: Some(index), ..PaneRow::default() });
+        rows.push(PaneRow { region: Some(index), boxed, ..PaneRow::default() });
     }
 }
 
@@ -225,6 +218,20 @@ impl Rows<'_> {
     }
 
 
+    /// The rows of region `region`, empty when it has none in this pane.
+    pub fn region_rows(&self, region: usize) -> Option<Range<usize>> {
+        let Rows::Mapped(map) = self else {
+            return None;
+        };
+        let start = map.region_starts.get(region).cloned()?.min(map.rows.len());
+        let length = map.rows[start..]
+            .iter()
+            .take_while(|row| row.region == Some(region))
+            .count();
+        Some(start..start + length)
+    }
+
+
     /// The region of `row`, if it has one.
     pub fn region_of_row(&self, row: usize) -> Option<usize> {
         self.row(row).and_then(|pane_row| pane_row.region)
@@ -260,46 +267,14 @@ pub fn step_row(row: usize, delta: isize, count: usize) -> usize {
 }
 
 
-/// How a region looks in one pane. A shows what B or C did to it; B and C show their own change. Voids get no text, so a pane is not shaded for lines it doesn't have.
-fn shade(region: &Region, document_index: usize) -> Option<Shade> {
-    let has_lines = region.hunks.get(document_index).is_some_and(|hunk| !hunk.is_empty());
-    let a_has_lines = region.hunks.first().is_some_and(|hunk| !hunk.is_empty());
-    let change_of = |other: usize| {
-        let other_has_lines = region.hunks.get(other).is_some_and(|hunk| !hunk.is_empty());
-        match (a_has_lines, other_has_lines) {
-            (false, _) => HunkChange::Added,
-            (true, false) => HunkChange::Removed,
-            (true, true) => HunkChange::Modified,
-        }
-    };
-    let change = match region.status {
-        RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged) => return None,
-        RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict) => return has_lines.then_some(Shade::Conflict),
-        RegionStatus::Diff(change) => change,
-        RegionStatus::Merge(MergeStatus::ChangedInB | MergeStatus::ChangedAlike) => change_of(1),
-        RegionStatus::Merge(MergeStatus::ChangedInC) => change_of(2),
-    };
-    let changed_here = match region.status {
-        RegionStatus::Merge(MergeStatus::ChangedInB) => document_index == 0 || document_index == 1,
-        RegionStatus::Merge(MergeStatus::ChangedInC) => document_index == 0 || document_index == 2,
-        _ => true,
-    };
-    if !changed_here || !has_lines {
-        return None;
-    }
-    match change {
-        HunkChange::Unchanged => None,
-        HunkChange::Added => Some(Shade::Added),
-        HunkChange::Removed => Some(Shade::Removed),
-        HunkChange::Modified => Some(Shade::Modified),
-    }
+/// Whether the hunks of a region differ, so it is drawn as a box; a region whose hunks are all equal is not.
+fn is_difference(region: &Region) -> bool {
+    !matches!(region.status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged))
 }
 
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
-
     use kdiff4_protocol::engine::Row;
 
     use super::*;
@@ -314,13 +289,6 @@ mod tests {
     }
 
 
-    fn shades(region: &Region) -> Vec<Option<Shade>> {
-        (0..region.hunks.len())
-            .map(|document| shade(region, document))
-            .collect()
-    }
-
-
     fn line(line: usize, region: usize) -> PaneRow {
         PaneRow { line: Some(line), region: Some(region), ..PaneRow::default() }
     }
@@ -332,35 +300,12 @@ mod tests {
 
 
     #[test]
-    fn two_way_shades() {
-        let unchanged = region(&[0..1, 0..1], RegionStatus::Diff(HunkChange::Unchanged), &[]);
-        assert_eq!(shades(&unchanged), [None, None]);
-        let added = region(&[0..0, 0..1], RegionStatus::Diff(HunkChange::Added), &[]);
-        assert_eq!(shades(&added), [None, Some(Shade::Added)]);
-        let removed = region(&[0..1, 0..0], RegionStatus::Diff(HunkChange::Removed), &[]);
-        assert_eq!(shades(&removed), [Some(Shade::Removed), None]);
-        let modified = region(&[0..1, 0..2], RegionStatus::Diff(HunkChange::Modified), &[]);
-        assert_eq!(shades(&modified), [Some(Shade::Modified), Some(Shade::Modified)]);
-    }
-
-
-    #[test]
-    fn three_way_shades_follow_the_changed_side() {
-        let in_b = region(&[0..1, 0..2, 0..1], RegionStatus::Merge(MergeStatus::ChangedInB), &[]);
-        assert_eq!(shades(&in_b), [Some(Shade::Modified), Some(Shade::Modified), None]);
-        let removed_in_c = region(&[0..1, 0..1, 0..0], RegionStatus::Merge(MergeStatus::ChangedInC), &[]);
-        assert_eq!(shades(&removed_in_c), [Some(Shade::Removed), None, None]);
-        let added_alike = region(&[0..0, 0..1, 0..1], RegionStatus::Merge(MergeStatus::ChangedAlike), &[]);
-        assert_eq!(shades(&added_alike), [None, Some(Shade::Added), Some(Shade::Added)]);
-    }
-
-
-    #[test]
-    fn conflicts_shade_every_pane_with_lines() {
-        let conflict = region(&[0..0, 0..1, 0..2], RegionStatus::Merge(MergeStatus::Conflict), &[]);
-        assert_eq!(shades(&conflict), [None, Some(Shade::Conflict), Some(Shade::Conflict)]);
-        let whitespace = region(&[0..1, 0..1, 0..1], RegionStatus::Merge(MergeStatus::WhitespaceConflict), &[]);
-        assert_eq!(shades(&whitespace), [Some(Shade::Conflict); 3]);
+    fn only_regions_whose_hunks_differ_are_boxed() {
+        assert!(!is_difference(&region(&[0..1, 0..1], RegionStatus::Diff(HunkChange::Unchanged), &[])));
+        assert!(!is_difference(&region(&[0..1, 0..1, 0..1], RegionStatus::Merge(MergeStatus::Unchanged), &[])));
+        assert!(is_difference(&region(&[0..0, 0..1], RegionStatus::Diff(HunkChange::Added), &[])));
+        assert!(is_difference(&region(&[0..1, 0..2, 0..1], RegionStatus::Merge(MergeStatus::ChangedInB), &[])));
+        assert!(is_difference(&region(&[0..1, 0..1, 0..1], RegionStatus::Merge(MergeStatus::WhitespaceConflict), &[])));
     }
 
 
@@ -381,12 +326,12 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.row(0), Some(line(0, 0)));
-        assert_eq!(rows.row(1), Some(void(1)));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, ..void(1) }));
         assert_eq!(rows.row(3), Some(line(1, 2)));
         assert_eq!(rows.row(4), None);
         assert_eq!(rows.row_of_line(1), 3);
         let map = RowMap::for_source(&two_way_comparison(), 1, 4, None);
-        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { shade: Some(Shade::Added), ..line(2, 1) }));
+        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { boxed: true, ..line(2, 1) }));
     }
 
 
@@ -400,6 +345,9 @@ mod tests {
         assert_eq!(rows.region_edges(1), (true, false));
         assert_eq!(rows.region_edges(2), (false, true));
         assert_eq!(Rows::PerLine(3).region_start(0), None);
+        assert_eq!((rows.region_rows(0), rows.region_rows(1), rows.region_rows(2)), (Some(0..1), Some(1..3), Some(3..4)));
+        assert_eq!(rows.region_rows(3), None);
+        assert_eq!(Rows::PerLine(3).region_rows(0), None);
     }
 
 
@@ -409,6 +357,8 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows.row(1), Some(void(0)));
+        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, ..void(1) }));
+        assert_eq!(rows.region_rows(1), Some(2..4));
         assert_eq!(rows.row_of_line(1), 4);
         assert_eq!(rows.region_start(2), Some(4));
     }
@@ -498,13 +448,15 @@ mod tests {
         let map = RowMap::for_output(&merge, &regions, 4, None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows.row(0), Some(PaneRow { mark: Some(Mark::Source(Document::A)), ..line(0, 0) }));
-        assert_eq!(rows.row(1), Some(PaneRow { shade: Some(Shade::Conflict), conflict_marker: true, ..void(1) }));
-        assert_eq!(rows.row(2), Some(PaneRow { mark: Some(Mark::Source(Document::B)), ..line(1, 3) }));
+        assert_eq!(rows.row(0), Some(PaneRow { mark: Some(Mark::Source(Document::A)), boxed: true, ..line(0, 0) }));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, conflict_marker: true, ..void(1) }));
+        assert_eq!(rows.row(2), Some(PaneRow { mark: Some(Mark::Source(Document::B)), boxed: true, ..line(1, 3) }));
         assert_eq!(rows.row(4), Some(PaneRow { line: Some(3), ..PaneRow::default() }));
         assert_eq!(rows.row_of_line(3), 4);
         assert_eq!(rows.line_at_or_after(1), Some(1));
         assert_eq!(rows.region_start(2), Some(2));
+        assert_eq!(rows.region_rows(2), Some(2..2));
+        assert_eq!(rows.region_rows(3), Some(2..4));
     }
 
 

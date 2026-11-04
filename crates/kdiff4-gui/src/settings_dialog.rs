@@ -1,7 +1,7 @@
 use egui::{ComboBox, DragValue, RichText, Ui};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
-use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MIN_FONT_SIZE, ViewConfig};
+use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MIN_FONT_SIZE, ViewConfig};
 use crate::fonts::MonospaceFamily;
 use crate::theme;
 
@@ -20,7 +20,7 @@ pub enum SettingsAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Font,
+    Editor,
     View,
     Comparison,
 }
@@ -39,7 +39,7 @@ pub struct SettingsDialog {
 
 impl SettingsDialog {
     pub fn new(view: &ViewConfig, comparison: Option<&ComparisonOptions>) -> SettingsDialog {
-        SettingsDialog { original: view.clone(), draft: view.clone(), comparison: comparison.map(|options| (options.clone(), options.clone())), tab: Tab::Font }
+        SettingsDialog { original: view.clone(), draft: view.clone(), comparison: comparison.map(|options| (options.clone(), options.clone())), tab: Tab::Editor }
     }
 
 
@@ -83,13 +83,13 @@ impl SettingsDialog {
         ui.heading("Settings");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Font, "Font");
+            ui.selectable_value(&mut self.tab, Tab::Editor, "Editor");
             ui.selectable_value(&mut self.tab, Tab::View, "View");
             ui.selectable_value(&mut self.tab, Tab::Comparison, "Comparison");
         });
         ui.separator();
         match self.tab {
-            Tab::Font => self.font_tab(ui, families),
+            Tab::Editor => self.editor_tab(ui, families),
             Tab::View => self.view_tab(ui),
             Tab::Comparison => self.comparison_tab(ui),
         }
@@ -109,8 +109,9 @@ impl SettingsDialog {
     }
 
 
-    fn font_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
-        egui::Grid::new("settings_font_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+    /// How the panes draw text and regions.
+    fn editor_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
+        egui::Grid::new("settings_editor_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Font:");
             ui.horizontal(|ui| {
                 self.font_family_combo(ui, families);
@@ -131,17 +132,6 @@ impl SettingsDialog {
                 ui.checkbox(&mut self.draft.subpixel_positioning, "Subpixel positioning").on_hover_text("Place glyphs at fractional pixel offsets: more even spacing, slightly blurrier.");
             });
             ui.end_row();
-        });
-        ui.add_space(8.0);
-        show_preview(ui);
-    }
-
-
-    fn view_tab(&mut self, ui: &mut Ui) {
-        egui::Grid::new("settings_view_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-            ui.label("Corner radius:");
-            ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px"));
-            ui.end_row();
 
             ui.label("Panes:");
             ui.vertical(|ui| {
@@ -155,8 +145,33 @@ impl SettingsDialog {
             ui.add(DragValue::new(&mut self.draft.jump_context_lines).range(0..=MAX_JUMP_CONTEXT_LINES).speed(0.1).suffix(" lines")).on_hover_text("Lines kept above a difference or conflict that navigation jumps to.");
             ui.end_row();
 
-            ui.label("Current region:");
-            ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color).on_hover_text("The wash over the rows of the region navigation is at.");
+            ui.label("Jumped-to region:");
+            ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color).on_hover_text("The background of the region navigation is at, in every pane, void space included.");
+            ui.end_row();
+
+            ui.label("Region boxes:");
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Gap");
+                    ui.add(DragValue::new(&mut self.draft.region_gap).range(0..=MAX_REGION_GAP).speed(0.1).suffix(" px")).on_hover_text("Space between the boxes of adjacent regions.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Corner radius");
+                    ui.add(DragValue::new(&mut self.draft.region_corner_radius).range(0..=MAX_REGION_CORNER_RADIUS).speed(0.1).suffix(" px")).on_hover_text("Rounding of the boxes drawn around the regions that differ.");
+                });
+            });
+            ui.end_row();
+        });
+        ui.add_space(8.0);
+        show_preview(ui);
+    }
+
+
+    /// How the window and its widgets look.
+    fn view_tab(&mut self, ui: &mut Ui) {
+        egui::Grid::new("settings_view_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Corner radius:");
+            ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px")).on_hover_text("Rounding of widgets, menus, dialogs, panes and the window frame.");
             ui.end_row();
         });
     }

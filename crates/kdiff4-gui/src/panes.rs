@@ -6,7 +6,7 @@ use kdiff4_protocol::Document;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::rows::Rows;
-use crate::text_view::{self, Caret, MarginKind, PointerAction, ViewStyle};
+use crate::text_view::{self, Caret, MarginKind, PointerAction, ViewStyle, Viewport};
 use crate::theme::{self, Palette};
 
 
@@ -38,7 +38,9 @@ pub struct PaneState {
     pub caret: Option<(Document, Cursor)>,
     /// The row of the caret when it sits on a void; its position is then the start of the line after the void.
     pub void_row: Option<usize>,
-    /// A region to scroll every pane to on the next frame, with context rows above it.
+    /// The caret is not drawn, as after a jump, until it is moved again.
+    pub caret_hidden: bool,
+    /// A region to scroll every pane to on the next frame, with context rows above it, unless every pane already shows all of it.
     pub jump: Option<usize>,
     /// Scroll the caret into view on the next frame.
     pub reveal_caret: bool,
@@ -50,12 +52,14 @@ pub struct PaneState {
     pub path_fields: [String; 4],
     /// Vertical scroll offset shared by the source panes, which scroll together row by row.
     pub source_offset: f32,
+    /// What each pane showed in the last frame, in `Document::ALL` order.
+    pub viewports: [Option<Viewport>; 4],
 }
 
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, void_row: None, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0 }
+        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0, viewports: [None; 4] }
     }
 }
 
@@ -68,10 +72,26 @@ impl PaneState {
     }
 
 
-    /// Moves the caret; `void_row` is the row when it sits on a void.
+    /// Moves the caret and shows it; `void_row` is the row when it sits on a void.
     pub fn set_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
         self.caret = Some((document, cursor));
         self.void_row = void_row;
+        self.caret_hidden = false;
+    }
+
+
+    /// Moves the caret to where a jump lands, without drawing it until it is moved again.
+    pub fn set_hidden_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
+        self.set_caret(document, cursor, void_row);
+        self.caret_hidden = true;
+    }
+
+
+    /// The caret to draw in `document`'s pane, if it is there and not hidden.
+    fn visible_caret(&self, document: Document) -> Option<Caret> {
+        self.caret_in(document)
+            .filter(|_| !self.caret_hidden)
+            .map(|cursor| Caret { cursor, void_row: self.void_row.clone() })
     }
 }
 
@@ -83,16 +103,21 @@ pub struct PaneOptions {
     pub gutters: bool,
     pub current_region_color: Color32,
     pub jump_context_rows: usize,
+    pub region_gap: f32,
+    pub region_corner_radius: u8,
 }
 
 
 /// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows };
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius };
     let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
+    if state.jump.is_some_and(|region| region_in_view_everywhere(mirror, &state.viewports, region)) {
+        state.jump = None;
+    }
     egui::CentralPanel::default().show(ui, |ui| {
         let total = ui.available_size();
         let shared = state.source_offset.clone();
@@ -113,6 +138,30 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     });
     state.jump = None;
     actions
+}
+
+
+/// Whether every pane of the session showed all rows of `region` in the last frame. A pane with no viewport yet does not.
+fn region_in_view_everywhere(mirror: &Mirror, viewports: &[Option<Viewport>; 4], region: usize) -> bool {
+    let sources = mirror
+        .documents()
+        .iter()
+        .map(|text| (text.document.clone(), mirror.rows(text.document.clone()).map(Rows::Mapped)));
+    let output = mirror
+        .output()
+        .map(|_| (Document::D, Some(Rows::Mapped(mirror.output_rows()))));
+    sources
+        .chain(output)
+        .all(|(document, rows)| region_in_view(rows, viewports[document_index(document)], region))
+}
+
+
+/// Whether `viewport` shows every row of `region`. Without rows for it, there is nothing to scroll to.
+fn region_in_view(rows: Option<Rows<'_>>, viewport: Option<Viewport>, region: usize) -> bool {
+    match rows.and_then(|rows| rows.region_rows(region)) {
+        Some(range) => viewport.is_some_and(|viewport| viewport.shows(range)),
+        None => true,
+    }
 }
 
 
@@ -175,12 +224,13 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
             header(ui, palette, radius, document.clone(), label, path, modified, state, actions);
             theme::pane_body_frame()
                 .show(ui, |ui| {
-                    let caret = state.caret_in(document.clone()).map(|cursor| Caret { cursor, void_row: state.void_row.clone() });
+                    let caret = state.visible_caret(document.clone());
                     let jump_row = state.jump.and_then(|region| rows.region_start(region));
                     let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), jump_row, offset, style);
-                    if caret.is_some() {
+                    if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }
+                    state.viewports[document_index(document.clone())] = Some(response.viewport);
                     match response.pointer {
                         Some(PointerAction::Press { position, void_row, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, void_row, extend }),
                         Some(PointerAction::Drag { position, void_row }) => actions.push(PaneAction::Drag { document: document.clone(), position, void_row }),
@@ -188,7 +238,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         None => {}
                     }
-                    response.offset
+                    response.viewport.offset
                 })
                 .inner
         })
@@ -243,7 +293,10 @@ fn document_index(document: Document) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use kdiff4_protocol::engine::{Comparison, HunkChange, Region, RegionStatus, Row};
+
     use super::*;
+    use crate::rows::RowMap;
 
 
     #[test]
@@ -255,6 +308,40 @@ mod tests {
         assert_eq!(state.caret_in(Document::B), Some(cursor));
         assert_eq!(state.caret_in(Document::A), None);
         assert_eq!(state.caret_in(Document::D), None);
+    }
+
+
+    #[test]
+    fn jumps_hide_the_caret_until_it_moves() {
+        let mut state = PaneState::default();
+        let cursor = Cursor::at(Position { line: 4, column: 0 });
+        state.set_hidden_caret(Document::A, cursor, Some(7));
+        assert_eq!(state.caret_in(Document::A), Some(cursor));
+        assert_eq!(state.visible_caret(Document::A), None);
+        state.set_caret(Document::A, cursor, None);
+        assert_eq!(state.visible_caret(Document::A), Some(Caret { cursor, void_row: None }));
+    }
+
+
+    #[test]
+    fn region_counts_as_in_view_when_all_its_rows_are() {
+        let comparison = Comparison {
+            regions: vec![
+                Region { hunks: vec![0..10, 0..10], status: RegionStatus::Diff(HunkChange::Unchanged), rows: (0..10).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+                Region { hunks: vec![10..12, 10..12], status: RegionStatus::Diff(HunkChange::Modified), rows: (10..12).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+            ],
+        };
+        let map = RowMap::for_source(&comparison, 0, 12, None);
+        let rows = Some(Rows::Mapped(&map));
+        let viewport = |offset: f32| Some(Viewport { offset, height: 50.0, row_height: 10.0 });
+        assert!(region_in_view(rows, viewport(80.0), 1));
+        assert!(region_in_view(rows, viewport(70.0), 1));
+        assert!(!region_in_view(rows, viewport(69.0), 1));
+        assert!(!region_in_view(rows, viewport(101.0), 1));
+        assert!(!region_in_view(rows, viewport(0.0), 1));
+        assert!(!region_in_view(rows, None, 1));
+        assert!(region_in_view(rows, None, 5));
+        assert!(region_in_view(None, None, 1));
     }
 
 

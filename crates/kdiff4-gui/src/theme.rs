@@ -14,11 +14,8 @@ pub struct Palette {
     pub weak_text: Color32,
     pub caret: Color32,
     pub selection: Color32,
-    /// Row backgrounds of changed regions.
-    pub removed_bg: Color32,
-    pub added_bg: Color32,
-    pub modified_bg: Color32,
-    pub conflict_bg: Color32,
+    /// The border of each region box.
+    pub region_border: Color32,
     /// Hatching of void regions.
     pub void_hatch: Color32,
     /// The bordered gutter block of each region in the source panes.
@@ -38,10 +35,7 @@ pub const LIGHT: Palette = Palette {
     weak_text: Color32::from_rgb(0x55, 0x5D, 0x69),
     caret: Color32::from_rgb(0x1F, 0x5F, 0xD1),
     selection: Color32::from_rgb(0xB8, 0xD4, 0xFF),
-    removed_bg: Color32::from_rgb(0xFF, 0xD9, 0xD6),
-    added_bg: Color32::from_rgb(0xD3, 0xF2, 0xD3),
-    modified_bg: Color32::from_rgb(0xF3, 0xD8, 0xF3),
-    conflict_bg: Color32::from_rgb(0xFF, 0xE2, 0xB0),
+    region_border: Color32::from_rgb(0x5A, 0x66, 0x76),
     void_hatch: Color32::from_rgb(0xC4, 0xCA, 0xD3),
     gutter_fill: Color32::from_rgb(0xFF, 0xD3, 0x6E),
     gutter_border: Color32::from_rgb(0xB0, 0x76, 0x00),
@@ -58,10 +52,7 @@ pub const DARK: Palette = Palette {
     weak_text: Color32::from_rgb(0xA0, 0xA8, 0xB3),
     caret: Color32::from_rgb(0x7A, 0xB0, 0xFF),
     selection: Color32::from_rgb(0x2C, 0x4A, 0x78),
-    removed_bg: Color32::from_rgb(0x4C, 0x23, 0x25),
-    added_bg: Color32::from_rgb(0x1E, 0x40, 0x25),
-    modified_bg: Color32::from_rgb(0x45, 0x25, 0x47),
-    conflict_bg: Color32::from_rgb(0x4A, 0x39, 0x16),
+    region_border: Color32::from_rgb(0x8A, 0x94, 0xA3),
     void_hatch: Color32::from_rgb(0x3C, 0x42, 0x4B),
     gutter_fill: Color32::from_rgb(0x8A, 0x62, 0x10),
     gutter_border: Color32::from_rgb(0xFF, 0xBF, 0x3C),
@@ -191,13 +182,22 @@ mod tests {
 
 
     #[test]
-    fn text_on_region_backgrounds_has_high_contrast() {
+    fn region_boxes_and_voids_stand_out() {
         for palette in [&LIGHT, &DARK] {
-            for background in [palette.removed_bg, palette.added_bg, palette.modified_bg, palette.conflict_bg] {
-                assert!(contrast_ratio(palette.text, background) >= 7.0, "{background:?} in {palette:?}");
-                assert!(contrast_ratio(background, palette.pane_bg) >= 1.1, "{background:?} must differ from the pane in {palette:?}");
-            }
+            assert!(contrast_ratio(palette.region_border, palette.pane_bg) >= 3.0, "{palette:?}");
             assert!(contrast_ratio(palette.void_hatch, palette.pane_bg) >= 1.4, "{palette:?}");
+        }
+    }
+
+
+    #[test]
+    fn text_on_the_default_jump_highlight_has_high_contrast() {
+        let [r, g, b, a] = crate::config::DEFAULT_CURRENT_REGION_COLOR;
+        let blend = |over: u8, under: u8| ((over as f32 * a as f32 + under as f32 * (255 - a) as f32) / 255.0).round() as u8;
+        for palette in [&LIGHT, &DARK] {
+            let background = Color32::from_rgb(blend(r, palette.pane_bg.r()), blend(g, palette.pane_bg.g()), blend(b, palette.pane_bg.b()));
+            assert!(contrast_ratio(palette.text, background) >= 7.0, "{background:?} in {palette:?}");
+            assert!(contrast_ratio(background, palette.pane_bg) >= 1.1, "{background:?} must differ from the pane in {palette:?}");
         }
     }
 
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn gutters_and_conflict_markers_are_readable() {
         for palette in [LIGHT, DARK] {
-            assert!(contrast_ratio(palette.conflict_marker, palette.conflict_bg) >= 4.5, "{palette:?}");
+            assert!(contrast_ratio(palette.conflict_marker, palette.pane_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.gutter_border, palette.gutter_fill) >= 2.0, "{palette:?}");
             assert!(contrast_ratio(palette.gutter_fill, palette.pane_bg) >= 1.2, "{palette:?}");
         }
