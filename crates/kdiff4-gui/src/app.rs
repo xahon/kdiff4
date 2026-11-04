@@ -65,8 +65,8 @@ enum Pending {
     Resync,
     /// Undo or redo; its delta moves the caret to the changed text.
     UndoRedo,
-    /// A choice for one region or for every unresolved one.
-    Choose,
+    /// A choice for one region, which its delta keeps the caret in, or for every unresolved one.
+    Choose(Option<usize>),
     /// A move to the next or previous difference or conflict; becomes `Navigated` when the current region moved.
     Navigate(Navigation),
     Navigated,
@@ -304,6 +304,10 @@ impl KdiffApp {
             }
             HostMessage::Event(Event::Delta(delta)) => {
                 let from_undo = delta.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::UndoRedo));
+                let chosen_region = match delta.cause.as_ref().and_then(|cause| self.pending.get(cause)) {
+                    Some(Pending::Choose(region)) => region.clone(),
+                    _ => None,
+                };
                 let changed_end = match &delta.change {
                     Change::OutputEdited { range, text, .. } if from_undo => Some(range.start + text.len()),
                     _ => None,
@@ -323,6 +327,9 @@ impl KdiffApp {
                         {
                             self.panes.set_caret(Document::D, Cursor::at(editing::position_of(lines, offset)), None);
                             self.panes.reveal_caret = true;
+                        }
+                        if let Some(region) = chosen_region {
+                            self.keep_caret_in_region(region);
                         }
                     }
                     DeltaOutcome::Ignored => {}
@@ -362,17 +369,22 @@ impl KdiffApp {
     fn caret_to_region(&mut self, document: Document, region: usize, hidden: bool) {
         let target = self.mirror
             .as_ref()
-            .and_then(|mirror| Some((lines_of(mirror, document.clone())?, rows_of(mirror, document.clone())?)))
-            .and_then(|(lines, rows)| Some((lines, rows, rows.region_start(region)?)));
-        if let Some((lines, rows, row)) = target {
-            let (position, void_row) = rows.caret_at_row(row, 0, text_end(lines));
-            let cursor = Cursor::at(editing::clamp(lines, position));
+            .and_then(|mirror| region_start_caret(mirror, document.clone(), region));
+        if let Some((cursor, void_row)) = target {
             if hidden {
                 self.panes.set_hidden_caret(document, cursor, void_row);
             } else {
                 self.panes.set_caret(document, cursor, void_row);
             }
         }
+    }
+
+
+    /// A choice adds or removes the region's output lines, so the caret's line may now belong to a neighbor: puts it back at the region's start, keeping it hidden if it was.
+    fn keep_caret_in_region(&mut self, region: usize) {
+        let Some((document, _)) = self.panes.caret.clone() else { return };
+        let hidden = self.panes.caret_hidden;
+        self.caret_to_region(document, region, hidden);
     }
 
 
@@ -394,7 +406,7 @@ impl KdiffApp {
                         }),
                     Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion => self.status.take(),
                     Pending::Navigate(to) => Some(Status { text: format!("No {}", navigation_noun(to)), is_error: false }),
-                    Pending::Open | Pending::LoadSource(_) | Pending::Choose | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
+                    Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
                     Pending::SetOutputPath => None,
                 };
                 return;
@@ -413,7 +425,7 @@ impl KdiffApp {
             Pending::LoadSource(document) => self.report_error(format!("Cannot load {}: {}", document.letter(), error.message)),
             Pending::SetOutputPath => self.report_error(format!("Cannot change the output path: {}", error.message)),
             Pending::Save => self.report_error(format!("Cannot save: {}", error.message)),
-            Pending::Choose => self.report_error(format!("Cannot choose: {}", error.message)),
+            Pending::Choose(_) => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
             Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
@@ -713,13 +725,13 @@ impl KdiffApp {
         };
         let Some(mirror) = self.mirror.as_ref() else { return };
         let Some(choice) = mirror.toggled_choice(region, document) else { return };
-        self.send(Command::SetChoice { base, region, choice }, Pending::Choose);
+        self.send(Command::SetChoice { base, region, choice }, Pending::Choose(Some(region)));
     }
 
 
     fn choose_for_unresolved(&mut self, document: Document) {
         let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
-        self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose);
+        self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose(None));
     }
 
 
@@ -1032,6 +1044,15 @@ impl eframe::App for KdiffApp {
 }
 
 
+/// The caret at the start of `region` in `document`, with its void row when the region shows no line there.
+fn region_start_caret(mirror: &Mirror, document: Document, region: usize) -> Option<(Cursor, Option<usize>)> {
+    let lines = lines_of(mirror, document.clone())?;
+    let rows = rows_of(mirror, document)?;
+    let (position, void_row) = rows.caret_at_row(rows.region_start(region)?, 0, text_end(lines));
+    Some((Cursor::at(editing::clamp(lines, position)), void_row))
+}
+
+
 fn rows_of(mirror: &Mirror, document: Document) -> Option<Rows<'_>> {
     match document {
         Document::D => mirror.output().map(|_| Rows::Mapped(mirror.output_rows())),
@@ -1170,6 +1191,38 @@ fn edit_key_for(key: Key, modifiers: Modifiers) -> Option<EditKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// A 2-way merge of two lines: a modified region resolved to B, then an unchanged one; D is "b\nx\n".
+    fn resolved_mirror() -> Mirror {
+        use std::path::PathBuf;
+        use kdiff4_protocol::engine::{Comparison, ComparisonOptions, EngineCapabilities, HunkChange, Region, RegionStatus, Row};
+        use kdiff4_protocol::{Choice, DocumentText, EolStyle, OutputDocument, RegionMerge, Revision, Snapshot};
+        let source = |document: Document, text: &str| DocumentText { document: document.clone(), path: PathBuf::from(format!("{}.txt", document.letter())), label: None, eol: EolStyle::Lf, text: text.to_string(), lines: vec![0..1, 2..3] };
+        let region = |index: usize, status: RegionStatus| Region { hunks: vec![index..index + 1, index..index + 1], status, rows: vec![Row { lines: vec![Some(index), Some(index)] }] };
+        let comparison = Comparison { regions: vec![region(0, RegionStatus::Diff(HunkChange::Modified)), region(1, RegionStatus::Diff(HunkChange::Unchanged))] };
+        let merge = vec![RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 1 }, RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 1 }];
+        let output = OutputDocument { path: None, text: "b\nx\n".to_string(), modified: false };
+        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a\nx\n"), source(Document::B, "b\nx\n")], output: Some(output), comparison, engine: EngineCapabilities::default(), merge, options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, false)
+    }
+
+
+    #[test]
+    fn caret_stays_in_a_region_that_loses_its_lines() {
+        use kdiff4_protocol::engine::{HunkChange, Region, RegionStatus, Row};
+        use kdiff4_protocol::{Choice, Delta, MergeUpdate, RegionMerge, Revision};
+        let mut mirror = resolved_mirror();
+        let (cursor, void_row) = region_start_caret(&mirror, Document::D, 0).unwrap();
+        assert_eq!(void_row, None);
+        let region = Region { hunks: vec![0..1, 0..1], status: RegionStatus::Diff(HunkChange::Modified), rows: vec![Row { lines: vec![Some(0), Some(0)] }] };
+        let update = MergeUpdate { at: 0, removed: 1, regions: vec![region], merge: vec![RegionMerge { choice: Choice::Unresolved, edited: false, output_lines: 0 }] };
+        assert_eq!(mirror.apply_delta(Delta { revision: Revision(2), cause: None, change: Change::OutputEdited { range: 0..2, text: String::new(), modified: true, merge: update } }), DeltaOutcome::Applied);
+        let rows = rows_of(&mirror, Document::D).unwrap();
+        assert_eq!(rows.region_of_row(text_view::caret_row(rows, Caret { cursor, void_row })), Some(1), "the old caret now points into the region below");
+        let (cursor, void_row) = region_start_caret(&mirror, Document::D, 0).unwrap();
+        assert!(void_row.is_some());
+        assert_eq!(rows.region_of_row(text_view::caret_row(rows, Caret { cursor, void_row })), Some(0));
+    }
 
 
     #[test]
