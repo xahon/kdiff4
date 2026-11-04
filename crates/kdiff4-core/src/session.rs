@@ -223,7 +223,10 @@ impl Session {
             let state = RegionState { merge: RegionMerge { choice: Choice::Unresolved, edited: true, output_lines: merge::line_count(&inserted) }, text_len: inserted.len() };
             return Ok(self.apply(range, inserted, MergeStep { at: 0, before: Vec::new(), after: vec![(region, state)] }));
         }
-        let touched = self.merge.touched(range.clone(), &inserted, &output.text);
+        let touched = match edit.region {
+            Some(region) => self.merge.empty_target(region, range.clone(), &inserted).ok_or(CoreError::InvalidEditTarget { region })?,
+            None => self.merge.touched(range.clone(), &inserted, &output.text),
+        };
         let offsets = self.merge.offsets();
         let span = offsets[touched.start]..offsets[touched.end];
         let mut region_text = output.text[span.start..range.start].to_string();
@@ -587,7 +590,7 @@ mod tests {
 
 
     fn edit(session: &Session, range: std::ops::Range<usize>, text: &str) -> OutputEdit {
-        OutputEdit { base: session.revision(), range, text: text.to_string() }
+        OutputEdit { base: session.revision(), range, text: text.to_string(), region: None }
     }
 
 
@@ -899,7 +902,7 @@ mod tests {
         let dir = temp_dir("edit-invalid");
         let mut session = merge_session(&dir, "");
         session.edit_output(&edit(&session, 0..0, "é"), &BuiltinEngine).unwrap();
-        let stale = OutputEdit { base: Revision(1), range: 0..0, text: "x".to_string() };
+        let stale = OutputEdit { base: Revision(1), range: 0..0, text: "x".to_string(), region: None };
         assert!(matches!(session.edit_output(&stale, &BuiltinEngine), Err(CoreError::StaleRevision { .. })));
         assert!(matches!(session.edit_output(&edit(&session, 1..1, "x"), &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
         assert!(matches!(session.edit_output(&edit(&session, 0..9, "x"), &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
@@ -1244,6 +1247,37 @@ mod tests {
         assert_eq!(output_text(&session), "s\nmore\n");
         assert_eq!(session.unresolved_count(), 1);
         assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn typing_on_an_empty_region_goes_to_it() {
+        let dir = temp_dir("edit-empty-region");
+        let mut session = merge_of(&dir, &["s", "x", "t"], &["s", "t"], &["s", "x", "t"]);
+        assert_eq!(output_text(&session), "s\nt\n");
+        assert_eq!(session.snapshot().merge[1], RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 0 });
+        let change = session.edit_output(&OutputEdit { region: Some(1), ..edit(&session, 2..2, "new\n") }, &BuiltinEngine).unwrap();
+        let Change::OutputEdited { merge: update, .. } = &change else {
+            panic!("expected an output change");
+        };
+        assert_eq!((update.at, update.removed), (1, 1));
+        assert_eq!(update.merge[0], RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: true, output_lines: 1 });
+        assert_eq!(output_text(&session), "s\nnew\nt\n");
+        assert_eq!(session.snapshot().comparison.regions.len(), 3);
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn edits_that_do_not_fit_their_target_region_are_rejected() {
+        let dir = temp_dir("edit-bad-target");
+        let mut session = merge_of(&dir, &["s", "x", "t"], &["s", "t"], &["s", "x", "t"]);
+        let cases = [(Some(1), 2..2, "new"), (Some(1), 0..0, "new\n"), (Some(1), 2..3, "new\n"), (Some(0), 0..0, "new\n"), (Some(9), 2..2, "new\n")];
+        for (region, range, text) in cases {
+            let result = session.edit_output(&OutputEdit { region, ..edit(&session, range.clone(), text) }, &BuiltinEngine);
+            assert!(matches!(result, Err(CoreError::InvalidEditTarget { .. })), "{region:?} {range:?} {text:?}");
+        }
+        assert_eq!(output_text(&session), "s\nt\n");
     }
 
 

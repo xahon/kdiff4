@@ -6,7 +6,7 @@ use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeSt
 use kdiff4_protocol::{Change, Choice, CurrentRegion, Delta, Document, DocumentText, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot};
 
 use crate::editing::{self, Edit, Lines};
-use crate::rows::{self, RowMap};
+use crate::rows::{self, RowMap, Rows};
 
 
 /// The client's copy of D.
@@ -292,16 +292,31 @@ impl Mirror {
     }
 
 
-    /// Applies an edit to D at once. Returns the command to send, based on the revision the host will be at when it gets there.
-    pub fn apply_local_edit(&mut self, edit: &Edit) -> Option<OutputEdit> {
+    /// The region of D whose void row is `row`, when that region has no lines and isn't an unresolved conflict, so typing there goes to it. `None` while local edits are unconfirmed: they may join regions, so region indices aren't known yet.
+    pub fn empty_region_at_row(&self, row: usize) -> Option<usize> {
+        self.choice_base()?;
+        let pane_row = Rows::Mapped(&self.output_rows).row(row)?;
+        let region = pane_row.region?;
+        let state = self.merge.get(region)?;
+        let empty = pane_row.line.is_none() && !pane_row.conflict_marker && state.output_lines == 0 && !state.is_unresolved();
+        empty.then_some(region)
+    }
+
+
+    /// Applies an edit to D at once. `region` is the region without lines the edit goes to, which then has the edit's lines and is hand-edited. Returns the command to send, based on the revision the host will be at when it gets there.
+    pub fn apply_local_edit(&mut self, edit: &Edit, region: Option<usize>) -> Option<OutputEdit> {
         let base = Revision(self.revision.0 + self.pending_edits.len() as u64);
         let output = self.output.as_mut()?;
         if !output.replace(edit.range.clone(), &edit.text) {
             return None;
         }
         output.modified = true;
+        if let Some(state) = region.and_then(|region| self.merge.get_mut(region)) {
+            state.edited = true;
+            state.output_lines = edit.text.matches('\n').count();
+        }
         self.refresh_output_rows();
-        Some(OutputEdit { base, range: edit.range.clone(), text: edit.text.clone() })
+        Some(OutputEdit { base, range: edit.range.clone(), text: edit.text.clone(), region })
     }
 
 
@@ -479,7 +494,7 @@ mod tests {
         assert_eq!(mirror.output().unwrap().text, "b\n");
         assert_eq!(mirror.unresolved_count(), 0);
         assert_eq!(mirror.difference_summary(), "1 difference; nothing unresolved");
-        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: Some(Mark::Source(Document::B)) }), ..PaneRow::default() }));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None }), origin: Some(Mark::Source(Document::B)), ..PaneRow::default() }));
         assert_eq!(Rows::Mapped(mirror.output_rows()).region_of_row(1), None);
     }
 
@@ -569,8 +584,28 @@ mod tests {
     }
 
 
+    #[test]
+    fn typing_on_the_void_row_of_an_empty_region_goes_to_it() {
+        let mut mirror = conflict_mirror();
+        assert_eq!(mirror.empty_region_at_row(0), None, "an unresolved conflict's placeholder");
+        mirror.merge[0] = RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 0 };
+        mirror.refresh_output_rows();
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None }), ..PaneRow::default() }));
+        assert_eq!(mirror.empty_region_at_row(0), Some(0));
+        assert_eq!(mirror.empty_region_at_row(1), None);
+        let command = mirror.apply_local_edit(&Edit { range: 0..0, text: "x\n".to_string() }, Some(0)).unwrap();
+        assert_eq!(command.region, Some(0));
+        assert_eq!(mirror.merge[0], RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: true, output_lines: 1 });
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0).and_then(|row| row.line), Some(0));
+        mirror.edit_sent(RequestId(5));
+        mirror.merge[0].output_lines = 0;
+        mirror.refresh_output_rows();
+        assert_eq!(mirror.empty_region_at_row(0), None, "unconfirmed edits may have moved regions");
+    }
+
+
     fn local_edit(mirror: &mut Mirror, range: Range<usize>, text: &str, id: u64) -> OutputEdit {
-        let command = mirror.apply_local_edit(&Edit { range, text: text.to_string() }).unwrap();
+        let command = mirror.apply_local_edit(&Edit { range, text: text.to_string() }, None).unwrap();
         mirror.edit_sent(RequestId(id));
         command
     }
@@ -681,7 +716,7 @@ mod tests {
     fn diff_mirror_has_no_output_and_rejects_edits() {
         let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, false);
         assert!(!mirror.is_merge());
-        assert!(mirror.apply_local_edit(&Edit { range: 0..0, text: "x".to_string() }).is_none());
+        assert!(mirror.apply_local_edit(&Edit { range: 0..0, text: "x".to_string() }, None).is_none());
         assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputPathChanged(None))), DeltaOutcome::NeedsResync);
     }
 
@@ -689,8 +724,8 @@ mod tests {
     #[test]
     fn local_edit_with_bad_range_is_refused() {
         let mut mirror = merge_mirror("é");
-        assert!(mirror.apply_local_edit(&Edit { range: 1..1, text: "x".to_string() }).is_none());
-        assert!(mirror.apply_local_edit(&Edit { range: 0..9, text: "x".to_string() }).is_none());
+        assert!(mirror.apply_local_edit(&Edit { range: 1..1, text: "x".to_string() }, None).is_none());
+        assert!(mirror.apply_local_edit(&Edit { range: 0..9, text: "x".to_string() }, None).is_none());
         assert_eq!(mirror.output().unwrap().text, "é");
     }
 }

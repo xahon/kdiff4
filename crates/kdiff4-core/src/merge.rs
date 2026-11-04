@@ -160,6 +160,16 @@ impl Merge {
     }
 
 
+    /// Region `region` as the only one an edit touches, when it has no text and the edit inserts whole lines at its place; `None` otherwise.
+    pub fn empty_target(&self, region: usize, range: Range<usize>, inserted: &str) -> Option<Range<usize>> {
+        let offsets = self.offsets();
+        let start = offsets.get(region).cloned()?;
+        let end = offsets.get(region + 1).cloned()?;
+        let fits = start == end && range == (start..start) && inserted.ends_with('\n');
+        fits.then_some(region..region + 1)
+    }
+
+
     pub fn update(&self, at: usize, removed: usize, added: usize) -> MergeUpdate {
         let range = at..at + added;
         MergeUpdate { at, removed, regions: self.regions[range.clone()].to_vec(), merge: self.states[range].iter().map(|state| state.merge.clone()).collect() }

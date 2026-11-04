@@ -30,6 +30,8 @@ pub enum CoreError {
     Engine(#[from] EngineError),
     #[error("there is no region {index}; the session has {count}")]
     NoSuchRegion { index: usize, count: usize },
+    #[error("the edit can't go to region {region}: it must insert whole lines where that region, which has no lines, sits")]
+    InvalidEditTarget { region: usize },
     #[error("invalid choice: {reason}")]
     InvalidChoice { reason: String },
     #[error("{count} unresolved {} left; resolve them before saving", if *count == 1 { "conflict is" } else { "conflicts are" })]
@@ -44,7 +46,7 @@ impl From<CoreError> for ProtocolError {
         }
         let kind = match &error {
             CoreError::Read { .. } | CoreError::Write { .. } => ErrorKind::Io,
-            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::UnresolvedConflicts { .. } => ErrorKind::InvalidRequest,
+            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::InvalidEditTarget { .. } | CoreError::UnresolvedConflicts { .. } => ErrorKind::InvalidRequest,
             CoreError::Engine(_) => ErrorKind::Engine,
         };
         ProtocolError { kind, message: error.to_string() }

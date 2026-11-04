@@ -124,12 +124,14 @@ impl Labels {
 }
 
 
-/// Replaces a byte range of D's text. `base` is the revision the edit was made on.
+/// Replaces a byte range of D's text. `base` is the revision the edit was made on. `region`, when given, is a region without lines in D that the edit goes to: an insertion of whole lines at the region's place, which a position alone can't tell apart from its neighbors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputEdit {
     pub base: Revision,
     pub range: Range<usize>,
     pub text: String,
+    #[serde(default)]
+    pub region: Option<usize>,
 }
 
 

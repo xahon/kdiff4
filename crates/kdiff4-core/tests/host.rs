@@ -151,7 +151,7 @@ fn edit_save_and_reload_go_through_deltas() {
     assert_eq!(response.id, id);
     assert!(response.result.unwrap_err().message.contains("unresolved"));
 
-    let id = client.send(Command::EditOutput(OutputEdit { base: snapshot.revision.clone(), range: 0..0, text: "x\n".to_string() })).unwrap();
+    let id = client.send(Command::EditOutput(OutputEdit { base: snapshot.revision.clone(), range: 0..0, text: "x\n".to_string(), region: None })).unwrap();
     let delta = expect_delta(&client);
     assert_eq!((delta.revision.clone(), delta.cause.clone()), (Revision(2), Some(id.clone())));
     let Change::OutputEdited { range, text, modified, merge } = delta.change else {
@@ -161,7 +161,7 @@ fn edit_save_and_reload_go_through_deltas() {
     assert!(merge.merge[0].edited);
     expect_ok(&client, id);
 
-    let stale = client.send(Command::EditOutput(OutputEdit { base: Revision(1), range: 0..0, text: "y".to_string() })).unwrap();
+    let stale = client.send(Command::EditOutput(OutputEdit { base: Revision(1), range: 0..0, text: "y".to_string(), region: None })).unwrap();
     let HostMessage::Response(response) = next_message(&client) else {
         panic!("expected a response");
     };

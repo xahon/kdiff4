@@ -392,6 +392,26 @@ pub fn edit_at(lines: Lines<'_>, cursor: Cursor, key: &EditKey) -> Option<(Edit,
 }
 
 
+/// The edit a key makes on the void row of a region without lines in D, with the caret at `position`, the start of the line after the row: typed text becomes the region's lines, ending with a line break, and the caret goes to the end of the typed text. `None` for keys that don't type, or when `position` doesn't start a line.
+pub fn edit_on_void(lines: Lines<'_>, position: Position, key: &EditKey) -> Option<(Edit, Position)> {
+    let typed = match key {
+        EditKey::Insert(text) => text.as_str(),
+        EditKey::Newline => "\n",
+        _ => return None,
+    };
+    let position = clamp(lines, position);
+    if position.column != 0 {
+        return None;
+    }
+    let offset = lines.offset(position);
+    let (mut edit, caret) = insert(position, offset..offset, typed)?;
+    if !edit.text.ends_with('\n') {
+        edit.text.push('\n');
+    }
+    Some((edit, caret))
+}
+
+
 /// Replaces `range`, which starts at `position`, with `text`.
 fn insert(position: Position, range: Range<usize>, text: &str) -> Option<(Edit, Position)> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -433,6 +453,27 @@ mod tests {
         let mut result = text.to_string();
         result.replace_range(edit.range, &edit.text);
         Some((result, caret))
+    }
+
+
+    fn apply_on_void(text: &str, position: Position, key: EditKey) -> Option<(String, Position)> {
+        let ranges = editor_lines(text);
+        let (edit, caret) = edit_on_void(Lines { text, ranges: &ranges }, position, &key)?;
+        let mut result = text.to_string();
+        result.replace_range(edit.range, &edit.text);
+        Some((result, caret))
+    }
+
+
+    #[test]
+    fn typing_on_a_void_row_makes_whole_lines() {
+        assert_eq!(apply_on_void("a\nb\n", at(1, 0), EditKey::Insert("x".to_string())), Some(("a\nx\nb\n".to_string(), at(1, 1))));
+        assert_eq!(apply_on_void("a\n", at(1, 0), EditKey::Insert("x\r\ny".to_string())), Some(("a\nx\ny\n".to_string(), at(2, 1))));
+        assert_eq!(apply_on_void("", at(0, 0), EditKey::Insert("x\n".to_string())), Some(("x\n".to_string(), at(1, 0))));
+        assert_eq!(apply_on_void("a\n", at(1, 0), EditKey::Newline), Some(("a\n\n".to_string(), at(2, 0))));
+        assert_eq!(apply_on_void("a\nb\n", at(1, 0), EditKey::Backspace), None);
+        assert_eq!(apply_on_void("a\nb\n", at(1, 0), EditKey::Delete), None);
+        assert_eq!(apply_on_void("a", at(0, 1), EditKey::Insert("x".to_string())), None, "not at a line start");
     }
 
 

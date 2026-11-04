@@ -9,7 +9,7 @@ use kdiff4_protocol::{Document, LineCharRuns};
 use crate::char_diff::{self, CharDiffLook, CharStyle};
 use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
-use crate::rows::{Block, Mark, PaneRow, Rows};
+use crate::rows::{Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
 
 
@@ -418,10 +418,10 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
     {
         let (first, last) = rows.block_edges(row);
         let active = pane_row.region.is_some() && pane_row.region == style.current_region;
-        paint_gutter_block(painter, column_left, margin.column, rect, first, last, block_colors(palette, block), active);
+        let fill = pane_row.origin.or(block.origin);
+        paint_gutter_block(painter, column_left, margin.column, rect, first, last, origin_colors(palette, fill), origin_colors(palette, block.origin), active);
         if style.margin == MarginKind::Marks
-            && first
-            && let Some(origin) = block.origin
+            && let Some(origin) = pane_row.origin
         {
             painter.text(pos2(column_left + margin.column / 2.0, rect.center().y), Align2::CENTER_CENTER, mark_letter(origin), font_id.clone(), palette.text);
         }
@@ -433,24 +433,24 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
 }
 
 
-/// A block takes the colors of the source it shows; hand-edited and unknown lines of D take D's.
-fn block_colors(palette: &Palette, block: Block) -> &DocumentColors {
-    match block.origin {
+/// The colors of a source document; hand-edited lines of D, and blocks or lines with no known origin, take D's.
+fn origin_colors(palette: &Palette, origin: Option<Mark>) -> &DocumentColors {
+    match origin {
         Some(Mark::Source(document)) => palette.colors(document),
         Some(Mark::Modified) | None => &palette.output,
     }
 }
 
 
-/// One row's slice of a gutter block: the sides on every row, the top on its first row and the bottom on its last, so the block reads as one bordered whole. Blocks of the current region are filled stronger, with a thicker border.
-fn paint_gutter_block(painter: &Painter, column_left: f32, column_width: f32, rect: Rect, first: bool, last: bool, colors: &DocumentColors, active: bool) {
+/// One row's slice of a gutter block: the sides on every row, the top on its first row and the bottom on its last, so the block reads as one bordered whole. The row is filled with `fill`'s colors, the border drawn with `border`'s. Blocks of the current region are filled stronger, with a thicker border.
+fn paint_gutter_block(painter: &Painter, column_left: f32, column_width: f32, rect: Rect, first: bool, last: bool, fill: &DocumentColors, border: &DocumentColors, active: bool) {
     let left = column_left + GUTTER_INSET;
     let right = column_left + column_width - GUTTER_INSET;
     let top = if first { rect.top() + GUTTER_INSET } else { rect.top() };
     let bottom = if last { rect.bottom() - GUTTER_INSET } else { rect.bottom() };
     let block = Rect::from_min_max(pos2(left, top), pos2(right, bottom));
-    painter.rect_filled(block, 0.0, if active { colors.gutter_active } else { colors.header });
-    let stroke = Stroke::new(if active { ACTIVE_GUTTER_STROKE } else { 1.0 }, colors.gutter_border);
+    painter.rect_filled(block, 0.0, if active { fill.gutter_active } else { fill.header });
+    let stroke = Stroke::new(if active { ACTIVE_GUTTER_STROKE } else { 1.0 }, border.gutter_border);
     painter.vline(left, block.y_range(), stroke);
     painter.vline(right, block.y_range(), stroke);
     if first {
@@ -689,7 +689,7 @@ pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current
 mod tests {
     use super::*;
     use crate::char_diff::CharColor;
-    use crate::rows::RowMap;
+    use crate::rows::{Block, RowMap};
     use crate::theme::LIGHT;
 
 
@@ -862,8 +862,8 @@ mod tests {
 
 
     #[test]
-    fn blocks_take_the_colors_of_their_origin() {
-        let colors = |origin| block_colors(&LIGHT, Block { index: 0, origin });
+    fn origins_take_their_document_colors() {
+        let colors = |origin| origin_colors(&LIGHT, origin);
         assert_eq!(colors(Some(Mark::Source(kdiff4_protocol::Document::C))), &LIGHT.sources[2]);
         assert_eq!(colors(Some(Mark::Modified)), &LIGHT.output);
         assert_eq!(colors(None), &LIGHT.output);

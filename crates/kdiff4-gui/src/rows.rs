@@ -14,7 +14,7 @@ pub enum Mark {
 }
 
 
-/// One gutter block of a pane: a run of rows in a region that differs. `index` tells neighboring blocks apart; `origin` is the source document the block is colored with, `Modified` or `None` for a neutral one.
+/// One gutter block of a pane: the rows of a region that differs. `index` tells neighboring blocks apart; `origin` is the source document the block is colored with, or `None` in D, whose rows carry their own origins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
     pub index: usize,
@@ -22,13 +22,14 @@ pub struct Block {
 }
 
 
-/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block the row is part of, if any. In a source pane a block spans a whole region that differs; in D it spans a run of lines with the same origin. `conflict_marker` is D's placeholder of an unresolved conflict.
+/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block of that region, if any. `origin` is where a line of D in a block came from, `None` when unknown or elsewhere. `conflict_marker` is D's placeholder of an unresolved conflict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRow {
     pub line: Option<usize>,
     pub region: Option<usize>,
     pub boxed: bool,
     pub block: Option<Block>,
+    pub origin: Option<Mark>,
     pub conflict_marker: bool,
 }
 
@@ -72,37 +73,26 @@ impl RowMap {
     }
 
 
-    /// D's rows: its lines, region by region, in gutter blocks of lines with the same origin, and a placeholder row for each unresolved conflict, which has no lines. `heights` pads regions like `for_source`, extending the region's last block. Lines past the regions (the empty line after D's last line break) follow as plain rows.
+    /// D's rows: its lines, region by region, each line with its origin, and one row for a region that differs but has no lines: a placeholder for an unresolved conflict, a void otherwise. A region that differs is one gutter block, like in the source panes. `heights` pads regions like `for_source`. Lines past the regions (the empty line after D's last line break) follow as plain rows.
     pub fn for_output(merge: &[RegionMerge], regions: &[Region], line_count: usize, heights: Option<&[usize]>) -> RowMap {
         let mut rows = Vec::with_capacity(line_count + merge.len());
         let mut row_of_line = Vec::with_capacity(line_count);
         let mut region_starts = Vec::with_capacity(merge.len());
-        let mut block_count = 0;
-        let mut new_block = |origin: Option<Mark>| {
-            block_count += 1;
-            Some(Block { index: block_count - 1, origin })
-        };
         for (index, state) in merge.iter().enumerate() {
             region_starts.push(rows.len());
             let boxed = regions.get(index).is_some_and(is_difference);
-            let mut block = None;
-            if state.output_lines == 0 && state.is_unresolved() {
-                block = if boxed { new_block(None) } else { None };
-                rows.push(PaneRow { region: Some(index), boxed, block, conflict_marker: true, ..PaneRow::default() });
+            let block = boxed.then(|| Block { index: index.clone(), origin: None });
+            if state.output_lines == 0 && (boxed || state.is_unresolved()) {
+                rows.push(PaneRow { region: Some(index), boxed, block, conflict_marker: state.is_unresolved(), ..PaneRow::default() });
             }
             let marks = marks(state, regions.get(index));
             for mark in marks {
                 if row_of_line.len() >= line_count {
                     return RowMap::fallback(line_count, "more region lines than D has");
                 }
-                if boxed && block.is_none_or(|block| block.origin != mark) {
-                    block = new_block(mark);
-                }
+                let origin = if boxed { mark } else { None };
                 row_of_line.push(rows.len());
-                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), boxed, block, ..PaneRow::default() });
-            }
-            if boxed && block.is_none() {
-                block = new_block(None);
+                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), boxed, block, origin, ..PaneRow::default() });
             }
             pad(&mut rows, index, region_starts[index], heights, boxed, block);
         }
@@ -174,13 +164,13 @@ fn source_index(document: Document) -> Option<usize> {
 }
 
 
-/// Per region, the rows every pane gives it when D lines up with the source panes: the most any pane needs, and one for the placeholder of an unresolved conflict.
+/// Per region, the rows every pane gives it when D lines up with the source panes: the most any pane needs, and one for the row D shows for a region without lines that differs or is unresolved.
 pub fn aligned_heights(regions: &[Region], merge: &[RegionMerge]) -> Vec<usize> {
     regions
         .iter()
         .enumerate()
         .map(|(index, region)| {
-            let output = merge.get(index).map_or(0, |state| if state.output_lines == 0 && state.is_unresolved() { 1 } else { state.output_lines });
+            let output = merge.get(index).map_or(0, |state| if state.output_lines == 0 && (is_difference(region) || state.is_unresolved()) { 1 } else { state.output_lines });
             region.rows.len().max(output)
         })
         .collect()
@@ -498,40 +488,59 @@ mod tests {
 
 
     #[test]
-    fn output_rows_show_unresolved_conflicts_as_placeholders() {
+    fn output_rows_show_regions_without_lines() {
         let regions = [conflict_region(&[0..1, 0..1, 0..1], 1), conflict_region(&[1..2, 1..2, 1..2], 1), conflict_region(&[2..2, 2..2, 2..2], 0), conflict_region(&[2..4, 2..4, 2..4], 2)];
         let merge = [state(Choice::Hunks(vec![Document::A]), false, 1), state(Choice::Unresolved, false, 0), state(Choice::Hunks(Vec::new()), false, 0), state(Choice::Hunks(vec![Document::B]), false, 2)];
         let map = RowMap::for_output(&merge, &regions, 4, None);
         let rows = Rows::Mapped(&map);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows.row(0), Some(PaneRow { boxed: true, block: output_block(0, Some(Mark::Source(Document::A))), ..line(0, 0) }));
-        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: output_block(1, None), conflict_marker: true, ..void(1) }));
-        assert_eq!(rows.row(2), Some(PaneRow { boxed: true, block: output_block(3, Some(Mark::Source(Document::B))), ..line(1, 3) }));
-        assert_eq!(rows.row(4), Some(PaneRow { line: Some(3), ..PaneRow::default() }));
-        assert_eq!(rows.row_of_line(3), 4);
-        assert_eq!(rows.line_at_or_after(1), Some(1));
-        assert_eq!(rows.region_start(2), Some(2));
-        assert_eq!(rows.region_rows(2), Some(2..2));
-        assert_eq!(rows.region_rows(3), Some(2..4));
-    }
-
-
-    fn output_block(index: usize, origin: Option<Mark>) -> Option<Block> {
-        Some(Block { index, origin })
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.row(0), Some(PaneRow { boxed: true, block: output_block(0), origin: Some(Mark::Source(Document::A)), ..line(0, 0) }));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: output_block(1), conflict_marker: true, ..void(1) }));
+        assert_eq!(rows.row(2), Some(PaneRow { boxed: true, block: output_block(2), ..void(2) }));
+        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, block: output_block(3), origin: Some(Mark::Source(Document::B)), ..line(1, 3) }));
+        assert_eq!(rows.row(5), Some(PaneRow { line: Some(3), ..PaneRow::default() }));
+        assert_eq!(rows.row_of_line(3), 5);
+        assert_eq!(rows.line_at_or_after(2), Some(1));
+        assert_eq!(rows.region_rows(2), Some(2..3));
+        assert_eq!(rows.region_rows(3), Some(3..5));
     }
 
 
     #[test]
-    fn output_blocks_follow_the_choice_order_and_hand_edits() {
+    fn hand_edited_regions_without_lines_keep_their_void_row() {
+        let regions = [conflict_region(&[0..1, 0..1], 1)];
+        let map = RowMap::for_output(&[state(Choice::Unresolved, true, 0)], &regions, 0, None);
+        assert_eq!(Rows::Mapped(&map).row(0), Some(PaneRow { boxed: true, block: output_block(0), ..void(0) }));
+        assert_eq!(Rows::Mapped(&map).len(), 1);
+    }
+
+
+    #[test]
+    fn unchanged_regions_without_lines_get_no_row() {
+        let unchanged = region(&[0..0, 0..0], RegionStatus::Diff(HunkChange::Unchanged), &[]);
+        let map = RowMap::for_output(&[state(Choice::Hunks(vec![Document::A]), false, 0)], &[unchanged], 0, None);
+        assert_eq!(Rows::Mapped(&map).len(), 0);
+    }
+
+
+    fn output_block(region: usize) -> Option<Block> {
+        Some(Block { index: region, origin: None })
+    }
+
+
+    #[test]
+    fn output_lines_carry_their_origin_in_one_block_per_region() {
         let regions = [conflict_region(&[0..1, 0..2, 0..1], 2), conflict_region(&[1..2, 2..3, 1..2], 1)];
         let merge = [state(Choice::Hunks(vec![Document::C, Document::B]), false, 3), state(Choice::Hunks(vec![Document::B]), true, 1)];
         let map = RowMap::for_output(&merge, &regions, 4, None);
         let rows = Rows::Mapped(&map);
         let blocks: Vec<Option<Block>> = (0..4).map(|row| rows.block_of_row(row)).collect();
-        assert_eq!(blocks, [output_block(0, Some(Mark::Source(Document::C))), output_block(1, Some(Mark::Source(Document::B))), output_block(1, Some(Mark::Source(Document::B))), output_block(2, Some(Mark::Modified))]);
-        assert_eq!(rows.block_edges(0), (true, true));
-        assert_eq!(rows.block_edges(1), (true, false));
+        assert_eq!(blocks, [output_block(0), output_block(0), output_block(0), output_block(1)]);
+        let origins: Vec<Option<Mark>> = (0..4).map(|row| rows.row(row).and_then(|row| row.origin)).collect();
+        assert_eq!(origins, [Some(Mark::Source(Document::C)), Some(Mark::Source(Document::B)), Some(Mark::Source(Document::B)), Some(Mark::Modified)]);
+        assert_eq!(rows.block_edges(0), (true, false));
         assert_eq!(rows.block_edges(2), (false, true));
+        assert_eq!(rows.block_edges(3), (true, true));
     }
 
 
@@ -546,10 +555,11 @@ mod tests {
 
 
     #[test]
-    fn output_marks_are_unknown_when_counts_do_not_match() {
+    fn output_origins_are_unknown_when_counts_do_not_match() {
         let regions = [conflict_region(&[0..1, 0..1], 1)];
         let map = RowMap::for_output(&[state(Choice::Hunks(vec![Document::B]), false, 2)], &regions, 2, None);
-        assert_eq!(Rows::Mapped(&map).block_of_row(0), output_block(0, None));
+        assert_eq!(Rows::Mapped(&map).row(0).and_then(|row| row.origin), None);
+        assert_eq!(Rows::Mapped(&map).block_of_row(0), output_block(0));
     }
 
 
@@ -563,7 +573,7 @@ mod tests {
         assert_eq!(Rows::Mapped(&map).len(), 5);
         assert_eq!(aligned_heights(&regions, &[]), [1, 2, 0]);
         let padded = RowMap::for_output(&merge, &regions, 4, Some(&[3, 2, 1]));
-        assert_eq!(Rows::Mapped(&padded).row(2), Some(PaneRow { boxed: true, block: output_block(1, Some(Mark::Source(Document::B))), ..void(0) }));
+        assert_eq!(Rows::Mapped(&padded).row(2), Some(PaneRow { boxed: true, block: output_block(0), ..void(0) }));
         assert_eq!(Rows::Mapped(&padded).block_edges(2), (false, true));
     }
 

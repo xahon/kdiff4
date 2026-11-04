@@ -657,12 +657,20 @@ impl KdiffApp {
             Some(mirror) => mirror,
             None => return,
         };
-        let edited = mirror.output().and_then(|output| editing::edit_at(output.lines(), cursor, &key));
+        let Some(output) = mirror.output() else { return };
+        let target = match self.panes.void_row {
+            Some(row) if !cursor.has_selection() && cursor.head.column == 0 => mirror.empty_region_at_row(row),
+            _ => None,
+        };
+        let edited = match target {
+            Some(_) => editing::edit_on_void(output.lines(), cursor.head, &key),
+            None => editing::edit_at(output.lines(), cursor, &key),
+        };
         let (edit, caret) = match edited {
             Some(edited) => edited,
             None => return,
         };
-        let command = match mirror.apply_local_edit(&edit) {
+        let command = match mirror.apply_local_edit(&edit, target) {
             Some(command) => command,
             None => return,
         };
