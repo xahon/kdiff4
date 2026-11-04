@@ -27,7 +27,7 @@ const GUTTER_INSET: f32 = 1.0;
 const ACTIVE_GUTTER_STROKE: f32 = 2.0;
 /// Space between the margin and the text.
 const TEXT_GAP: f32 = 4.0;
-const CONFLICT_MARKER: &str = "<Merge Conflict>";
+pub const CONFLICT_MARKER: &str = "<Merge Conflict>";
 const REGION_BORDER_WIDTH: f32 = 1.0;
 const CHAR_DIFF_BORDER_WIDTH: f32 = 1.0;
 /// Whitespace markers are drawn in the weak text color at this opacity, so they stay behind the text.
@@ -205,7 +205,7 @@ impl Margin {
 pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, caret: Option<Caret>, reveal_caret: bool, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
-    let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING;
+    let row_height = row_height(ui);
     let viewport_height = ui.available_height();
     let page_rows = ((viewport_height / row_height).floor() as usize).max(1);
     let caret = caret.map(|caret| Caret { cursor: editing::clamp_cursor(lines, caret.cursor), void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())) });
@@ -337,6 +337,13 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
 }
 
 
+/// The height of a row of text in the panes: the monospace font's line height plus padding.
+pub fn row_height(ui: &Ui) -> f32 {
+    let font_id = TextStyle::Monospace.resolve(ui.style());
+    ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING
+}
+
+
 /// The vertical wheel scrolling over the view this frame, taken from egui so its scroll area doesn't apply it too. A line of a mouse wheel scrolls `step_rows` rows; trackpads scroll by their pixels. With Ctrl (zoom) or Shift (sideways) held, egui keeps the wheel.
 fn take_vertical_wheel(ui: &mut Ui, row_height: f32, page_height: f32, step_rows: usize) -> Wheel {
     if !ui.rect_contains_pointer(ui.available_rect_before_wrap()) {
@@ -398,7 +405,7 @@ fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, conte
 
 
 /// Decimal digits of the largest line number, at least one.
-fn digits(line_count: usize) -> usize {
+pub fn digits(line_count: usize) -> usize {
     line_count.max(1).to_string().len()
 }
 
@@ -470,7 +477,7 @@ pub fn mark_letter(mark: Mark) -> &'static str {
 }
 
 
-fn paint_caret(painter: &Painter, x: f32, rect: Rect, palette: &Palette) {
+pub fn paint_caret(painter: &Painter, x: f32, rect: Rect, palette: &Palette) {
     painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(CARET_WIDTH, palette.caret));
 }
 
@@ -488,7 +495,7 @@ fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_r
 
 
 /// Diagonal stripes anchored to the screen, so the stripes of consecutive void rows join up.
-fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
+pub fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
     let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     let stroke = Stroke::new(1.0, palette.void_hatch);
     let first = ((rect.left() + rect.top()) / HATCH_SPACING).floor() as i64;
@@ -517,7 +524,7 @@ pub fn shown_terminator(lines: Lines<'_>, line: usize, config: &WhitespaceConfig
 
 
 /// Marks the shown whitespace inside `text`, laid out as `galley` from `left`, and then `terminator` in cells of `char_width` after the text.
-fn paint_whitespace(painter: &Painter, text: &str, terminator: &[Whitespace], galley: &Galley, left: f32, rect: Rect, char_width: f32, style: &ViewStyle<'_>) {
+pub fn paint_whitespace(painter: &Painter, text: &str, terminator: &[Whitespace], galley: &Galley, left: f32, rect: Rect, char_width: f32, style: &ViewStyle<'_>) {
     if !style.whitespace.render {
         return;
     }
@@ -563,7 +570,7 @@ fn paint_whitespace_mark(painter: &Painter, whitespace: Whitespace, cell: Rect, 
 
 
 /// Lays out `text` with the colors of its char-diff `segments`, given in columns.
-fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette, look: &CharDiffLook) -> std::sync::Arc<Galley> {
+pub fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette, look: &CharDiffLook) -> std::sync::Arc<Galley> {
     let mut job = LayoutJob::default();
     for (bytes, color) in colored_byte_ranges(text, segments, palette.pane_text, look) {
         job.append(&text[bytes], 0.0, TextFormat::simple(font_id.clone(), color));
@@ -601,7 +608,7 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
 
 
 /// Draws a border around each char-diff segment that has one, in the row `rect`; the text starts at `text_left`.
-fn paint_char_borders(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
+pub fn paint_char_borders(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
     for (columns, char_style) in segments {
         if !char_style.border || columns.is_empty() {
             continue;
@@ -642,7 +649,7 @@ fn position_at(ui: &Ui, lines: Lines<'_>, rows: Rows<'_>, font_id: &FontId, pale
 
 
 /// Highlights the selected part of `line`, drawn in `rect`. A selection that continues past the line also covers a little space for the line break.
-fn paint_selection(painter: &Painter, lines: Lines<'_>, line: usize, rect: Rect, galley: &Galley, cursor: Cursor, row_height: f32, palette: &Palette) {
+pub fn paint_selection(painter: &Painter, lines: Lines<'_>, line: usize, rect: Rect, galley: &Galley, cursor: Cursor, row_height: f32, palette: &Palette) {
     if !cursor.has_selection() {
         return;
     }

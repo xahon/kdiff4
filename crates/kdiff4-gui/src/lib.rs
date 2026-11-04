@@ -5,6 +5,7 @@ mod editing;
 mod fonts;
 mod mirror;
 mod open_dialog;
+mod overview;
 mod panes;
 mod paths;
 mod rows;

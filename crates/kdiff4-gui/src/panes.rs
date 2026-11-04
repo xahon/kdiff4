@@ -8,6 +8,7 @@ use crate::char_diff::CharDiffLook;
 use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
+use crate::overview;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
 use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewStyle, Viewport, Wheel};
@@ -100,7 +101,7 @@ impl PaneState {
 
 
     /// The caret to draw in `document`'s pane, if it is there and not hidden.
-    fn visible_caret(&self, document: Document) -> Option<Caret> {
+    pub fn visible_caret(&self, document: Document) -> Option<Caret> {
         self.caret_in(document)
             .filter(|_| !self.caret_hidden)
             .map(|cursor| Caret { cursor, void_row: self.void_row.clone() })
@@ -122,6 +123,7 @@ pub struct PaneOptions {
     pub region_corner_radius: u8,
     pub char_diff: CharDiffLook,
     pub whitespace: WhitespaceConfig,
+    pub overview_strip: bool,
 }
 
 
@@ -144,7 +146,7 @@ struct PaneScroll {
 }
 
 
-/// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
+/// Source panes side by side, then the overview strip when it is on; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = &theme::palette_of(ui);
     let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, scroll_step_rows: options.scroll_step_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff, whitespace: options.whitespace.clone() };
@@ -162,12 +164,21 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     egui::CentralPanel::default().show(ui, |ui| {
         let total = ui.available_size();
         let mut scrolls = Vec::new();
+        let strip_documents = mirror.documents().len() + usize::from(mirror.output().is_some());
+        let strip_height = if options.overview_strip { overview::height(ui, strip_documents) } else { 0.0 };
+        let strip_space = if options.overview_strip { strip_height + ui.spacing().item_spacing.y } else { 0.0 };
         if mirror.output().is_none() {
-            source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls);
+            ui.allocate_ui(vec2(total.x, (total.y - strip_space).max(0.0)), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
+            if options.overview_strip {
+                ui.allocate_ui(vec2(total.x, strip_height), |ui| actions.extend(overview::show(ui, mirror, state, &source_style)));
+            }
         } else {
-            let usable = (total.y - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
+            let usable = (total.y - strip_space - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
             let merge_height = (usable * state.merge_fraction).round();
             ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
+            if options.overview_strip {
+                ui.allocate_ui(vec2(total.x, strip_height), |ui| actions.extend(overview::show(ui, mirror, state, &source_style)));
+            }
             splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
             ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut scrolls));
         }

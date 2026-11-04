@@ -64,6 +64,13 @@ impl SettingsDialog {
     }
 
 
+    /// Follows the toolbar's overview strip toggle, which also works while the dialog is open.
+    pub fn set_show_overview_strip(&mut self, show: bool) {
+        self.original.show_overview_strip = show;
+        self.draft.show_overview_strip = show;
+    }
+
+
     pub fn original(&self) -> &ViewConfig {
         &self.original
     }
@@ -160,6 +167,7 @@ impl SettingsDialog {
                 ui.checkbox(&mut self.draft.show_line_numbers, "Line numbers");
                 ui.checkbox(&mut self.draft.show_gutters, "Region gutters in A, B and C").on_hover_text("A bordered block left of each region. D always shows where each line came from.");
                 ui.checkbox(&mut self.draft.align_output, "Void space in the output pane").on_hover_text("Line D up with A, B and C: every region gets the same rows in every pane, padded with void space.");
+                ui.checkbox(&mut self.draft.show_overview_strip, "Overview strip").on_hover_text("The current line of every document, with its character diff, between A, B and C and the output pane. D can be edited there.");
             });
             ui.end_row();
 
@@ -417,6 +425,15 @@ mod tests {
         let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
         dialog.set_align_output(true);
         assert!(dialog.original().align_output && dialog.draft().align_output);
+    }
+
+
+    #[test]
+    fn overview_strip_toggle_reaches_the_open_dialog() {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
+        assert!(dialog.draft().show_overview_strip);
+        dialog.set_show_overview_strip(false);
+        assert!(!dialog.original().show_overview_strip && !dialog.draft().show_overview_strip);
     }
 
 

@@ -80,6 +80,8 @@ pub struct ViewConfig {
     pub show_gutters: bool,
     /// D lines up with the source panes: every region gets the same rows in every pane, padded with void space.
     pub align_output: bool,
+    /// The overview strip: the current line of every document, between the source panes and D.
+    pub show_overview_strip: bool,
     /// Rows kept above a region that navigation jumps to.
     pub jump_context_lines: u8,
     /// Wheel scrolling and jumps glide to where they go instead of moving at once.
@@ -109,7 +111,7 @@ pub struct ViewConfig {
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -301,7 +303,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -317,6 +319,21 @@ mod tests {
         config.recent.last_dir = Some(PathBuf::from("new"));
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap().recent.last_dir, Some(PathBuf::from("new")));
+    }
+
+
+    #[test]
+    fn overview_strip_is_shown_unless_turned_off() {
+        let dir = temp_dir("overview-strip");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "[view]
+font_size = 14.0
+").unwrap();
+        assert!(load(&path).unwrap().view.show_overview_strip);
+        fs::write(&path, "[view]
+show_overview_strip = false
+").unwrap();
+        assert!(!load(&path).unwrap().view.show_overview_strip);
     }
 
 

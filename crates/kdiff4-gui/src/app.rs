@@ -44,6 +44,8 @@ const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
 ];
 const VOID_TOGGLE_LABEL: &str = "Void Space";
 const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
+const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
+const OVERVIEW_TOGGLE_HINT: &str = "Toggle the Overview Strip: the current line of every document, with its character diff";
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
@@ -919,21 +921,29 @@ impl KdiffApp {
     }
 
 
-    /// The strip under the menu bar: the void space toggle of the output pane.
+    /// The strip under the menu bar: the void space toggle of the output pane and the overview strip toggle.
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         let is_merge = self.is_merge();
         let on = self.view().align_output;
+        let overview_on = self.view().show_overview_strip;
         let mut toggled = false;
+        let mut overview_toggled = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, paint_void_icon).on_hover_text(VOID_TOGGLE_HINT);
                 if is_merge && response.clicked() {
                     toggled = true;
                 }
+                if toolbar_toggle(ui, OVERVIEW_TOGGLE_LABEL, overview_on, true, paint_overview_icon).on_hover_text(OVERVIEW_TOGGLE_HINT).clicked() {
+                    overview_toggled = true;
+                }
             });
         });
         if toggled {
             self.toggle_void_space();
+        }
+        if overview_toggled {
+            self.toggle_overview_strip();
         }
     }
 
@@ -952,6 +962,20 @@ impl KdiffApp {
     }
 
 
+    /// Shows or hides the overview strip, from the toolbar. Saved at once, and followed by an open settings dialog.
+    fn toggle_overview_strip(&mut self) {
+        let on = !self.view().show_overview_strip;
+        self.config.view.show_overview_strip = on;
+        if let Some(applied) = self.applied_view.as_mut() {
+            applied.show_overview_strip = on;
+        }
+        if let Some(dialog) = self.settings.as_mut() {
+            dialog.set_show_overview_strip(on);
+        }
+        self.save_config(false);
+    }
+
+
     /// The view settings in effect: the settings dialog's draft while it is open, otherwise the saved ones.
     fn view(&self) -> &ViewConfig {
         self.applied_view.as_ref().unwrap_or(&self.config.view)
@@ -963,7 +987,7 @@ impl KdiffApp {
         let [r, g, b, a] = view.current_region_color;
         let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
         let char_diff = CharDiffLook { red: rgb(view.char_diff_red), blue: rgb(view.char_diff_blue), green: rgb(view.char_diff_green), corner_radius: view.char_diff_corner_radius.clone() };
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff, whitespace: view.whitespace.clone() }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff, whitespace: view.whitespace.clone(), overview_strip: view.show_overview_strip }
     }
 
 
@@ -1159,6 +1183,20 @@ fn paint_void_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32)
         sum += spacing;
     }
     ui.painter().rect_stroke(square, radius.min(4), egui::Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
+}
+
+
+/// Four lines of text of different lengths in a box.
+fn paint_overview_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
+    let radius = theme::corner_radius_of(ui).max(3);
+    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
+    let stroke = egui::Stroke::new(1.0, stroke_color);
+    let left = square.left() + 3.0;
+    for (index, share) in [0.8, 0.55, 0.7, 0.45].iter().enumerate() {
+        let y = square.top() + square.height() * (index as f32 + 1.0) / 5.0;
+        ui.painter().hline(left..=left + (square.width() - 6.0) * share, y, stroke);
+    }
+    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
 }
 
 
