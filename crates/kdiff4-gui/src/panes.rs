@@ -25,6 +25,8 @@ pub enum PaneAction {
     Drag { document: Document, position: Position, void_row: Option<usize> },
     SelectWord(Document, Position),
     SelectLine(Document, usize),
+    /// A click on a gutter block of a region.
+    SelectRegion(Document, usize),
     /// Enter in a header path field, with the field's text.
     CommitPath(Document, String),
     Browse(Document),
@@ -42,6 +44,8 @@ pub struct PaneState {
     pub caret_hidden: bool,
     /// A region to scroll every pane to on the next frame, with context rows above it, unless every pane already shows all of it.
     pub jump: Option<usize>,
+    /// A region D scrolls into view on the next frame if it is out of view, unless D scrolls with the source panes.
+    pub reveal_region: Option<usize>,
     /// Scroll the caret into view on the next frame.
     pub reveal_caret: bool,
     /// Rows that fit in the pane with the caret, as of the last frame.
@@ -59,7 +63,7 @@ pub struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0, viewports: [None; 4] }
+        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_region: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_offset: 0.0, viewports: [None; 4] }
     }
 }
 
@@ -137,6 +141,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         }
     });
     state.jump = None;
+    state.reveal_region = None;
     actions
 }
 
@@ -186,7 +191,7 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines { text: &text.text, ranges: &text.lines };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
-            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), state, actions));
+            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), None, state, actions));
         }
     });
 }
@@ -207,7 +212,9 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
         let lines = output.lines();
         let aligned = mirror.is_aligned();
         let offset = aligned.then(|| state.source_offset.clone());
-        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, Rows::Mapped(mirror.output_rows()), offset, state, actions);
+        let rows = Rows::Mapped(mirror.output_rows());
+        let reveal_row = state.reveal_region.filter(|_| !aligned).and_then(|region| rows.region_start(region));
+        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, offset, reveal_row, state, actions);
         if aligned {
             offsets.push(after);
         }
@@ -215,8 +222,8 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
 }
 
 
-/// Returns the pane's vertical scroll offset after this frame.
-fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
+/// `reveal_row` is scrolled into view if it is out of view. Returns the pane's vertical scroll offset after this frame.
+fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, reveal_row: Option<usize>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
     let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
@@ -226,7 +233,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
                     let jump_row = state.jump.and_then(|region| rows.region_start(region));
-                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), jump_row, offset, style);
+                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), jump_row, reveal_row, offset, style);
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }
@@ -236,6 +243,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                         Some(PointerAction::Drag { position, void_row }) => actions.push(PaneAction::Drag { document: document.clone(), position, void_row }),
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
+                        Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
                         None => {}
                     }
                     response.viewport.offset
@@ -248,7 +256,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
 
 /// Letter, label, editable path and Browse button. The field shows the document's path unless the user is editing it.
 fn header(ui: &mut Ui, palette: &Palette, radius: u8, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
-    theme::pane_header_frame(palette, radius).show(ui, |ui| {
+    theme::pane_header_frame(palette, document.clone(), radius).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             let letter = if modified { format!("{}*", document.letter()) } else { document.letter().to_string() };

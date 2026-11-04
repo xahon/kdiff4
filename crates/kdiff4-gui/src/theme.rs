@@ -1,6 +1,16 @@
 use egui::{Color32, CornerRadius, FontId, Frame, Margin, Stroke, Style, TextStyle, Theme, Ui};
+use kdiff4_protocol::Document;
 
 use crate::config::ViewConfig;
+
+
+/// The colors of one document: its pane header, which also fills its gutter blocks, and the block border; `gutter_active` fills the blocks of the current region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DocumentColors {
+    pub header: Color32,
+    pub gutter_border: Color32,
+    pub gutter_active: Color32,
+}
 
 
 /// The colors the GUI draws with, one set per theme.
@@ -18,9 +28,9 @@ pub struct Palette {
     pub region_border: Color32,
     /// Hatching of void regions.
     pub void_hatch: Color32,
-    /// The bordered gutter block of each region in the source panes.
-    pub gutter_fill: Color32,
-    pub gutter_border: Color32,
+    /// A, B and C; D's header and D's blocks of hand-edited or unknown origin use `output`.
+    pub sources: [DocumentColors; 3],
+    pub output: DocumentColors,
     /// The `<Merge Conflict>` marker of an unresolved conflict in D.
     pub conflict_marker: Color32,
 }
@@ -37,8 +47,12 @@ pub const LIGHT: Palette = Palette {
     selection: Color32::from_rgb(0xB8, 0xD4, 0xFF),
     region_border: Color32::from_rgb(0x5A, 0x66, 0x76),
     void_hatch: Color32::from_rgb(0xC4, 0xCA, 0xD3),
-    gutter_fill: Color32::from_rgb(0xFF, 0xD3, 0x6E),
-    gutter_border: Color32::from_rgb(0xB0, 0x76, 0x00),
+    sources: [
+        DocumentColors { header: Color32::from_rgb(0xCF, 0xE0, 0xFA), gutter_border: Color32::from_rgb(0x2F, 0x6B, 0xC4), gutter_active: Color32::from_rgb(0x8D, 0xB6, 0xF2) },
+        DocumentColors { header: Color32::from_rgb(0xCD, 0xEF, 0xD3), gutter_border: Color32::from_rgb(0x2E, 0x8B, 0x43), gutter_active: Color32::from_rgb(0x8C, 0xD6, 0x9B) },
+        DocumentColors { header: Color32::from_rgb(0xE3, 0xD5, 0xF7), gutter_border: Color32::from_rgb(0x7A, 0x4C, 0xC2), gutter_active: Color32::from_rgb(0xBF, 0xA1, 0xEC) },
+    ],
+    output: DocumentColors { header: Color32::from_rgb(0xDE, 0xE3, 0xE9), gutter_border: Color32::from_rgb(0x6B, 0x74, 0x80), gutter_active: Color32::from_rgb(0xB4, 0xBC, 0xC7) },
     conflict_marker: Color32::from_rgb(0xC0, 0x10, 0x10),
 };
 
@@ -54,10 +68,26 @@ pub const DARK: Palette = Palette {
     selection: Color32::from_rgb(0x2C, 0x4A, 0x78),
     region_border: Color32::from_rgb(0x8A, 0x94, 0xA3),
     void_hatch: Color32::from_rgb(0x3C, 0x42, 0x4B),
-    gutter_fill: Color32::from_rgb(0x8A, 0x62, 0x10),
-    gutter_border: Color32::from_rgb(0xFF, 0xBF, 0x3C),
+    sources: [
+        DocumentColors { header: Color32::from_rgb(0x22, 0x34, 0x4F), gutter_border: Color32::from_rgb(0x6F, 0xA4, 0xF0), gutter_active: Color32::from_rgb(0x2F, 0x5A, 0x99) },
+        DocumentColors { header: Color32::from_rgb(0x1F, 0x3D, 0x27), gutter_border: Color32::from_rgb(0x6C, 0xCB, 0x80), gutter_active: Color32::from_rgb(0x2E, 0x6B, 0x3D) },
+        DocumentColors { header: Color32::from_rgb(0x35, 0x28, 0x4A), gutter_border: Color32::from_rgb(0xB4, 0x8E, 0xF0), gutter_active: Color32::from_rgb(0x5A, 0x3F, 0x86) },
+    ],
+    output: DocumentColors { header: Color32::from_rgb(0x2A, 0x2F, 0x36), gutter_border: Color32::from_rgb(0x8A, 0x92, 0x9D), gutter_active: Color32::from_rgb(0x4A, 0x52, 0x5D) },
     conflict_marker: Color32::from_rgb(0xFF, 0x8A, 0x8A),
 };
+
+
+impl Palette {
+    pub fn colors(&self, document: Document) -> &DocumentColors {
+        match document {
+            Document::A => &self.sources[0],
+            Document::B => &self.sources[1],
+            Document::C => &self.sources[2],
+            Document::D => &self.output,
+        }
+    }
+}
 
 
 pub fn palette(theme: Theme) -> &'static Palette {
@@ -120,11 +150,11 @@ pub fn pane_frame(palette: &Palette, radius: u8) -> Frame {
 }
 
 
-/// The header strip at the top of a pane; its top corners sit just inside the pane border.
-pub fn pane_header_frame(palette: &Palette, radius: u8) -> Frame {
+/// The header strip at the top of a pane, in the document's color; its top corners sit just inside the pane border.
+pub fn pane_header_frame(palette: &Palette, document: Document, radius: u8) -> Frame {
     let radius = radius.saturating_sub(1);
     Frame::new()
-        .fill(palette.pane_header_bg)
+        .fill(palette.colors(document).header)
         .inner_margin(Margin::symmetric(6, 3))
         .corner_radius(CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 })
 }
@@ -173,6 +203,10 @@ mod tests {
         for palette in [&LIGHT, &DARK] {
             assert!(contrast_ratio(palette.text, palette.pane_bg) >= 7.0, "{palette:?}");
             assert!(contrast_ratio(palette.text, palette.pane_header_bg) >= 7.0, "{palette:?}");
+            for document in Document::ALL {
+                assert!(contrast_ratio(palette.text, palette.colors(document).header) >= 7.0, "{document:?} in {palette:?}");
+                assert!(contrast_ratio(palette.weak_text, palette.colors(document).header) >= 4.5, "{document:?} in {palette:?}");
+            }
             assert!(contrast_ratio(palette.text, palette.window_bg) >= 7.0, "{palette:?}");
             assert!(contrast_ratio(palette.weak_text, palette.window_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.caret, palette.pane_bg) >= 4.5, "{palette:?}");
@@ -206,8 +240,12 @@ mod tests {
     fn gutters_and_conflict_markers_are_readable() {
         for palette in [LIGHT, DARK] {
             assert!(contrast_ratio(palette.conflict_marker, palette.pane_bg) >= 4.5, "{palette:?}");
-            assert!(contrast_ratio(palette.gutter_border, palette.gutter_fill) >= 2.0, "{palette:?}");
-            assert!(contrast_ratio(palette.gutter_fill, palette.pane_bg) >= 1.2, "{palette:?}");
+            for colors in palette.sources.iter().chain([&palette.output]) {
+                assert!(contrast_ratio(colors.gutter_border, colors.header) >= 2.0, "{colors:?} in {palette:?}");
+                assert!(contrast_ratio(colors.gutter_border, colors.gutter_active) >= 1.5, "{colors:?} in {palette:?}");
+                assert!(contrast_ratio(colors.gutter_active, colors.header) >= 1.3, "active blocks must stand out: {colors:?} in {palette:?}");
+                assert!(contrast_ratio(palette.text, colors.gutter_active) >= 4.5, "D's origin letters: {colors:?} in {palette:?}");
+            }
         }
     }
 
@@ -227,6 +265,18 @@ mod tests {
         assert!(relative_luminance(DARK.pane_bg) < relative_luminance(DARK.text));
         assert_eq!(palette(Theme::Light), &LIGHT);
         assert_eq!(palette(Theme::Dark), &DARK);
+    }
+
+
+    #[test]
+    fn documents_have_their_own_colors() {
+        for palette in [&LIGHT, &DARK] {
+            assert_eq!(palette.colors(Document::D).header, palette.pane_header_bg);
+            let headers = [palette.colors(Document::A).header, palette.colors(Document::B).header, palette.colors(Document::C).header, palette.pane_header_bg];
+            for (index, header) in headers.iter().enumerate() {
+                assert!(!headers[..index].contains(header), "{palette:?}");
+            }
+        }
     }
 
 

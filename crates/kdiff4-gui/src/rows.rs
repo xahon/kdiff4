@@ -14,13 +14,21 @@ pub enum Mark {
 }
 
 
-/// One row of a pane: its line, or `None` for a void, the region it belongs to and whether that region is a difference, drawn as a bordered box. In D, `mark` says where the line came from, and `conflict_marker` is the placeholder of an unresolved conflict.
+/// One gutter block of a pane: a run of rows in a region that differs. `index` tells neighboring blocks apart; `origin` is the source document the block is colored with, `Modified` or `None` for a neutral one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Block {
+    pub index: usize,
+    pub origin: Option<Mark>,
+}
+
+
+/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block the row is part of, if any. In a source pane a block spans a whole region that differs; in D it spans a run of lines with the same origin. `conflict_marker` is D's placeholder of an unresolved conflict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRow {
     pub line: Option<usize>,
     pub region: Option<usize>,
     pub boxed: bool,
-    pub mark: Option<Mark>,
+    pub block: Option<Block>,
     pub conflict_marker: bool,
 }
 
@@ -44,6 +52,7 @@ impl RowMap {
         for (index, region) in comparison.regions.iter().enumerate() {
             region_starts.push(rows.len());
             let boxed = is_difference(region);
+            let block = boxed.then(|| Block { index: index.clone(), origin: Document::ALL.get(document_index).cloned().map(Mark::Source) });
             for row in &region.rows {
                 let line = row.lines.get(document_index).cloned().flatten();
                 if let Some(line) = line {
@@ -52,9 +61,9 @@ impl RowMap {
                     }
                     row_of_line.push(rows.len());
                 }
-                rows.push(PaneRow { line, region: Some(index), boxed, ..PaneRow::default() });
+                rows.push(PaneRow { line, region: Some(index), boxed, block, ..PaneRow::default() });
             }
-            pad(&mut rows, index, region_starts[index], heights, boxed);
+            pad(&mut rows, index, region_starts[index], heights, boxed, block);
         }
         if row_of_line.len() != line_count {
             return RowMap::fallback(line_count, "lines missing");
@@ -63,32 +72,56 @@ impl RowMap {
     }
 
 
-    /// D's rows: its lines, region by region, each marked with where it came from, and a placeholder row for each unresolved conflict, which has no lines. `heights` pads regions like `for_source`. Lines past the regions (the empty line after D's last line break) follow as plain rows.
+    /// D's rows: its lines, region by region, in gutter blocks of lines with the same origin, and a placeholder row for each unresolved conflict, which has no lines. `heights` pads regions like `for_source`, extending the region's last block. Lines past the regions (the empty line after D's last line break) follow as plain rows.
     pub fn for_output(merge: &[RegionMerge], regions: &[Region], line_count: usize, heights: Option<&[usize]>) -> RowMap {
         let mut rows = Vec::with_capacity(line_count + merge.len());
         let mut row_of_line = Vec::with_capacity(line_count);
         let mut region_starts = Vec::with_capacity(merge.len());
+        let mut block_count = 0;
+        let mut new_block = |origin: Option<Mark>| {
+            block_count += 1;
+            Some(Block { index: block_count - 1, origin })
+        };
         for (index, state) in merge.iter().enumerate() {
             region_starts.push(rows.len());
             let boxed = regions.get(index).is_some_and(is_difference);
+            let mut block = None;
             if state.output_lines == 0 && state.is_unresolved() {
-                rows.push(PaneRow { region: Some(index), boxed, conflict_marker: true, ..PaneRow::default() });
+                block = if boxed { new_block(None) } else { None };
+                rows.push(PaneRow { region: Some(index), boxed, block, conflict_marker: true, ..PaneRow::default() });
             }
             let marks = marks(state, regions.get(index));
             for mark in marks {
                 if row_of_line.len() >= line_count {
                     return RowMap::fallback(line_count, "more region lines than D has");
                 }
+                if boxed && block.is_none_or(|block| block.origin != mark) {
+                    block = new_block(mark);
+                }
                 row_of_line.push(rows.len());
-                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), boxed, mark, ..PaneRow::default() });
+                rows.push(PaneRow { line: Some(row_of_line.len() - 1), region: Some(index), boxed, block, ..PaneRow::default() });
             }
-            pad(&mut rows, index, region_starts[index], heights, boxed);
+            if boxed && block.is_none() {
+                block = new_block(None);
+            }
+            pad(&mut rows, index, region_starts[index], heights, boxed, block);
         }
         while row_of_line.len() < line_count {
             row_of_line.push(rows.len());
             rows.push(PaneRow { line: Some(row_of_line.len() - 1), ..PaneRow::default() });
         }
         RowMap { rows, row_of_line, region_starts }
+    }
+
+
+    #[cfg(test)]
+    pub fn from_rows(rows: Vec<PaneRow>) -> RowMap {
+        let row_of_line = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.line.map(|_| index))
+            .collect();
+        RowMap { rows, row_of_line, region_starts: Vec::new() }
     }
 
 
@@ -102,11 +135,11 @@ impl RowMap {
 }
 
 
-/// Pads the rows of region `index`, which started at row `start`, with void rows up to its height.
-fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>, boxed: bool) {
+/// Pads the rows of region `index`, which started at row `start`, with void rows of `block` up to its height.
+fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>, boxed: bool, block: Option<Block>) {
     let height = heights.and_then(|heights| heights.get(index)).cloned().unwrap_or(0);
     while rows.len() - start < height {
-        rows.push(PaneRow { region: Some(index), boxed, ..PaneRow::default() });
+        rows.push(PaneRow { region: Some(index), boxed, block, ..PaneRow::default() });
     }
 }
 
@@ -238,11 +271,17 @@ impl Rows<'_> {
     }
 
 
-    /// Whether `row` is the first or the last row of its region.
-    pub fn region_edges(&self, row: usize) -> (bool, bool) {
-        let region = self.region_of_row(row);
-        let first = row == 0 || self.region_of_row(row - 1) != region;
-        let last = self.region_of_row(row + 1) != region;
+    /// The gutter block of `row`, if it has one.
+    pub fn block_of_row(&self, row: usize) -> Option<Block> {
+        self.row(row).and_then(|pane_row| pane_row.block)
+    }
+
+
+    /// Whether `row` is the first or the last row of its gutter block.
+    pub fn block_edges(&self, row: usize) -> (bool, bool) {
+        let block = self.block_of_row(row);
+        let first = row == 0 || self.block_of_row(row - 1) != block;
+        let last = self.block_of_row(row + 1) != block;
         (first, last)
     }
 
@@ -326,12 +365,28 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.row(0), Some(line(0, 0)));
-        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, ..void(1) }));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: source_block(1, Document::A), ..void(1) }));
         assert_eq!(rows.row(3), Some(line(1, 2)));
         assert_eq!(rows.row(4), None);
         assert_eq!(rows.row_of_line(1), 3);
         let map = RowMap::for_source(&two_way_comparison(), 1, 4, None);
-        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { boxed: true, ..line(2, 1) }));
+        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { boxed: true, block: source_block(1, Document::B), ..line(2, 1) }));
+    }
+
+
+    fn source_block(region: usize, document: Document) -> Option<Block> {
+        Some(Block { index: region, origin: Some(Mark::Source(document)) })
+    }
+
+
+    #[test]
+    fn unchanged_regions_have_no_gutter() {
+        let map = RowMap::for_source(&two_way_comparison(), 1, 4, None);
+        let blocks: Vec<Option<Block>> = (0..4).map(|row| Rows::Mapped(&map).block_of_row(row)).collect();
+        assert_eq!(blocks, [None, source_block(1, Document::B), source_block(1, Document::B), None]);
+        let merge = RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 1 };
+        let output = RowMap::for_output(&[merge], &two_way_comparison().regions[..1], 1, None);
+        assert_eq!(Rows::Mapped(&output).block_of_row(0), None);
     }
 
 
@@ -341,9 +396,10 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!((rows.region_start(0), rows.region_start(1), rows.region_start(2)), (Some(0), Some(1), Some(3)));
         assert_eq!(rows.region_start(3), None);
-        assert_eq!(rows.region_edges(0), (true, true));
-        assert_eq!(rows.region_edges(1), (true, false));
-        assert_eq!(rows.region_edges(2), (false, true));
+        assert_eq!(rows.block_edges(0), (true, true));
+        assert_eq!(rows.block_edges(1), (true, false));
+        assert_eq!(rows.block_edges(2), (false, true));
+        assert_eq!(Rows::PerLine(3).block_of_row(0), None);
         assert_eq!(Rows::PerLine(3).region_start(0), None);
         assert_eq!((rows.region_rows(0), rows.region_rows(1), rows.region_rows(2)), (Some(0..1), Some(1..3), Some(3..4)));
         assert_eq!(rows.region_rows(3), None);
@@ -357,7 +413,7 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows.row(1), Some(void(0)));
-        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, ..void(1) }));
+        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, block: source_block(1, Document::A), ..void(1) }));
         assert_eq!(rows.region_rows(1), Some(2..4));
         assert_eq!(rows.row_of_line(1), 4);
         assert_eq!(rows.region_start(2), Some(4));
@@ -448,9 +504,9 @@ mod tests {
         let map = RowMap::for_output(&merge, &regions, 4, None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows.row(0), Some(PaneRow { mark: Some(Mark::Source(Document::A)), boxed: true, ..line(0, 0) }));
-        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, conflict_marker: true, ..void(1) }));
-        assert_eq!(rows.row(2), Some(PaneRow { mark: Some(Mark::Source(Document::B)), boxed: true, ..line(1, 3) }));
+        assert_eq!(rows.row(0), Some(PaneRow { boxed: true, block: output_block(0, Some(Mark::Source(Document::A))), ..line(0, 0) }));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: output_block(1, None), conflict_marker: true, ..void(1) }));
+        assert_eq!(rows.row(2), Some(PaneRow { boxed: true, block: output_block(3, Some(Mark::Source(Document::B))), ..line(1, 3) }));
         assert_eq!(rows.row(4), Some(PaneRow { line: Some(3), ..PaneRow::default() }));
         assert_eq!(rows.row_of_line(3), 4);
         assert_eq!(rows.line_at_or_after(1), Some(1));
@@ -460,13 +516,32 @@ mod tests {
     }
 
 
+    fn output_block(index: usize, origin: Option<Mark>) -> Option<Block> {
+        Some(Block { index, origin })
+    }
+
+
     #[test]
-    fn output_marks_follow_the_choice_order_and_hand_edits() {
+    fn output_blocks_follow_the_choice_order_and_hand_edits() {
         let regions = [conflict_region(&[0..1, 0..2, 0..1], 2), conflict_region(&[1..2, 2..3, 1..2], 1)];
         let merge = [state(Choice::Hunks(vec![Document::C, Document::B]), false, 3), state(Choice::Hunks(vec![Document::B]), true, 1)];
         let map = RowMap::for_output(&merge, &regions, 4, None);
-        let marks: Vec<Option<Mark>> = (0..4).map(|row| Rows::Mapped(&map).row(row).unwrap().mark).collect();
-        assert_eq!(marks, [Some(Mark::Source(Document::C)), Some(Mark::Source(Document::B)), Some(Mark::Source(Document::B)), Some(Mark::Modified)]);
+        let rows = Rows::Mapped(&map);
+        let blocks: Vec<Option<Block>> = (0..4).map(|row| rows.block_of_row(row)).collect();
+        assert_eq!(blocks, [output_block(0, Some(Mark::Source(Document::C))), output_block(1, Some(Mark::Source(Document::B))), output_block(1, Some(Mark::Source(Document::B))), output_block(2, Some(Mark::Modified))]);
+        assert_eq!(rows.block_edges(0), (true, true));
+        assert_eq!(rows.block_edges(1), (true, false));
+        assert_eq!(rows.block_edges(2), (false, true));
+    }
+
+
+    #[test]
+    fn output_blocks_of_equal_origin_stay_apart_across_regions() {
+        let regions = [conflict_region(&[0..1, 0..1], 1), conflict_region(&[1..2, 1..2], 1)];
+        let merge = [state(Choice::Hunks(vec![Document::B]), false, 1), state(Choice::Hunks(vec![Document::B]), false, 1)];
+        let map = RowMap::for_output(&merge, &regions, 2, None);
+        assert_eq!(Rows::Mapped(&map).block_edges(0), (true, true));
+        assert_eq!(Rows::Mapped(&map).block_edges(1), (true, true));
     }
 
 
@@ -474,7 +549,7 @@ mod tests {
     fn output_marks_are_unknown_when_counts_do_not_match() {
         let regions = [conflict_region(&[0..1, 0..1], 1)];
         let map = RowMap::for_output(&[state(Choice::Hunks(vec![Document::B]), false, 2)], &regions, 2, None);
-        assert_eq!(Rows::Mapped(&map).row(0).unwrap().mark, None);
+        assert_eq!(Rows::Mapped(&map).block_of_row(0), output_block(0, None));
     }
 
 
@@ -487,6 +562,9 @@ mod tests {
         let map = RowMap::for_output(&merge, &regions, 4, Some(&heights));
         assert_eq!(Rows::Mapped(&map).len(), 5);
         assert_eq!(aligned_heights(&regions, &[]), [1, 2, 0]);
+        let padded = RowMap::for_output(&merge, &regions, 4, Some(&[3, 2, 1]));
+        assert_eq!(Rows::Mapped(&padded).row(2), Some(PaneRow { boxed: true, block: output_block(1, Some(Mark::Source(Document::B))), ..void(0) }));
+        assert_eq!(Rows::Mapped(&padded).block_edges(2), (false, true));
     }
 
 

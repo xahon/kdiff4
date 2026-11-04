@@ -65,6 +65,8 @@ enum Pending {
     /// A move to the next or previous difference or conflict; becomes `Navigated` when the current region moved.
     Navigate(Navigation),
     Navigated,
+    /// A click on a gutter: makes its region current without jumping there.
+    SelectRegion,
     ComparisonOptions,
 }
 
@@ -319,13 +321,19 @@ impl KdiffApp {
             }
             HostMessage::Event(Event::CurrentRegion(current)) => {
                 let applied = self.mirror.as_mut().is_some_and(|mirror| mirror.apply_current_region(&current));
-                if let Some(cause) = current.cause.as_ref()
+                let selected = current.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::SelectRegion));
+                if !selected
+                    && let Some(cause) = current.cause.as_ref()
                     && let Some(kind) = self.pending.get_mut(cause)
                 {
                     *kind = Pending::Navigated;
                 }
                 if applied && let Some(region) = current.region {
-                    self.jump_to(region);
+                    if selected {
+                        self.panes.reveal_region = Some(region);
+                    } else {
+                        self.jump_to(region);
+                    }
                 }
             }
             HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
@@ -337,13 +345,24 @@ impl KdiffApp {
     fn jump_to(&mut self, region: usize) {
         self.panes.jump = Some(region);
         let document = self.panes.caret.map_or(Document::A, |(document, _)| document);
+        self.caret_to_region(document, region, true);
+    }
+
+
+    /// Puts the caret at the start of `region` in `document`; `hidden` keeps it from being drawn until it moves again.
+    fn caret_to_region(&mut self, document: Document, region: usize, hidden: bool) {
         let target = self.mirror
             .as_ref()
             .and_then(|mirror| Some((lines_of(mirror, document.clone())?, rows_of(mirror, document.clone())?)))
             .and_then(|(lines, rows)| Some((lines, rows, rows.region_start(region)?)));
         if let Some((lines, rows, row)) = target {
             let (position, void_row) = rows.caret_at_row(row, 0, text_end(lines));
-            self.panes.set_hidden_caret(document, Cursor::at(editing::clamp(lines, position)), void_row);
+            let cursor = Cursor::at(editing::clamp(lines, position));
+            if hidden {
+                self.panes.set_hidden_caret(document, cursor, void_row);
+            } else {
+                self.panes.set_caret(document, cursor, void_row);
+            }
         }
     }
 
@@ -364,7 +383,7 @@ impl KdiffApp {
                             log::info!("saved {}", path.display());
                             Status { text: format!("Saved {}", path.display()), is_error: false }
                         }),
-                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated => self.status.take(),
+                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion => self.status.take(),
                     Pending::Navigate(to) => Some(Status { text: format!("No {}", navigation_noun(to)), is_error: false }),
                     Pending::Open | Pending::LoadSource(_) | Pending::Choose | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
                     Pending::SetOutputPath => None,
@@ -389,6 +408,7 @@ impl KdiffApp {
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
             Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
+            Pending::SelectRegion => self.report_error(format!("Cannot select the region: {}", error.message)),
             Pending::ComparisonOptions => self.report_error(format!("Cannot apply the comparison options: {}", error.message)),
         }
     }
@@ -496,6 +516,16 @@ impl KdiffApp {
                 {
                     self.panes.set_caret(document, Cursor { anchor: cursor.anchor, head: position }, void_row);
                     self.panes.reveal_caret = true;
+                }
+            }
+            PaneAction::SelectRegion(document, region) => {
+                self.caret_to_region(document, region, false);
+                self.panes.reveal_caret = false;
+                if let Some(focused) = ctx.memory(|memory| memory.focused()) {
+                    ctx.memory_mut(|memory| memory.surrender_focus(focused));
+                }
+                if let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) {
+                    self.send(Command::SetCurrentRegion { base, region: Some(region) }, Pending::SelectRegion);
                 }
             }
             PaneAction::CommitPath(document, text) => {

@@ -4,8 +4,8 @@ use egui::epaint::text::cursor::CCursor;
 use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
 
 use crate::editing::{self, Cursor, Lines, Position};
-use crate::rows::{Mark, PaneRow, Rows};
-use crate::theme::Palette;
+use crate::rows::{Block, Mark, PaneRow, Rows};
+use crate::theme::{DocumentColors, Palette};
 
 
 /// Extra height of a row above the font's line height, so carets and text don't touch the next row.
@@ -17,9 +17,9 @@ const SELECTED_LINE_BREAK_WIDTH: f32 = 0.4;
 const HATCH_SPACING: f32 = 8.0;
 /// Space on each side of a line number and of D's line origin.
 const MARGIN_PADDING: f32 = 4.0;
-const GUTTER_WIDTH: f32 = 12.0;
-/// Space between a gutter block and the column's edges.
-const GUTTER_INSET: f32 = 2.0;
+/// Space between a gutter block and the column's edges. The column is one row height wide, so with the block's top and bottom inset by this too, a one-row block is a square.
+const GUTTER_INSET: f32 = 1.0;
+const ACTIVE_GUTTER_STROKE: f32 = 2.0;
 /// Space between the margin and the text.
 const TEXT_GAP: f32 = 4.0;
 const CONFLICT_MARKER: &str = "<Merge Conflict>";
@@ -30,9 +30,9 @@ const REGION_BORDER_WIDTH: f32 = 1.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarginKind {
     Nothing,
-    /// A bordered block per region.
+    /// A bordered block per changed region, in the pane's document color.
     Gutters,
-    /// Where each line of D came from: A, B, C, or M for a hand edit.
+    /// D's gutter: a block per run of lines from one origin, colored and labeled with it: A, B, C, or M for a hand edit.
     Marks,
 }
 
@@ -72,6 +72,8 @@ pub enum PointerAction {
     SelectWord(Position),
     /// A triple-click on this line: select it.
     SelectLine(usize),
+    /// A click on a gutter block of this region: make it current.
+    SelectRegion(usize),
 }
 
 
@@ -119,8 +121,8 @@ impl Margin {
 }
 
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows. `offset` forces the vertical scroll offset, so several views can scroll together.
-pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows; `reveal_row` scrolls that row into view if it is out of view. `offset` forces the vertical scroll offset, so several views can scroll together.
+pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, reveal_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING;
@@ -128,7 +130,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
     let page_rows = ((viewport_height / row_height).floor() as usize).max(1);
     let caret = caret.map(|caret| Caret { cursor: editing::clamp_cursor(lines, caret.cursor), void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())) });
     let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.text).size().x;
-    let margin = margin_widths(style, lines.count(), char_width);
+    let margin = margin_widths(style, lines.count(), char_width, row_height);
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -140,7 +142,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
     let revealed = caret
         .filter(|_| reveal_caret)
         .and_then(|caret| reveal_offset(caret_row(rows, caret), row_height, viewport_height, current));
-    if let Some(target) = jumped.or(revealed).or(offset) {
+    let revealed_row = reveal_row.and_then(|row| reveal_offset(row, row_height, viewport_height, current));
+    if let Some(target) = jumped.or(revealed).or(revealed_row).or(offset) {
         area = area.vertical_scroll_offset(target);
     }
 
@@ -206,10 +209,14 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
     // One target for the whole visible pane, so empty space, the margin and the space right of a line take the mouse too.
     let response = ui.interact(output.inner_rect, ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
     let held = response.is_pointer_button_down_on();
-    if response.hovered() || held {
+    let scroll = output.state.clamped_offset();
+    let gutter_at = |pointer: Pos2| gutter_region(rows, margin, style.margin, pointer.x - output.inner_rect.min.x, pointer.y - output.inner_rect.min.y + scroll.y, row_height);
+    let hover_position = ui.input(|input| input.pointer.hover_pos());
+    if response.hovered() && hover_position.and_then(gutter_at).is_some() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    } else if response.hovered() || held {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
     }
-    let scroll = output.state.clamped_offset();
     let hit = |pointer: Pos2| {
         let text_x = (pointer.x - output.inner_rect.min.x - margin.total()).max(0.0) + scroll.x;
         let content_y = pointer.y - output.inner_rect.min.y + scroll.y;
@@ -217,7 +224,16 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
     };
     let pressed = response.hovered() && ui.input(|input| input.pointer.primary_pressed());
     let pointer_position = ui.input(|input| input.pointer.interact_pos());
+    // A press on a gutter selects its region; the rest of that click and drag must not select text.
+    let gutter_press_id = ui.make_persistent_id((id_salt, "gutter_press"));
+    let gutter_region_pressed = pointer_position.filter(|_| pressed).and_then(gutter_at);
+    if pressed {
+        ui.data_mut(|data| data.insert_temp(gutter_press_id, gutter_region_pressed.is_some()));
+    }
+    let in_gutter_press = ui.data(|data| data.get_temp::<bool>(gutter_press_id)).unwrap_or(false);
     let pointer = match pointer_position {
+        _ if gutter_region_pressed.is_some() => gutter_region_pressed.map(PointerAction::SelectRegion),
+        _ if in_gutter_press => None,
         Some(pointer) if response.triple_clicked() => Some(PointerAction::SelectLine(hit(pointer).0.line)),
         Some(pointer) if response.double_clicked() => Some(PointerAction::SelectWord(hit(pointer).0)),
         Some(pointer) if pressed => {
@@ -235,14 +251,26 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
 }
 
 
-fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32) -> Margin {
+fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_height: f32) -> Margin {
     let numbers = if style.line_numbers { digits(line_count) as f32 * char_width + MARGIN_PADDING * 2.0 } else { 0.0 };
     let column = match style.margin {
         MarginKind::Nothing => 0.0,
-        MarginKind::Gutters => GUTTER_WIDTH,
-        MarginKind::Marks => char_width + MARGIN_PADDING * 2.0,
+        MarginKind::Gutters => row_height,
+        MarginKind::Marks => row_height.max(char_width + MARGIN_PADDING * 2.0),
     };
     Margin { numbers, column }
+}
+
+
+/// The region of the gutter block under a point, given in pixels from the view's left edge and from the top of its content.
+fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, content_y: f32, row_height: f32) -> Option<usize> {
+    if kind == MarginKind::Nothing || x < margin.numbers || x >= margin.numbers + margin.column || content_y < 0.0 {
+        return None;
+    }
+    let row = row_at(content_y, row_height, rows.len())?;
+    let pane_row = rows.row(row)?;
+    pane_row.block?;
+    pane_row.region
 }
 
 
@@ -252,7 +280,7 @@ fn digits(line_count: usize) -> usize {
 }
 
 
-/// The line number, then the gutter block or D's line origin, drawn at the left edge of the view whatever the sideways scroll.
+/// The line number, then the gutter block, labeled with its origin in D, drawn at the left edge of the view whatever the sideways scroll.
 fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f32, rect: Rect, margin: Margin, style: &ViewStyle<'_>, font_id: &FontId) {
     let palette = style.palette;
     let painter = ui.painter();
@@ -262,18 +290,17 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
         painter.text(pos2(left + margin.numbers - MARGIN_PADDING, rect.center().y), Align2::RIGHT_CENTER, (line + 1).to_string(), font_id.clone(), palette.weak_text);
     }
     let column_left = left + margin.numbers;
-    match style.margin {
-        MarginKind::Nothing => {}
-        MarginKind::Gutters => {
-            if pane_row.region.is_some() {
-                let (first, last) = rows.region_edges(row);
-                paint_gutter_block(painter, column_left, rect, first, last, palette);
-            }
-        }
-        MarginKind::Marks => {
-            if let Some(mark) = pane_row.mark {
-                painter.text(pos2(column_left + margin.column / 2.0, rect.center().y), Align2::CENTER_CENTER, mark_letter(mark), font_id.clone(), palette.weak_text);
-            }
+    if style.margin != MarginKind::Nothing
+        && let Some(block) = pane_row.block
+    {
+        let (first, last) = rows.block_edges(row);
+        let active = pane_row.region.is_some() && pane_row.region == style.current_region;
+        paint_gutter_block(painter, column_left, margin.column, rect, first, last, block_colors(palette, block), active);
+        if style.margin == MarginKind::Marks
+            && first
+            && let Some(origin) = block.origin
+        {
+            painter.text(pos2(column_left + margin.column / 2.0, rect.center().y), Align2::CENTER_CENTER, mark_letter(origin), font_id.clone(), palette.text);
         }
     }
     if margin.numbers + margin.column > 0.0 {
@@ -283,15 +310,24 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
 }
 
 
-/// One row's slice of a region's gutter block: the sides on every row, the top on its first row and the bottom on its last, so the region reads as one bordered block.
-fn paint_gutter_block(painter: &Painter, column_left: f32, rect: Rect, first: bool, last: bool, palette: &Palette) {
+/// A block takes the colors of the source it shows; hand-edited and unknown lines of D take D's.
+fn block_colors(palette: &Palette, block: Block) -> &DocumentColors {
+    match block.origin {
+        Some(Mark::Source(document)) => palette.colors(document),
+        Some(Mark::Modified) | None => &palette.output,
+    }
+}
+
+
+/// One row's slice of a gutter block: the sides on every row, the top on its first row and the bottom on its last, so the block reads as one bordered whole. Blocks of the current region are filled stronger, with a thicker border.
+fn paint_gutter_block(painter: &Painter, column_left: f32, column_width: f32, rect: Rect, first: bool, last: bool, colors: &DocumentColors, active: bool) {
     let left = column_left + GUTTER_INSET;
-    let right = column_left + GUTTER_WIDTH - GUTTER_INSET;
-    let top = if first { rect.top() + 1.0 } else { rect.top() };
-    let bottom = if last { rect.bottom() - 1.0 } else { rect.bottom() };
+    let right = column_left + column_width - GUTTER_INSET;
+    let top = if first { rect.top() + GUTTER_INSET } else { rect.top() };
+    let bottom = if last { rect.bottom() - GUTTER_INSET } else { rect.bottom() };
     let block = Rect::from_min_max(pos2(left, top), pos2(right, bottom));
-    painter.rect_filled(block, 0.0, palette.gutter_fill);
-    let stroke = Stroke::new(1.0, palette.gutter_border);
+    painter.rect_filled(block, 0.0, if active { colors.gutter_active } else { colors.header });
+    let stroke = Stroke::new(if active { ACTIVE_GUTTER_STROKE } else { 1.0 }, colors.gutter_border);
     painter.vline(left, block.y_range(), stroke);
     painter.vline(right, block.y_range(), stroke);
     if first {
@@ -423,6 +459,7 @@ pub fn jump_offset(row: usize, context: usize, row_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::RowMap;
     use crate::theme::LIGHT;
 
 
@@ -517,11 +554,42 @@ mod tests {
         assert_eq!(digits(9), 1);
         assert_eq!(digits(10), 2);
         assert_eq!(digits(12345), 5);
-        let numbers = margin_widths(&style(true, MarginKind::Nothing), 120, 7.0);
+        let numbers = margin_widths(&style(true, MarginKind::Nothing), 120, 7.0, 16.0);
         assert_eq!(numbers, Margin { numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0, column: 0.0 });
-        assert_eq!(margin_widths(&style(false, MarginKind::Gutters), 120, 7.0), Margin { numbers: 0.0, column: GUTTER_WIDTH });
-        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 7.0).column, 7.0 + MARGIN_PADDING * 2.0);
-        assert_eq!(margin_widths(&style(false, MarginKind::Nothing), 1, 7.0).total(), TEXT_GAP);
+        assert_eq!(margin_widths(&style(false, MarginKind::Nothing), 1, 7.0, 16.0).total(), TEXT_GAP);
+    }
+
+
+    #[test]
+    fn gutter_columns_are_one_row_wide() {
+        assert_eq!(margin_widths(&style(false, MarginKind::Gutters), 120, 7.0, 16.0), Margin { numbers: 0.0, column: 16.0 });
+        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 7.0, 16.0).column, 16.0);
+        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 20.0, 16.0).column, 20.0 + MARGIN_PADDING * 2.0);
+    }
+
+
+    #[test]
+    fn clicks_on_gutter_blocks_select_their_region() {
+        let block = Some(Block { index: 0, origin: None });
+        let map = RowMap::from_rows(vec![PaneRow { line: Some(0), region: Some(0), ..PaneRow::default() }, PaneRow { line: Some(1), region: Some(1), block, ..PaneRow::default() }, PaneRow { region: Some(1), block, ..PaneRow::default() }]);
+        let rows = Rows::Mapped(&map);
+        let margin = Margin { numbers: 20.0, column: 16.0 };
+        assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 20.0, 16.0), Some(1));
+        assert_eq!(gutter_region(rows, margin, MarginKind::Marks, 20.0, 40.0, 16.0), Some(1));
+        assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 5.0, 16.0), None, "a row without a block");
+        assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 19.0, 20.0, 16.0), None, "the line numbers");
+        assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 36.0, 20.0, 16.0), None, "the text");
+        assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 60.0, 16.0), None, "below the last row");
+        assert_eq!(gutter_region(rows, margin, MarginKind::Nothing, 25.0, 20.0, 16.0), None);
+    }
+
+
+    #[test]
+    fn blocks_take_the_colors_of_their_origin() {
+        let colors = |origin| block_colors(&LIGHT, Block { index: 0, origin });
+        assert_eq!(colors(Some(Mark::Source(kdiff4_protocol::Document::C))), &LIGHT.sources[2]);
+        assert_eq!(colors(Some(Mark::Modified)), &LIGHT.output);
+        assert_eq!(colors(None), &LIGHT.output);
     }
 
 
