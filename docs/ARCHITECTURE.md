@@ -456,7 +456,7 @@ The binary routes each override by its section to the engine (in the open comman
 
 ### Loading and saving
 
-- Missing file: defaults are used; the file is created on the first save from the settings dialog.
+- Missing file: defaults are used; the file is created on the first save from the settings dialog. The dialog's "Open in editor" button opens the file with the system's default handler, creating it first if it is missing.
 - Missing keys take their defaults, so files from older versions keep loading.
 - Unknown keys are logged at warn level and ignored, so files from newer versions load too; they are dropped on the next save.
 - A top-level `version` key allows migrations when the format changes: older versions are upgraded on load.

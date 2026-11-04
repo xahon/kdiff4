@@ -18,6 +18,8 @@ const PREVIEW_LINES: [&str; 3] = ["fn main() { println!(\"Hello, world!\"); }", 
 pub enum SettingsAction {
     Ok,
     Cancel,
+    /// Opens `gui.toml` in the system's default editor; the dialog stays open.
+    OpenConfigFile,
 }
 
 
@@ -107,6 +109,9 @@ impl SettingsDialog {
             }
             if ui.button("Defaults").clicked() {
                 self.reset_to_defaults();
+            }
+            if ui.button("Open in editor").on_hover_text("Open gui.toml in the default editor").clicked() {
+                action = Some(SettingsAction::OpenConfigFile);
             }
         });
         action

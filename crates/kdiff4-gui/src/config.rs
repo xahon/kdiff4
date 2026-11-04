@@ -229,6 +229,21 @@ pub fn back_up_broken(path: &Path) -> Result<(), ConfigError> {
 }
 
 
+/// Command that opens `path` with the system's default handler for its file type.
+pub fn open_command(path: &Path) -> std::process::Command {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut command = std::process::Command::new(program);
+    command.arg(path);
+    command
+}
+
+
 /// Writes atomically: a temp file next to `path`, then a rename over it.
 pub fn save(path: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
     let text = toml::to_string(config)?;
@@ -260,6 +275,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+
+    #[test]
+    fn open_command_passes_path_as_single_argument() {
+        let path = PathBuf::from("C:/some dir/gui.toml");
+        let command = open_command(&path);
+        let expected = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        assert_eq!(command.get_program(), expected);
+        assert_eq!(command.get_args().collect::<Vec<_>>(), vec![path.as_os_str()]);
     }
 
 

@@ -201,10 +201,28 @@ impl KdiffApp {
                     self.send(Command::SetComparisonOptions(options.clone()), Pending::ComparisonOptions);
                 }
             }
-            SettingsAction::Cancel => self.apply_view(ctx, dialog.original()),
+            SettingsAction::Cancel | SettingsAction::OpenConfigFile => self.apply_view(ctx, dialog.original()),
         }
         if !self.window_enlarged {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(INITIAL_WINDOW_SIZE.into()));
+        }
+    }
+
+
+    /// Writes the file first if it doesn't exist yet, so the editor has something to open.
+    fn open_config_file(&mut self) {
+        let path = match self.config_path.clone() {
+            Some(path) => path,
+            None => {
+                self.report_error("Cannot open the settings file: no config directory".to_string());
+                return;
+            }
+        };
+        if !path.exists() {
+            self.save_config(false);
+        }
+        if let Err(error) = config::open_command(&path).spawn() {
+            self.report_error(format!("Cannot open {}: {error}", path.display()));
         }
     }
 
@@ -817,6 +835,7 @@ impl KdiffApp {
         }
         let draft = dialog.draft().clone();
         match action {
+            Some(SettingsAction::OpenConfigFile) => self.open_config_file(),
             Some(action) => self.close_settings(ctx, action),
             None if self.applied_view.as_ref() != Some(&draft) => self.apply_view(ctx, &draft),
             None => {}
