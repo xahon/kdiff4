@@ -1,13 +1,16 @@
-use egui::{ComboBox, DragValue, RichText, Ui};
+use egui::{Button, Checkbox, Color32, ComboBox, DragValue, RichText, ScrollArea, Theme, Ui};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
-use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MIN_FONT_SIZE, ViewConfig};
+use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MIN_FONT_SIZE, ThemeChoice, ViewConfig};
 use crate::fonts::MonospaceFamily;
 use crate::theme;
 
 
 const BUILTIN_FONT_LABEL: &str = "Built-in (Hack)";
 const MAX_CHAR_DIFF_LINE_LIMIT: usize = 1_000_000;
+/// The dialog keeps this size whatever the tab; a tab taller than the body scrolls.
+const DIALOG_WIDTH: f32 = 720.0;
+const BODY_HEIGHT: f32 = 440.0;
 const PREVIEW_LINES: [&str; 3] = ["fn main() { println!(\"Hello, world!\"); }", "0O 1lI| {}[]() <=> != -> 'x' \"y\"", "The quick brown fox jumps over the lazy dog."];
 
 
@@ -20,8 +23,8 @@ pub enum SettingsAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
-    Editor,
-    View,
+    Panes,
+    Appearance,
     Comparison,
 }
 
@@ -39,7 +42,7 @@ pub struct SettingsDialog {
 
 impl SettingsDialog {
     pub fn new(view: &ViewConfig, comparison: Option<&ComparisonOptions>) -> SettingsDialog {
-        SettingsDialog { original: view.clone(), draft: view.clone(), comparison: comparison.map(|options| (options.clone(), options.clone())), tab: Tab::Editor }
+        SettingsDialog { original: view.clone(), draft: view.clone(), comparison: comparison.map(|options| (options.clone(), options.clone())), tab: Tab::Panes }
     }
 
 
@@ -80,20 +83,21 @@ impl SettingsDialog {
     /// `families` is `None` while the font scan is still running.
     pub fn show(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) -> Option<SettingsAction> {
         let mut action = None;
+        ui.set_width(DIALOG_WIDTH);
         ui.heading("Settings");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Editor, "Editor");
-            ui.selectable_value(&mut self.tab, Tab::View, "View");
+            ui.selectable_value(&mut self.tab, Tab::Panes, "Panes");
+            ui.selectable_value(&mut self.tab, Tab::Appearance, "Appearance");
             ui.selectable_value(&mut self.tab, Tab::Comparison, "Comparison");
         });
         ui.separator();
-        match self.tab {
-            Tab::Editor => self.editor_tab(ui, families),
-            Tab::View => self.view_tab(ui),
+        ScrollArea::vertical().id_salt("settings_body").auto_shrink(false).min_scrolled_height(BODY_HEIGHT).max_height(BODY_HEIGHT).show(ui, |ui| match self.tab {
+            Tab::Panes => self.panes_tab(ui, families),
+            Tab::Appearance => self.appearance_tab(ui),
             Tab::Comparison => self.comparison_tab(ui),
-        }
-        ui.add_space(8.0);
+        });
+        ui.separator();
         ui.horizontal(|ui| {
             if ui.button("OK").clicked() {
                 action = Some(SettingsAction::Ok);
@@ -110,8 +114,9 @@ impl SettingsDialog {
 
 
     /// How the panes draw text and regions.
-    fn editor_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
-        egui::Grid::new("settings_editor_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+    fn panes_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
+        let theme = active_theme(ui);
+        egui::Grid::new("settings_panes_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Font:");
             ui.horizontal(|ui| {
                 self.font_family_combo(ui, families);
@@ -133,11 +138,38 @@ impl SettingsDialog {
             });
             ui.end_row();
 
-            ui.label("Panes:");
+            ui.label("Text color:");
+            color_override(ui, &mut self.draft.colors_mut(theme == Theme::Dark).pane_text, theme::palette(theme).pane_text, &format!("Text in the panes, in the {} theme.", theme_name(theme)));
+            ui.end_row();
+
+            ui.label("");
+            ui.vertical(|ui| {
+                ui.add_space(4.0);
+                show_preview(ui);
+                ui.add_space(4.0);
+            });
+            ui.end_row();
+
+            ui.label("Show:");
             ui.vertical(|ui| {
                 ui.checkbox(&mut self.draft.show_line_numbers, "Line numbers");
                 ui.checkbox(&mut self.draft.show_gutters, "Region gutters in A, B and C").on_hover_text("A bordered block left of each region. D always shows where each line came from.");
                 ui.checkbox(&mut self.draft.align_output, "Void space in the output pane").on_hover_text("Line D up with A, B and C: every region gets the same rows in every pane, padded with void space.");
+            });
+            ui.end_row();
+
+            ui.label("Whitespace:");
+            ui.vertical(|ui| {
+                let whitespace = &mut self.draft.whitespace;
+                ui.checkbox(&mut whitespace.render, "Render whitespace").on_hover_text("Mark whitespace characters in the panes.");
+                let enabled = whitespace.render;
+                ui.indent("whitespace_kinds", |ui| {
+                    ui.add_enabled(enabled, Checkbox::new(&mut whitespace.spaces, "Spaces"));
+                    ui.add_enabled(enabled, Checkbox::new(&mut whitespace.tabs, "Tabs"));
+                    ui.add_enabled(enabled, Checkbox::new(&mut whitespace.line_feeds, "Line feeds")).on_hover_text("The line feed at the end of a line, alone or after a carriage return.");
+                    ui.add_enabled(enabled, Checkbox::new(&mut whitespace.carriage_returns, "Carriage returns")).on_hover_text("A carriage return ending a line, as in CRLF and CR files, or inside one.");
+                    ui.add_enabled(enabled, Checkbox::new(&mut whitespace.other, "Other spaces")).on_hover_text("Non-breaking and other Unicode spaces.");
+                });
             });
             ui.end_row();
 
@@ -174,18 +206,31 @@ impl SettingsDialog {
             ui.add(DragValue::new(&mut self.draft.char_diff_corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px corner radius"));
             ui.end_row();
         });
-        ui.add_space(8.0);
-        show_preview(ui);
     }
 
 
-    /// How the window and its widgets look.
-    fn view_tab(&mut self, ui: &mut Ui) {
-        egui::Grid::new("settings_view_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+    /// Colors and theming of the window around the panes.
+    fn appearance_tab(&mut self, ui: &mut Ui) {
+        let theme = active_theme(ui);
+        egui::Grid::new("settings_appearance_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Theme:");
+            ComboBox::from_id_salt("theme_choice").selected_text(theme_choice_name(self.draft.theme.clone())).show_ui(ui, |ui| {
+                for choice in [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System] {
+                    ui.selectable_value(&mut self.draft.theme, choice.clone(), theme_choice_name(choice));
+                }
+            });
+            ui.end_row();
+
+            ui.label("UI text color:");
+            color_override(ui, &mut self.draft.colors_mut(theme == Theme::Dark).ui_text, theme::palette(theme).text, &format!("Text of menus, dialogs and buttons, in the {} theme.", theme_name(theme)));
+            ui.end_row();
+
             ui.label("Corner radius:");
             ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px")).on_hover_text("Rounding of widgets, menus, dialogs, panes and the window frame.");
             ui.end_row();
         });
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("Colors are kept per theme; these are the {} theme's.", theme_name(theme))).weak());
     }
 
 
@@ -230,6 +275,49 @@ impl SettingsDialog {
 }
 
 
+/// The theme in effect: the chosen one, or the system's while following it.
+fn active_theme(ui: &Ui) -> Theme {
+    if ui.visuals().dark_mode { Theme::Dark } else { Theme::Light }
+}
+
+
+fn theme_name(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+    }
+}
+
+
+fn theme_choice_name(choice: ThemeChoice) -> &'static str {
+    match choice {
+        ThemeChoice::Light => "Light",
+        ThemeChoice::Dark => "Dark",
+        ThemeChoice::System => "Follow the system",
+    }
+}
+
+
+/// The color an override shows: the override, or the theme's own color.
+fn shown_rgb(color: Option<[u8; 3]>, theme_color: Color32) -> [u8; 3] {
+    color.unwrap_or([theme_color.r(), theme_color.g(), theme_color.b()])
+}
+
+
+/// A color button for an override of `theme_color`, and a button that goes back to the theme's color.
+fn color_override(ui: &mut Ui, color: &mut Option<[u8; 3]>, theme_color: Color32, hint: &str) {
+    ui.horizontal(|ui| {
+        let mut rgb = shown_rgb(color.clone(), theme_color);
+        if ui.color_edit_button_srgb(&mut rgb).on_hover_text(hint).changed() {
+            *color = Some(rgb);
+        }
+        if ui.add_enabled(color.is_some(), Button::new("Theme default")).clicked() {
+            *color = None;
+        }
+    });
+}
+
+
 fn algorithm_name(algorithm: DiffAlgorithm) -> &'static str {
     match algorithm {
         DiffAlgorithm::Histogram => "Histogram",
@@ -254,12 +342,12 @@ pub fn family_choices(families: &[MonospaceFamily], current: Option<&str>) -> Ve
 
 
 fn show_preview(ui: &mut Ui) {
-    let palette = theme::palette_of(ui);
+    let palette = &theme::palette_of(ui);
     theme::pane_frame(palette, theme::corner_radius_of(ui)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::pane_body_frame().show(ui, |ui| {
             for line in PREVIEW_LINES {
-                ui.label(RichText::new(line).monospace().color(palette.text));
+                ui.label(RichText::new(line).monospace().color(palette.pane_text));
             }
         });
     });
@@ -318,6 +406,26 @@ mod tests {
         dialog.reset_to_defaults();
         assert_eq!(dialog.draft(), &ViewConfig::default());
         assert_eq!(dialog.original(), &view);
+    }
+
+
+    #[test]
+    fn overrides_show_the_theme_color_until_set() {
+        assert_eq!(shown_rgb(None, Color32::from_rgb(7, 8, 9)), [7, 8, 9]);
+        assert_eq!(shown_rgb(Some([1, 2, 3]), Color32::from_rgb(7, 8, 9)), [1, 2, 3]);
+    }
+
+
+    #[test]
+    fn reset_restores_theme_colors_and_whitespace() {
+        let mut view = ViewConfig { theme: ThemeChoice::Dark, ..ViewConfig::default() };
+        view.dark_colors.pane_text = Some([1, 1, 1]);
+        view.whitespace.render = false;
+        let mut dialog = SettingsDialog::new(&view, None);
+        dialog.reset_to_defaults();
+        assert_eq!(dialog.draft().theme, ThemeChoice::Light);
+        assert_eq!(dialog.draft().dark_colors.pane_text, None);
+        assert!(dialog.draft().whitespace.render);
     }
 
 

@@ -1,7 +1,7 @@
-use egui::{Color32, CornerRadius, FontId, Frame, Margin, Stroke, Style, TextStyle, Theme, Ui};
+use egui::{Color32, CornerRadius, FontId, Frame, Id, Margin, Stroke, Style, TextStyle, Theme, ThemePreference, Ui};
 use kdiff4_protocol::Document;
 
-use crate::config::ViewConfig;
+use crate::config::{ThemeChoice, ThemeColors, ViewConfig};
 
 
 /// The colors of one document: its pane header, which also fills its gutter blocks, and the block border; `gutter_active` fills the blocks of the current region.
@@ -20,7 +20,9 @@ pub struct Palette {
     pub pane_bg: Color32,
     pub pane_border: Color32,
     pub pane_header_bg: Color32,
+    /// Text of menus, dialogs, buttons and labels.
     pub text: Color32,
+    pub pane_text: Color32,
     pub weak_text: Color32,
     pub caret: Color32,
     pub selection: Color32,
@@ -41,7 +43,8 @@ pub const LIGHT: Palette = Palette {
     pane_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
     pane_border: Color32::from_rgb(0x9A, 0xA2, 0xAE),
     pane_header_bg: Color32::from_rgb(0xDE, 0xE3, 0xE9),
-    text: Color32::from_rgb(0x16, 0x19, 0x1D),
+    text: Color32::BLACK,
+    pane_text: Color32::BLACK,
     weak_text: Color32::from_rgb(0x55, 0x5D, 0x69),
     caret: Color32::from_rgb(0x1F, 0x5F, 0xD1),
     selection: Color32::from_rgb(0xB8, 0xD4, 0xFF),
@@ -63,6 +66,7 @@ pub const DARK: Palette = Palette {
     pane_border: Color32::from_rgb(0x55, 0x5C, 0x67),
     pane_header_bg: Color32::from_rgb(0x2A, 0x2F, 0x36),
     text: Color32::from_rgb(0xE8, 0xEA, 0xED),
+    pane_text: Color32::from_rgb(0xE8, 0xEA, 0xED),
     weak_text: Color32::from_rgb(0xA0, 0xA8, 0xB3),
     caret: Color32::from_rgb(0x7A, 0xB0, 0xFF),
     selection: Color32::from_rgb(0x2C, 0x4A, 0x78),
@@ -98,15 +102,48 @@ pub fn palette(theme: Theme) -> &'static Palette {
 }
 
 
-pub fn palette_of(ui: &Ui) -> &'static Palette {
-    palette(if ui.visuals().dark_mode { Theme::Dark } else { Theme::Light })
+/// The theme's palette with the user's colors, as `apply_style` stored it.
+pub fn palette_of(ui: &Ui) -> Palette {
+    let theme = if ui.visuals().dark_mode { Theme::Dark } else { Theme::Light };
+    ui.ctx()
+        .data(|data| data.get_temp::<Palette>(palette_id(theme)))
+        .unwrap_or_else(|| palette(theme).clone())
 }
 
 
-/// Styles both themes, so switching themes later needs no other change.
+fn palette_id(theme: Theme) -> Id {
+    Id::unique(("kdiff4_palette", theme == Theme::Dark))
+}
+
+
+/// The theme's palette with the colors the user picked for it.
+pub fn customized(theme: Theme, colors: &ThemeColors) -> Palette {
+    let mut palette = palette(theme).clone();
+    if let Some([r, g, b]) = colors.ui_text {
+        palette.text = Color32::from_rgb(r, g, b);
+    }
+    if let Some([r, g, b]) = colors.pane_text {
+        palette.pane_text = Color32::from_rgb(r, g, b);
+    }
+    palette
+}
+
+
+pub fn preference(choice: ThemeChoice) -> ThemePreference {
+    match choice {
+        ThemeChoice::Light => ThemePreference::Light,
+        ThemeChoice::Dark => ThemePreference::Dark,
+        ThemeChoice::System => ThemePreference::System,
+    }
+}
+
+
+/// Styles both themes and stores their palettes, so switching themes later needs no other change.
 pub fn apply_style(ctx: &egui::Context, view: &ViewConfig) {
     for theme in [Theme::Light, Theme::Dark] {
-        ctx.style_mut_of(theme, |style| configure_style(style, palette(theme), view));
+        let palette = customized(theme, view.colors(theme == Theme::Dark));
+        ctx.style_mut_of(theme, |style| configure_style(style, &palette, view));
+        ctx.data_mut(|data| data.insert_temp(palette_id(theme), palette));
     }
 }
 
@@ -118,9 +155,10 @@ pub fn configure_style(style: &mut Style, palette: &Palette, view: &ViewConfig) 
     visuals.window_stroke = Stroke::new(1.0, palette.pane_border);
     visuals.extreme_bg_color = palette.pane_bg;
     visuals.faint_bg_color = palette.pane_header_bg;
-    visuals.widgets.noninteractive.fg_stroke.color = palette.text;
+    for widget in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
+        widget.fg_stroke.color = palette.text;
+    }
     visuals.widgets.noninteractive.bg_stroke.color = palette.pane_border;
-    visuals.widgets.inactive.fg_stroke.color = palette.text;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.pane_border);
     visuals.weak_text_color = Some(palette.weak_text);
     let radius = CornerRadius::same(view.corner_radius.clone());
@@ -211,6 +249,8 @@ mod tests {
             assert!(contrast_ratio(palette.weak_text, palette.window_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.caret, palette.pane_bg) >= 4.5, "{palette:?}");
             assert!(contrast_ratio(palette.text, palette.selection) >= 7.0, "{palette:?}");
+            assert!(contrast_ratio(palette.pane_text, palette.pane_bg) >= 7.0, "{palette:?}");
+            assert!(contrast_ratio(palette.pane_text, palette.selection) >= 7.0, "{palette:?}");
         }
     }
 
@@ -278,6 +318,8 @@ mod tests {
     fn palettes_follow_their_theme() {
         assert!(relative_luminance(LIGHT.pane_bg) > relative_luminance(LIGHT.text));
         assert!(relative_luminance(DARK.pane_bg) < relative_luminance(DARK.text));
+        assert_eq!(LIGHT.text, Color32::BLACK);
+        assert_eq!(LIGHT.pane_text, Color32::BLACK);
         assert_eq!(palette(Theme::Light), &LIGHT);
         assert_eq!(palette(Theme::Dark), &DARK);
     }
@@ -307,8 +349,31 @@ mod tests {
         assert_eq!(style.visuals.panel_fill, LIGHT.window_bg);
         assert_eq!(style.visuals.widgets.inactive.bg_stroke, Stroke::new(1.0, LIGHT.pane_border));
         assert_eq!(style.visuals.widgets.inactive.fg_stroke.color, LIGHT.text);
+        assert_eq!(style.visuals.widgets.hovered.fg_stroke.color, LIGHT.text);
+        assert_eq!(style.visuals.widgets.noninteractive.fg_stroke.color, LIGHT.text);
         assert_eq!(style.visuals.window_corner_radius, CornerRadius::ZERO);
         assert_eq!(style.visuals.widgets.hovered.corner_radius, CornerRadius::ZERO);
         assert_eq!(style.visuals.menu_corner_radius, CornerRadius::ZERO);
+    }
+
+
+    #[test]
+    fn customized_palette_takes_only_the_picked_colors() {
+        assert_eq!(customized(Theme::Light, &ThemeColors::default()), LIGHT);
+        let colors = ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None };
+        let palette = customized(Theme::Dark, &colors);
+        assert_eq!(palette.text, Color32::from_rgb(1, 2, 3));
+        assert_eq!(palette.pane_text, DARK.pane_text);
+        assert_eq!(palette.pane_bg, DARK.pane_bg);
+        let colors = ThemeColors { ui_text: None, pane_text: Some([4, 5, 6]) };
+        assert_eq!(customized(Theme::Light, &colors).pane_text, Color32::from_rgb(4, 5, 6));
+    }
+
+
+    #[test]
+    fn theme_choices_map_to_preferences() {
+        assert_eq!(preference(ThemeChoice::Light), ThemePreference::Light);
+        assert_eq!(preference(ThemeChoice::Dark), ThemePreference::Dark);
+        assert_eq!(preference(ThemeChoice::System), ThemePreference::System);
     }
 }

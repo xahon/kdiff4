@@ -4,6 +4,7 @@ use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, Tex
 use kdiff4_protocol::Document;
 
 use crate::char_diff::CharDiffLook;
+use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::rows::Rows;
@@ -111,13 +112,14 @@ pub struct PaneOptions {
     pub region_gap: f32,
     pub region_corner_radius: u8,
     pub char_diff: CharDiffLook,
+    pub whitespace: WhitespaceConfig,
 }
 
 
 /// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
-    let palette = theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff };
+    let palette = &theme::palette_of(ui);
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff, whitespace: options.whitespace.clone() };
     let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();

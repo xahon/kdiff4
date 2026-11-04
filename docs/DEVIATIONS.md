@@ -60,6 +60,11 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 
 - A jump scrolls only when some pane doesn't show all rows of the region yet, and then leaves 12 lines above it by default. The caret moves to the region's start but stays hidden until it is moved again. kdiff3 always scrolls to the difference and shows its cursor there.
 
+### Appearance
+
+- Whitespace markers have one toggle per kind (spaces, tabs, line feeds, carriage returns, other Unicode spaces) under a master switch, and line ends are marked per line from the line's own terminator. kdiff3 has two switches, for whitespace in the text and in the differences.
+- The theme can be light, dark or follow the system, and the UI text and pane text colors can be overridden per theme. Light text is black by default.
+
 ### Open dialog
 
 - Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.

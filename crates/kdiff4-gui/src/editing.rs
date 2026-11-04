@@ -58,6 +58,24 @@ impl<'a> Lines<'a> {
     }
 
 
+    /// What ends a line in `text`: `"\r\n"`, `"\n"`, `"\r"`, or nothing for the last line or an index that doesn't fit.
+    pub fn terminator(&self, index: usize) -> &'a str {
+        let rest = match self.ranges.get(index) {
+            Some(range) => self.text.get(range.end..).unwrap_or(""),
+            None => return "",
+        };
+        if rest.starts_with("\r\n") {
+            "\r\n"
+        } else if rest.starts_with('\n') {
+            "\n"
+        } else if rest.starts_with('\r') {
+            "\r"
+        } else {
+            ""
+        }
+    }
+
+
     pub fn line_chars(&self, index: usize) -> usize {
         self.line(index).chars().count()
     }
@@ -441,6 +459,22 @@ mod tests {
 
     fn lines_of(text: &str) -> (String, Vec<Range<usize>>) {
         (text.to_string(), editor_lines(text))
+    }
+
+
+    #[test]
+    fn terminators_are_read_from_the_text_after_each_line() {
+        let text = "a\r\nb\nc\rd";
+        let ranges = [0..1, 3..4, 5..6, 7..8];
+        let lines = Lines { text, ranges: &ranges };
+        assert_eq!(lines.terminator(0), "\r\n");
+        assert_eq!(lines.terminator(1), "\n");
+        assert_eq!(lines.terminator(2), "\r");
+        assert_eq!(lines.terminator(3), "");
+        assert_eq!(lines.terminator(9), "");
+        let (text, ranges) = lines_of("x\n");
+        let lines = Lines { text: &text, ranges: &ranges };
+        assert_eq!((lines.terminator(0), lines.terminator(1)), ("\n", ""));
     }
 
 

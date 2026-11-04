@@ -41,12 +41,15 @@ const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
     (Navigation::PreviousConflict, "Previous Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp)),
     (Navigation::NextConflict, "Next Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown)),
 ];
+const VOID_TOGGLE_LABEL: &str = "Void Space";
 const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
-const VOID_TOGGLE_SIZE: f32 = 18.0;
+const TOOLBAR_ICON_SIZE: f32 = 18.0;
+/// Space between a toolbar button's icon and its label.
+const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
-const SETTINGS_WINDOW_SIZE: [f32; 2] = [640.0, 400.0];
+const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
 const SESSION_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
 
 
@@ -125,7 +128,6 @@ impl KdiffApp {
                 (GuiConfig::default(), false)
             }
         };
-        ctx.set_theme(egui::ThemePreference::Light);
         let mut form = OpenForm::default();
         for (document, path) in &startup.paths {
             form.set_path(document.clone(), path);
@@ -142,8 +144,12 @@ impl KdiffApp {
     }
 
 
-    /// Applies fonts and styles; reloads the font only when the family changed.
+    /// Applies the theme, fonts and styles; reloads the font only when the family changed.
     fn apply_view(&mut self, ctx: &egui::Context, view: &ViewConfig) {
+        if self.applied_view.as_ref().is_none_or(|applied| applied.theme != view.theme) {
+            ctx.set_theme(theme::preference(view.theme.clone()));
+            self.title_bar_refreshed = false;
+        }
         let family_changed = self.applied_view.as_ref().is_none_or(|applied| applied.font_family != view.font_family);
         if family_changed {
             let data = view.font_family.as_deref().and_then(|name| self.find_font(name));
@@ -854,6 +860,11 @@ impl KdiffApp {
                             self.navigate(to.clone());
                         }
                     }
+                    ui.separator();
+                    let mut void_space = self.view().align_output;
+                    if ui.add_enabled(is_merge, egui::Checkbox::new(&mut void_space, VOID_TOGGLE_LABEL)).on_hover_text(VOID_TOGGLE_HINT).clicked() {
+                        self.toggle_void_space();
+                    }
                 });
                 ui.menu_button("Settings", |ui| {
                     let configure = egui::Button::new("Configure Kdiff4...").shortcut_text(ui.ctx().format_shortcut(&SETTINGS_SHORTCUT));
@@ -874,24 +885,29 @@ impl KdiffApp {
         let mut toggled = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(VOID_TOGGLE_SIZE, VOID_TOGGLE_SIZE) + ui.spacing().button_padding * 2.0, egui::Sense::click());
-                let response = response.on_hover_text(VOID_TOGGLE_HINT);
+                let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, paint_void_icon).on_hover_text(VOID_TOGGLE_HINT);
                 if is_merge && response.clicked() {
                     toggled = true;
                 }
-                paint_void_toggle(ui, rect, on, is_merge, response.hovered());
             });
         });
         if toggled {
-            self.config.view.align_output = !on;
-            if let Some(applied) = self.applied_view.as_mut() {
-                applied.align_output = !on;
-            }
-            if let Some(dialog) = self.settings.as_mut() {
-                dialog.set_align_output(!on);
-            }
-            self.save_config(false);
+            self.toggle_void_space();
         }
+    }
+
+
+    /// Shows or hides void space in D, from the toolbar or the Merge menu. Saved at once, and followed by an open settings dialog.
+    fn toggle_void_space(&mut self) {
+        let on = !self.view().align_output;
+        self.config.view.align_output = on;
+        if let Some(applied) = self.applied_view.as_mut() {
+            applied.align_output = on;
+        }
+        if let Some(dialog) = self.settings.as_mut() {
+            dialog.set_align_output(on);
+        }
+        self.save_config(false);
     }
 
 
@@ -906,7 +922,7 @@ impl KdiffApp {
         let [r, g, b, a] = view.current_region_color;
         let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
         let char_diff = CharDiffLook { red: rgb(view.char_diff_red), blue: rgb(view.char_diff_blue), green: rgb(view.char_diff_green), corner_radius: view.char_diff_corner_radius.clone() };
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff, whitespace: view.whitespace.clone() }
     }
 
 
@@ -960,7 +976,9 @@ impl eframe::App for KdiffApp {
         self.handle_shortcuts(&ctx);
         self.handle_pane_keys(&ctx);
         self.show_menu(ui);
-        self.show_toolbar(ui);
+        if self.mirror.is_some() {
+            self.show_toolbar(ui);
+        }
         let aligned = self.view().align_output;
         if let Some(mirror) = self.mirror.as_mut() {
             mirror.set_aligned(aligned);
@@ -1050,17 +1068,39 @@ fn navigation_noun(to: Navigation) -> &'static str {
 }
 
 
-/// A small rounded square, hatched like void space; filled while void space is shown.
-fn paint_void_toggle(ui: &egui::Ui, rect: egui::Rect, on: bool, enabled: bool, hovered: bool) {
+/// The size of a toolbar button: room for the icon above the label, plus the button padding.
+fn toolbar_button_size(label_size: egui::Vec2, padding: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(label_size.x.max(TOOLBAR_ICON_SIZE), TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + label_size.y) + padding * 2.0
+}
+
+
+/// A bordered toolbar button with its icon centered above the label; filled while `on`. `paint_icon` draws the icon into its square in the given color.
+fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, paint_icon: impl FnOnce(&egui::Ui, egui::Rect, egui::Color32)) -> egui::Response {
     let palette = theme::palette_of(ui);
-    let radius = theme::corner_radius_of(ui).max(3);
+    let color = if enabled { palette.text } else { palette.weak_text.gamma_multiply(0.5) };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Button.resolve(ui.style()), color);
+    let padding = ui.spacing().button_padding;
+    let (rect, response) = ui.allocate_exact_size(toolbar_button_size(galley.size(), padding), egui::Sense::click());
     let visuals = ui.visuals();
-    if on || hovered {
-        let fill = if on { visuals.selection.bg_fill } else { visuals.widgets.hovered.weak_bg_fill };
-        ui.painter().rect_filled(rect, radius, fill);
-    }
-    let square = egui::Rect::from_center_size(rect.center(), egui::vec2(VOID_TOGGLE_SIZE, VOID_TOGGLE_SIZE) * 0.7);
-    let stroke_color = if enabled { palette.text } else { palette.weak_text.gamma_multiply(0.5) };
+    let fill = if on {
+        visuals.selection.bg_fill
+    } else if enabled && response.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        visuals.widgets.inactive.weak_bg_fill
+    };
+    ui.painter().rect(rect, theme::corner_radius_of(ui), fill, egui::Stroke::new(1.0, palette.pane_border), egui::StrokeKind::Inside);
+    let icon = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + padding.y + TOOLBAR_ICON_SIZE / 2.0), egui::vec2(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE));
+    paint_icon(ui, icon, color);
+    ui.painter().galley(egui::pos2(rect.center().x - galley.size().x / 2.0, icon.bottom() + TOOLBAR_ICON_GAP), galley, color);
+    response
+}
+
+
+/// A small square, hatched like void space.
+fn paint_void_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
+    let radius = theme::corner_radius_of(ui).max(3);
+    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
     let clip = ui.painter().with_clip_rect(square);
     let spacing = 3.0;
     let mut sum = square.left() + square.top() - square.height();
@@ -1173,6 +1213,16 @@ mod tests {
         assert_eq!((cursor, void_row), (Cursor { anchor: at(1, 0), head: at(0, 0) }, None));
         let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor: Cursor::at(at(0, 1)), void_row: Some(1) }, Motion::Right, false);
         assert_eq!((cursor, void_row), (Cursor::at(at(0, 2)), None));
+    }
+
+
+    #[test]
+    fn toolbar_buttons_fit_the_icon_above_the_label() {
+        let padding = egui::vec2(4.0, 1.0);
+        let wide = toolbar_button_size(egui::vec2(60.0, 14.0), padding);
+        assert_eq!(wide, egui::vec2(60.0 + 8.0, TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + 14.0 + 2.0));
+        let narrow = toolbar_button_size(egui::vec2(5.0, 14.0), padding);
+        assert_eq!(narrow.x, TOOLBAR_ICON_SIZE + 8.0);
     }
 
 

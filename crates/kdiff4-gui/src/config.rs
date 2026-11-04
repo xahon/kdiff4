@@ -88,12 +88,16 @@ pub struct ViewConfig {
     pub char_diff_red: [u8; 3],
     pub char_diff_blue: [u8; 3],
     pub char_diff_green: [u8; 3],
+    pub theme: ThemeChoice,
+    pub light_colors: ThemeColors,
+    pub dark_colors: ThemeColors,
+    pub whitespace: WhitespaceConfig,
 }
 
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -111,6 +115,64 @@ impl ViewConfig {
             self.font_family = None;
         }
         self
+    }
+
+
+    /// The color overrides of the light or the dark theme.
+    pub fn colors(&self, dark: bool) -> &ThemeColors {
+        if dark { &self.dark_colors } else { &self.light_colors }
+    }
+
+
+    pub fn colors_mut(&mut self, dark: bool) -> &mut ThemeColors {
+        if dark { &mut self.dark_colors } else { &mut self.light_colors }
+    }
+}
+
+
+/// The theme the GUI uses; `System` follows the operating system.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeChoice {
+    #[default]
+    Light,
+    Dark,
+    System,
+}
+
+
+/// Colors the user picked for one theme, as sRGB; `None` keeps the theme's own color.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeColors {
+    /// Text of menus, dialogs, buttons and labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_text: Option<[u8; 3]>,
+    /// Text in the panes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_text: Option<[u8; 3]>,
+}
+
+
+/// Which whitespace the panes mark. Each kind shows only while `render` is on too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WhitespaceConfig {
+    pub render: bool,
+    pub spaces: bool,
+    pub tabs: bool,
+    /// The line feed that ends a line, alone or after a carriage return.
+    pub line_feeds: bool,
+    /// A carriage return, ending a line or inside one.
+    pub carriage_returns: bool,
+    /// Non-breaking and other Unicode spaces.
+    pub other: bool,
+}
+
+
+impl Default for WhitespaceConfig {
+    fn default() -> Self {
+        WhitespaceConfig { render: true, spaces: true, tabs: true, line_feeds: true, carriage_returns: true, other: true }
     }
 }
 
@@ -200,7 +262,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1] };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -244,6 +306,35 @@ mod tests {
         assert_eq!(tiny.font_size, MIN_FONT_SIZE);
         let nan = ViewConfig { font_size: f32::NAN, ..ViewConfig::default() }.sanitized();
         assert_eq!(nan.font_size, DEFAULT_FONT_SIZE);
+    }
+
+
+    #[test]
+    fn appearance_and_whitespace_keys_load_from_toml() {
+        let dir = temp_dir("appearance");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "[view]\ntheme = \"dark\"\n[view.dark_colors]\npane_text = [10, 20, 30]\n[view.whitespace]\ntabs = false\n").unwrap();
+        let view = load(&path).unwrap().view;
+        assert_eq!(view.theme, ThemeChoice::Dark);
+        assert_eq!(view.dark_colors, ThemeColors { ui_text: None, pane_text: Some([10, 20, 30]) });
+        assert_eq!(view.light_colors, ThemeColors::default());
+        assert_eq!(view.whitespace, WhitespaceConfig { tabs: false, ..WhitespaceConfig::default() });
+    }
+
+
+    #[test]
+    fn whitespace_is_rendered_by_default() {
+        let whitespace = ViewConfig::default().whitespace;
+        assert!(whitespace.render && whitespace.spaces && whitespace.tabs && whitespace.line_feeds && whitespace.carriage_returns && whitespace.other);
+    }
+
+
+    #[test]
+    fn colors_pick_the_theme() {
+        let mut view = ViewConfig::default();
+        view.colors_mut(true).ui_text = Some([9, 9, 9]);
+        assert_eq!(view.colors(true).ui_text, Some([9, 9, 9]));
+        assert_eq!(view.colors(false).ui_text, None);
     }
 
 

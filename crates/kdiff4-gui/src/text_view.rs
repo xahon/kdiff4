@@ -7,6 +7,7 @@ use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, R
 use kdiff4_protocol::{Document, LineCharRuns};
 
 use crate::char_diff::{self, CharDiffLook, CharStyle};
+use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
@@ -29,6 +30,8 @@ const TEXT_GAP: f32 = 4.0;
 const CONFLICT_MARKER: &str = "<Merge Conflict>";
 const REGION_BORDER_WIDTH: f32 = 1.0;
 const CHAR_DIFF_BORDER_WIDTH: f32 = 1.0;
+/// Whitespace markers are drawn in the weak text color at this opacity, so they stay behind the text.
+const WHITESPACE_OPACITY: f32 = 0.6;
 
 
 /// What a pane shows left of its text, after the line numbers.
@@ -56,6 +59,7 @@ pub struct ViewStyle<'a> {
     pub region_gap: f32,
     pub region_corner_radius: u8,
     pub char_diff: CharDiffLook,
+    pub whitespace: WhitespaceConfig,
 }
 
 
@@ -65,6 +69,44 @@ pub struct CharRuns<'a> {
     pub document: Document,
     pub lines: &'a LineCharRuns,
     pub sources: usize,
+}
+
+
+/// A whitespace character the panes can mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whitespace {
+    Space,
+    Tab,
+    LineFeed,
+    CarriageReturn,
+    /// Non-breaking and other Unicode spaces.
+    Other,
+}
+
+
+impl Whitespace {
+    pub fn of(character: char) -> Option<Whitespace> {
+        match character {
+            ' ' => Some(Whitespace::Space),
+            '\t' => Some(Whitespace::Tab),
+            '\n' => Some(Whitespace::LineFeed),
+            '\r' => Some(Whitespace::CarriageReturn),
+            other if other.is_whitespace() => Some(Whitespace::Other),
+            _ => None,
+        }
+    }
+
+
+    pub fn is_shown(&self, config: &WhitespaceConfig) -> bool {
+        config.render
+            && match self {
+                Whitespace::Space => config.spaces,
+                Whitespace::Tab => config.tabs,
+                Whitespace::LineFeed => config.line_feeds,
+                Whitespace::CarriageReturn => config.carriage_returns,
+                Whitespace::Other => config.other,
+            }
+    }
 }
 
 
@@ -144,7 +186,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
     let viewport_height = ui.available_height();
     let page_rows = ((viewport_height / row_height).floor() as usize).max(1);
     let caret = caret.map(|caret| Caret { cursor: editing::clamp_cursor(lines, caret.cursor), void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())) });
-    let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.text).size().x;
+    let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.pane_text).size().x;
     let margin = margin_widths(style, lines.count(), char_width, row_height);
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
@@ -177,7 +219,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     .map(|(line, runs)| char_diff::segments(runs.document.clone(), runs.lines.line(line), runs.sources.clone()))
                     .unwrap_or_default();
                 let galley = pane_row.line.map(|line| layout_styled(ui, lines.line(line), &segments, &font_id, palette, &style.char_diff));
-                let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x);
+                let terminator = pane_row.line.map(|line| shown_terminator(lines, line, &style.whitespace)).unwrap_or_default();
+                let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x) + terminator.len() as f32 * char_width;
                 let width = (margin.total() + text_width + CARET_WIDTH * 2.0).max(ui.available_width());
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
                 let text_rect = Rect::from_min_max(pos2(rect.left() + margin.total(), rect.top()), pos2(rect.right().max(viewport.right()), rect.bottom()));
@@ -214,7 +257,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     .filter(|caret| caret.void_row.is_none() && caret.cursor.head.line == line)
                     .map(|caret| text_origin.x + galley.pos_from_cursor(CCursor::new(caret.cursor.head.column)).min.x);
                 paint_char_borders(&text_painter, &segments, &galley, text_origin.x, rect, &style.char_diff);
-                text_painter.galley(text_origin, galley, palette.text);
+                paint_whitespace(&text_painter, lines.line(line), &terminator, &galley, text_origin.x, rect, char_width, style);
+                text_painter.galley(text_origin, galley, palette.pane_text);
                 if let Some(x) = caret_x {
                     paint_caret(&text_painter, x, rect, palette);
                 }
@@ -398,14 +442,71 @@ fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
 
 
 fn layout(ui: &Ui, lines: Lines<'_>, row: usize, font_id: &FontId, palette: &Palette) -> std::sync::Arc<Galley> {
-    ui.painter().layout_no_wrap(lines.line(row).to_string(), font_id.clone(), palette.text)
+    ui.painter().layout_no_wrap(lines.line(row).to_string(), font_id.clone(), palette.pane_text)
+}
+
+
+/// The characters ending `line` that the whitespace settings mark: none, a line feed, a carriage return, or both.
+pub fn shown_terminator(lines: Lines<'_>, line: usize, config: &WhitespaceConfig) -> Vec<Whitespace> {
+    lines
+        .terminator(line)
+        .chars()
+        .filter_map(Whitespace::of)
+        .filter(|whitespace| whitespace.is_shown(config))
+        .collect()
+}
+
+
+/// Marks the shown whitespace inside `text`, laid out as `galley` from `left`, and then `terminator` in cells of `char_width` after the text.
+fn paint_whitespace(painter: &Painter, text: &str, terminator: &[Whitespace], galley: &Galley, left: f32, rect: Rect, char_width: f32, style: &ViewStyle<'_>) {
+    if !style.whitespace.render {
+        return;
+    }
+    let color = style.palette.weak_text.gamma_multiply(WHITESPACE_OPACITY);
+    let x_of = |column: usize| left + galley.pos_from_cursor(CCursor::new(column)).min.x;
+    for (column, character) in text.chars().enumerate() {
+        let whitespace = match Whitespace::of(character) {
+            Some(whitespace) if whitespace.is_shown(&style.whitespace) => whitespace,
+            _ => continue,
+        };
+        let cell = Rect::from_min_max(pos2(x_of(column), rect.top()), pos2(x_of(column + 1), rect.bottom()));
+        paint_whitespace_mark(painter, whitespace, cell, color);
+    }
+    let end = left + galley.size().x;
+    for (index, whitespace) in terminator.iter().enumerate() {
+        let cell_left = end + index as f32 * char_width;
+        let cell = Rect::from_min_max(pos2(cell_left, rect.top()), pos2(cell_left + char_width, rect.bottom()));
+        paint_whitespace_mark(painter, whitespace.clone(), cell, color);
+    }
+}
+
+
+/// Drawn as shapes, not glyphs, so every font shows them: a dot for a space, arrows for tabs and line ends, a ring for other spaces.
+fn paint_whitespace_mark(painter: &Painter, whitespace: Whitespace, cell: Rect, color: Color32) {
+    let stroke = Stroke::new(1.0, color);
+    let center = cell.center();
+    let size = cell.width().min(cell.height());
+    match whitespace {
+        Whitespace::Space => {
+            painter.circle_filled(center, (size * 0.1).max(1.0), color);
+        }
+        Whitespace::Other => {
+            painter.circle_stroke(center, (size * 0.2).max(1.5), stroke);
+        }
+        Whitespace::Tab => {
+            let inset = (cell.width() * 0.15).min(size * 0.3);
+            painter.arrow(pos2(cell.left() + inset, center.y), vec2((cell.width() - inset * 2.0).max(1.0), 0.0), stroke);
+        }
+        Whitespace::LineFeed => painter.arrow(pos2(center.x, center.y - size * 0.35), vec2(0.0, size * 0.7), stroke),
+        Whitespace::CarriageReturn => painter.arrow(pos2(center.x + size * 0.35, center.y), vec2(-size * 0.7, 0.0), stroke),
+    }
 }
 
 
 /// Lays out `text` with the colors of its char-diff `segments`, given in columns.
 fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette, look: &CharDiffLook) -> std::sync::Arc<Galley> {
     let mut job = LayoutJob::default();
-    for (bytes, color) in colored_byte_ranges(text, segments, palette.text, look) {
+    for (bytes, color) in colored_byte_ranges(text, segments, palette.pane_text, look) {
         job.append(&text[bytes], 0.0, TextFormat::simple(font_id.clone(), color));
     }
     ui.painter().layout_job(job)
@@ -655,7 +756,7 @@ mod tests {
 
 
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
     }
 
 
@@ -717,5 +818,47 @@ mod tests {
         let cursor = Cursor::at(Position { line: 3, column: 0 });
         assert_eq!(caret_row(rows, Caret { cursor, void_row: None }), 3);
         assert_eq!(caret_row(rows, Caret { cursor, void_row: Some(1) }), 1);
+    }
+
+
+    #[test]
+    fn whitespace_characters_are_classified() {
+        assert_eq!(Whitespace::of(' '), Some(Whitespace::Space));
+        assert_eq!(Whitespace::of('\t'), Some(Whitespace::Tab));
+        assert_eq!(Whitespace::of('\n'), Some(Whitespace::LineFeed));
+        assert_eq!(Whitespace::of('\r'), Some(Whitespace::CarriageReturn));
+        assert_eq!(Whitespace::of('\u{a0}'), Some(Whitespace::Other));
+        assert_eq!(Whitespace::of('\u{3000}'), Some(Whitespace::Other));
+        assert_eq!(Whitespace::of('x'), None);
+    }
+
+
+    #[test]
+    fn each_kind_follows_its_toggle_and_the_master_switch() {
+        let all = WhitespaceConfig::default();
+        let kinds = [Whitespace::Space, Whitespace::Tab, Whitespace::LineFeed, Whitespace::CarriageReturn, Whitespace::Other];
+        assert!(kinds.iter().all(|kind| kind.is_shown(&all)));
+        let off = WhitespaceConfig { render: false, ..all.clone() };
+        assert!(kinds.iter().all(|kind| !kind.is_shown(&off)));
+        let no_tabs = WhitespaceConfig { tabs: false, ..all.clone() };
+        assert!(!Whitespace::Tab.is_shown(&no_tabs));
+        assert!(Whitespace::Space.is_shown(&no_tabs));
+    }
+
+
+    #[test]
+    fn terminators_are_marked_per_line() {
+        let text = "a\r\nb\nc\rd";
+        let ranges = [0..1, 3..4, 5..6, 7..8];
+        let lines = Lines { text, ranges: &ranges };
+        let all = WhitespaceConfig::default();
+        assert_eq!(shown_terminator(lines, 0, &all), [Whitespace::CarriageReturn, Whitespace::LineFeed]);
+        assert_eq!(shown_terminator(lines, 1, &all), [Whitespace::LineFeed]);
+        assert_eq!(shown_terminator(lines, 2, &all), [Whitespace::CarriageReturn]);
+        assert_eq!(shown_terminator(lines, 3, &all), []);
+        let no_line_feeds = WhitespaceConfig { line_feeds: false, ..all.clone() };
+        assert_eq!(shown_terminator(lines, 0, &no_line_feeds), [Whitespace::CarriageReturn]);
+        let off = WhitespaceConfig { render: false, ..all };
+        assert_eq!(shown_terminator(lines, 0, &off), []);
     }
 }
