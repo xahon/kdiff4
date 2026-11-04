@@ -19,6 +19,11 @@ pub const MAX_REGION_GAP: u8 = 8;
 pub const DEFAULT_REGION_GAP: u8 = 3;
 pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
 pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
+pub const DEFAULT_CHAR_DIFF_CORNER_RADIUS: u8 = 2;
+/// Char-diff text colors: dark enough to keep 4.5:1 contrast on every light-theme background they are drawn on.
+pub const DEFAULT_CHAR_DIFF_RED: [u8; 3] = [0xB0, 0x00, 0x00];
+pub const DEFAULT_CHAR_DIFF_BLUE: [u8; 3] = [0x00, 0x3C, 0xB4];
+pub const DEFAULT_CHAR_DIFF_GREEN: [u8; 3] = [0x00, 0x66, 0x00];
 
 
 #[derive(Debug, Error)]
@@ -77,12 +82,18 @@ pub struct ViewConfig {
     pub region_gap: u8,
     /// Rounding of the region boxes, in pixels.
     pub region_corner_radius: u8,
+    /// Rounding of the borders around char-diff runs, in pixels.
+    pub char_diff_corner_radius: u8,
+    /// RGB of char-diff text and borders: changes made on one side, changes made alike in B and C, and text kept from A.
+    pub char_diff_red: [u8; 3],
+    pub char_diff_blue: [u8; 3],
+    pub char_diff_green: [u8; 3],
 }
 
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN }
     }
 }
 
@@ -92,6 +103,7 @@ impl ViewConfig {
     pub fn sanitized(mut self) -> ViewConfig {
         self.font_size = if self.font_size.is_finite() { self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) } else { DEFAULT_FONT_SIZE };
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
+        self.char_diff_corner_radius = self.char_diff_corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.region_gap = self.region_gap.min(MAX_REGION_GAP);
         self.region_corner_radius = self.region_corner_radius.min(MAX_REGION_CORNER_RADIUS);
@@ -188,7 +200,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4 };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, jump_context_lines: 7, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1] };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -220,11 +232,12 @@ mod tests {
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nregion_gap = 50\nregion_corner_radius = 50\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nregion_gap = 50\nregion_corner_radius = 50\nchar_diff_corner_radius = 99\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
         assert_eq!((view.region_gap, view.region_corner_radius), (MAX_REGION_GAP, MAX_REGION_CORNER_RADIUS));
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
+        assert_eq!(view.char_diff_corner_radius, MAX_CORNER_RADIUS);
         assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!(view.font_size, MAX_FONT_SIZE);
         let tiny = ViewConfig { font_size: 1.0, ..ViewConfig::default() }.sanitized();

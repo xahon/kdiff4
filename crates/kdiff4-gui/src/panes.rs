@@ -3,10 +3,11 @@ use std::path::Path;
 use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
 use kdiff4_protocol::Document;
 
+use crate::char_diff::CharDiffLook;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::rows::Rows;
-use crate::text_view::{self, Caret, MarginKind, PointerAction, ViewStyle, Viewport};
+use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewStyle, Viewport};
 use crate::theme::{self, Palette};
 
 
@@ -109,13 +110,14 @@ pub struct PaneOptions {
     pub jump_context_rows: usize,
     pub region_gap: f32,
     pub region_corner_radius: u8,
+    pub char_diff: CharDiffLook,
 }
 
 
 /// Source panes side by side; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius };
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, jump_context_rows: options.jump_context_rows, region_gap: options.region_gap, region_corner_radius: options.region_corner_radius, char_diff: options.char_diff };
     let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
@@ -191,7 +193,8 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines { text: &text.text, ranges: &text.lines };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
-            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, Some(shared.clone()), None, state, actions));
+            let char_runs = mirror.char_diffs(text.document.clone()).map(|runs| CharRuns { document: text.document.clone(), lines: runs, sources: mirror.documents().len() });
+            offsets.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, Some(shared.clone()), None, state, actions));
         }
     });
 }
@@ -214,7 +217,7 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
         let offset = aligned.then(|| state.source_offset.clone());
         let rows = Rows::Mapped(mirror.output_rows());
         let reveal_row = state.reveal_region.filter(|_| !aligned).and_then(|region| rows.region_start(region));
-        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, offset, reveal_row, state, actions);
+        let after = pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, offset, reveal_row, state, actions);
         if aligned {
             offsets.push(after);
         }
@@ -223,7 +226,7 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
 
 
 /// `reveal_row` is scrolled into view if it is out of view. Returns the pane's vertical scroll offset after this frame.
-fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, offset: Option<f32>, reveal_row: Option<usize>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
+fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, offset: Option<f32>, reveal_row: Option<usize>, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> f32 {
     let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
@@ -233,7 +236,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
                     let jump_row = state.jump.and_then(|region| rows.region_start(region));
-                    let response = text_view::show(ui, document.letter(), lines, rows, caret, state.reveal_caret && caret.is_some(), jump_row, reveal_row, offset, style);
+                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), jump_row, reveal_row, offset, style);
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }

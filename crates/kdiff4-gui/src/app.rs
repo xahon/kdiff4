@@ -5,6 +5,7 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use kdiff4_protocol::{Change, Client, Command, Document, Event, HostMessage, Navigation, RequestId, Response};
 
 use crate::Startup;
+use crate::char_diff::CharDiffLook;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::fonts::{self, FontScan};
@@ -903,7 +904,9 @@ impl KdiffApp {
     fn pane_options(&self) -> PaneOptions {
         let view = self.view();
         let [r, g, b, a] = view.current_region_color;
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius }
+        let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
+        let char_diff = CharDiffLook { red: rgb(view.char_diff_red), blue: rgb(view.char_diff_blue), green: rgb(view.char_diff_green), corner_radius: view.char_diff_corner_radius.clone() };
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, region_gap: view.region_gap as f32, region_corner_radius: view.region_corner_radius, char_diff }
     }
 
 

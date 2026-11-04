@@ -1,8 +1,12 @@
 use std::ops::Range;
 
 use egui::epaint::text::cursor::CCursor;
+use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
 
+use kdiff4_protocol::{Document, LineCharRuns};
+
+use crate::char_diff::{self, CharDiffLook, CharStyle};
 use crate::editing::{self, Cursor, Lines, Position};
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
@@ -24,6 +28,7 @@ const ACTIVE_GUTTER_STROKE: f32 = 2.0;
 const TEXT_GAP: f32 = 4.0;
 const CONFLICT_MARKER: &str = "<Merge Conflict>";
 const REGION_BORDER_WIDTH: f32 = 1.0;
+const CHAR_DIFF_BORDER_WIDTH: f32 = 1.0;
 
 
 /// What a pane shows left of its text, after the line numbers.
@@ -50,6 +55,16 @@ pub struct ViewStyle<'a> {
     /// Space between the boxes of adjacent regions, in pixels.
     pub region_gap: f32,
     pub region_corner_radius: u8,
+    pub char_diff: CharDiffLook,
+}
+
+
+/// The character-level diff of a source pane's lines; `sources` is how many source documents the rows have.
+#[derive(Debug, Clone, Copy)]
+pub struct CharRuns<'a> {
+    pub document: Document,
+    pub lines: &'a LineCharRuns,
+    pub sources: usize,
 }
 
 
@@ -121,8 +136,8 @@ impl Margin {
 }
 
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows; `reveal_row` scrolls that row into view if it is out of view. `offset` forces the vertical scroll offset, so several views can scroll together.
-pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, reveal_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `jump_row` scrolls that row to the top, below the style's context rows; `reveal_row` scrolls that row into view if it is out of view. `offset` forces the vertical scroll offset, so several views can scroll together.
+pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, caret: Option<Caret>, reveal_caret: bool, jump_row: Option<usize>, reveal_row: Option<usize>, offset: Option<f32>, style: &ViewStyle<'_>) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING;
@@ -157,7 +172,11 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
             let mut previous_region = None;
             for row in visible {
                 let pane_row = rows.row(row).unwrap_or_default();
-                let galley = pane_row.line.map(|line| layout(ui, lines, line, &font_id, palette));
+                let segments = pane_row.line
+                    .zip(char_runs)
+                    .map(|(line, runs)| char_diff::segments(runs.document.clone(), runs.lines.line(line), runs.sources.clone()))
+                    .unwrap_or_default();
+                let galley = pane_row.line.map(|line| layout_styled(ui, lines.line(line), &segments, &font_id, palette, &style.char_diff));
                 let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x);
                 let width = (margin.total() + text_width + CARET_WIDTH * 2.0).max(ui.available_width());
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
@@ -194,6 +213,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, caret:
                 let caret_x = caret
                     .filter(|caret| caret.void_row.is_none() && caret.cursor.head.line == line)
                     .map(|caret| text_origin.x + galley.pos_from_cursor(CCursor::new(caret.cursor.head.column)).min.x);
+                paint_char_borders(&text_painter, &segments, &galley, text_origin.x, rect, &style.char_diff);
                 text_painter.galley(text_origin, galley, palette.text);
                 if let Some(x) = caret_x {
                     paint_caret(&text_painter, x, rect, palette);
@@ -382,6 +402,61 @@ fn layout(ui: &Ui, lines: Lines<'_>, row: usize, font_id: &FontId, palette: &Pal
 }
 
 
+/// Lays out `text` with the colors of its char-diff `segments`, given in columns.
+fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette, look: &CharDiffLook) -> std::sync::Arc<Galley> {
+    let mut job = LayoutJob::default();
+    for (bytes, color) in colored_byte_ranges(text, segments, palette.text, look) {
+        job.append(&text[bytes], 0.0, TextFormat::simple(font_id.clone(), color));
+    }
+    ui.painter().layout_job(job)
+}
+
+
+/// `text` cut into byte ranges at the edges of `segments`, each with its color: the segment's, or `plain` between segments. Columns past the text's end are ignored.
+fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain: Color32, look: &CharDiffLook) -> Vec<(Range<usize>, Color32)> {
+    let offsets: Vec<usize> = text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let byte = |column: usize| offsets.get(column).cloned().unwrap_or(text.len());
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    for (columns, char_style) in segments {
+        let start = byte(columns.start.clone()).max(at);
+        let end = byte(columns.end.clone()).max(start);
+        if start > at {
+            ranges.push((at..start, plain.clone()));
+        }
+        if end > start {
+            ranges.push((start..end, look.color(char_style.color.clone())));
+        }
+        at = end;
+    }
+    if at < text.len() || ranges.is_empty() {
+        ranges.push((at..text.len(), plain));
+    }
+    ranges
+}
+
+
+/// Draws a border around each char-diff segment that has one, in the row `rect`; the text starts at `text_left`.
+fn paint_char_borders(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
+    for (columns, char_style) in segments {
+        if !char_style.border || columns.is_empty() {
+            continue;
+        }
+        let left = text_left + galley.pos_from_cursor(CCursor::new(columns.start.clone())).min.x;
+        let right = text_left + galley.pos_from_cursor(CCursor::new(columns.end.clone())).min.x;
+        if right <= left {
+            continue;
+        }
+        let border = Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom()));
+        painter.rect_stroke(border, look.corner_radius.clone(), Stroke::new(CHAR_DIFF_BORDER_WIDTH, look.color(char_style.color.clone())), StrokeKind::Inside);
+    }
+}
+
+
 /// The row the caret is drawn on.
 pub fn caret_row(rows: Rows<'_>, caret: Caret) -> usize {
     caret.void_row.unwrap_or_else(|| rows.row_of_line(caret.cursor.head.line))
@@ -459,8 +534,44 @@ pub fn jump_offset(row: usize, context: usize, row_height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::char_diff::CharColor;
     use crate::rows::RowMap;
     use crate::theme::LIGHT;
+
+
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN, corner_radius: 0 };
+    const PLAIN: Color32 = Color32::BLACK;
+
+
+    fn styled(color: CharColor) -> CharStyle {
+        CharStyle { color, border: false }
+    }
+
+
+    #[test]
+    fn unmarked_text_is_one_plain_range() {
+        assert_eq!(colored_byte_ranges("abc", &[], PLAIN, &LOOK), [(0..3, PLAIN)]);
+        assert_eq!(colored_byte_ranges("", &[], PLAIN, &LOOK), [(0..0, PLAIN)]);
+    }
+
+
+    #[test]
+    fn segments_color_their_bytes() {
+        let segments = [(1..2, styled(CharColor::Red)), (2..4, styled(CharColor::Blue))];
+        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, Color32::BLUE), (4..5, PLAIN)]);
+    }
+
+
+    #[test]
+    fn segment_columns_are_characters() {
+        assert_eq!(colored_byte_ranges("äöü", &[(1..2, styled(CharColor::Green))], PLAIN, &LOOK), [(0..2, PLAIN), (2..4, Color32::GREEN), (4..6, PLAIN)]);
+    }
+
+
+    #[test]
+    fn segments_past_the_end_are_cut_off() {
+        assert_eq!(colored_byte_ranges("ab", &[(1..9, styled(CharColor::Red)), (9..12, styled(CharColor::Blue))], PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED)]);
+    }
 
 
     #[test]
@@ -544,7 +655,7 @@ mod tests {
 
 
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0 }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, jump_context_rows: 0, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK }
     }
 
 

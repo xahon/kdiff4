@@ -237,6 +237,21 @@ mod tests {
 
 
     #[test]
+    fn default_char_diff_colors_are_readable_in_the_light_theme() {
+        let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
+        let colors = [crate::config::DEFAULT_CHAR_DIFF_RED, crate::config::DEFAULT_CHAR_DIFF_BLUE, crate::config::DEFAULT_CHAR_DIFF_GREEN];
+        let [r, g, b, a] = crate::config::DEFAULT_CURRENT_REGION_COLOR;
+        let blend = |over: u8, under: u8| ((over as f32 * a as f32 + under as f32 * (255 - a) as f32) / 255.0).round() as u8;
+        let highlight = Color32::from_rgb(blend(r, LIGHT.pane_bg.r()), blend(g, LIGHT.pane_bg.g()), blend(b, LIGHT.pane_bg.b()));
+        for color in colors.map(rgb) {
+            for background in [LIGHT.pane_bg, LIGHT.selection, highlight] {
+                assert!(contrast_ratio(color, background) >= 4.5, "{color:?} on {background:?}");
+            }
+        }
+    }
+
+
+    #[test]
     fn gutters_and_conflict_markers_are_readable() {
         for palette in [LIGHT, DARK] {
             assert!(contrast_ratio(palette.conflict_marker, palette.pane_bg) >= 4.5, "{palette:?}");

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, MergeStatus, Progress, Region, RegionStatus, SourceLines, run_comparison};
-use kdiff4_protocol::{Change, Choice, Document, DocumentText, EolStyle, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
+use kdiff4_protocol::{Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
 
 use crate::error::CoreError;
 use crate::merge::{self, Merge, MergeStep, RegionState};
@@ -57,6 +57,8 @@ pub struct Session {
     engine: EngineCapabilities,
     /// The region navigation is at. Changes of D make their region current.
     current: Option<usize>,
+    /// Per source document, the character-level diff of its lines; recomputed with the comparison.
+    char_diffs: Vec<LineCharRuns>,
 }
 
 
@@ -80,13 +82,14 @@ impl Session {
         }
         let options = ComparisonOptions::default();
         let comparison = compare(&sources, engine, &options)?;
+        let char_diffs = char_diffs(&sources, &comparison, engine, &options);
         let (merge, output) = if files.is_merge() {
             let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&sources));
             (merge, Some(Output { path: files.output.clone(), text, history: History::new_saved() }))
         } else {
             (Merge::without_output(comparison.regions), None)
         };
-        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None })
+        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None, char_diffs })
     }
 
 
@@ -109,7 +112,7 @@ impl Session {
             .as_ref()
             .map(|output| OutputDocument { path: output.path.clone(), text: output.text.clone(), modified: output.history.is_modified() });
         let comparison = Comparison { regions: self.merge.regions().to_vec() };
-        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone() }
+        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone(), char_diffs: self.char_diffs.clone() }
     }
 
 
@@ -191,6 +194,7 @@ impl Session {
     fn rebuild(&mut self, comparison: Comparison, engine: &dyn ComparisonEngine) {
         self.engine = engine.capabilities();
         self.current = None;
+        self.char_diffs = char_diffs(&self.sources, &comparison, engine, &self.options);
         match self.output.as_mut() {
             Some(output) => {
                 let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&self.sources));
@@ -449,6 +453,53 @@ fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &Comparis
 }
 
 
+/// The character-level diff of every row whose lines differ, keyed by source line. An engine without character-level diffs, or one that fails, leaves every line unmarked.
+fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn ComparisonEngine, options: &ComparisonOptions) -> Vec<LineCharRuns> {
+    let lines = source_lines(sources);
+    let unmarked = || -> Vec<LineCharRuns> {
+        lines
+            .iter()
+            .map(|lines| LineCharRuns { lines: vec![Vec::new(); lines.len()] })
+            .collect()
+    };
+    let mut diffs = unmarked();
+    if !engine.capabilities().char_diff {
+        return diffs;
+    }
+    for row in comparison.regions.iter().flat_map(|region| region.rows.iter()) {
+        let texts: Vec<Option<&str>> = row.lines
+            .iter()
+            .enumerate()
+            .map(|(document, line)| line.and_then(|line| lines.get(document)?.get(line).copied()))
+            .collect();
+        let all_equal = texts.iter().all(|text| text.is_some() && *text == texts[0]);
+        if all_equal {
+            continue;
+        }
+        let diff = match engine.char_diff(&texts, options) {
+            Ok(diff) => diff,
+            Err(error) => {
+                log::warn!("char diff: {error}; lines are left unmarked");
+                return unmarked();
+            }
+        };
+        if diff.runs.len() != texts.len() {
+            log::warn!("char diff: {} lines for a row of {}; lines are left unmarked", diff.runs.len(), texts.len());
+            return unmarked();
+        }
+        for (document, runs) in diff.runs.into_iter().enumerate() {
+            let slot = row.lines[document]
+                .clone()
+                .and_then(|line| diffs.get_mut(document)?.lines.get_mut(line));
+            if let Some(slot) = slot {
+                *slot = runs;
+            }
+        }
+    }
+    diffs
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -585,6 +636,66 @@ mod tests {
         assert_eq!(statuses(&snapshot.comparison), [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB)]);
         assert_eq!(snapshot.comparison.regions[1].rows, [Row { lines: vec![Some(1), Some(1), Some(1)] }]);
         assert_eq!(snapshot.engine.id, BUILTIN_ENGINE_ID);
+    }
+
+
+    #[test]
+    fn snapshot_has_char_diffs_of_rows_that_differ() {
+        let dir = temp_dir("char-diffs");
+        let session = merge_of(&dir, &["same", "abc"], &["same", "xbc"], &["same", "xbz"]);
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.char_diffs.len(), 3);
+        let same_in = |document: usize, line: usize| -> Vec<Vec<bool>> {
+            snapshot.char_diffs[document]
+                .line(line)
+                .iter()
+                .map(|run| run.same_in.clone())
+                .collect()
+        };
+        assert!(snapshot.char_diffs.iter().all(|diff| diff.line(0).is_empty()));
+        assert_eq!(same_in(1, 1), [vec![false, true, true], vec![true, true, true], vec![true, true, false]]);
+        assert_eq!(snapshot.char_diffs[2].line(1)[2].columns, 2..3);
+    }
+
+
+    #[test]
+    fn char_diffs_survive_edits_of_d_and_follow_new_comparisons() {
+        let dir = temp_dir("char-diffs-edits");
+        let mut session = merge_of(&dir, &["abc"], &["abd"], &["abc"]);
+        let before = session.snapshot().char_diffs;
+        assert!(!before[1].line(0).is_empty());
+        let change = session.edit_output(&edit(&session, 0..0, "typed"), &BuiltinEngine).unwrap();
+        assert!(matches!(change, Change::OutputEdited { .. }));
+        assert_eq!(session.snapshot().char_diffs, before);
+        let b = write(&dir, "b2.txt", "abc\n");
+        session.load_source(Document::B, &b, &BuiltinEngine).unwrap();
+        assert!(session.snapshot().char_diffs.iter().all(|diff| diff.line(0).is_empty()));
+    }
+
+
+    #[test]
+    fn engines_without_char_diffs_leave_lines_unmarked() {
+        let dir = temp_dir("char-diffs-unsupported");
+        let a = write(&dir, "a.txt", "abc\n");
+        let b = write(&dir, "b.txt", "abd\n");
+        struct NoCharDiffs;
+        impl ComparisonEngine for NoCharDiffs {
+            fn capabilities(&self) -> EngineCapabilities {
+                EngineCapabilities { char_diff: false, ..BuiltinEngine.capabilities() }
+            }
+            fn compare(&self, input: &CompareInput<'_>, job: &Job<'_>) -> Result<Comparison, EngineError> {
+                BuiltinEngine.compare(input, job)
+            }
+            fn classify(&self, hunks: &[SourceLines<'_>]) -> Result<RegionStatus, EngineError> {
+                BuiltinEngine.classify(hunks)
+            }
+            fn char_diff(&self, _row: &[Option<&str>], _options: &ComparisonOptions) -> Result<CharDiff, EngineError> {
+                panic!("char_diff called on an engine without character-level diffs")
+            }
+        }
+        let snapshot = Session::open(&files(a, b, None, None), &NoCharDiffs).unwrap().snapshot();
+        assert_eq!(snapshot.char_diffs.len(), 2);
+        assert!(snapshot.char_diffs.iter().all(|diff| diff.line(0).is_empty()));
     }
 
 

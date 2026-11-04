@@ -161,6 +161,18 @@ impl SettingsDialog {
                 });
             });
             ui.end_row();
+
+            ui.label("Character diff:");
+            ui.horizontal(|ui| {
+                ui.color_edit_button_srgb(&mut self.draft.char_diff_red).on_hover_text("Changes made in only B or C, and text of A that B or C removed.");
+                ui.color_edit_button_srgb(&mut self.draft.char_diff_blue).on_hover_text("Changes made alike in B and C.");
+                ui.color_edit_button_srgb(&mut self.draft.char_diff_green).on_hover_text("Text of B and C kept from A, in lines that differ.");
+            });
+            ui.end_row();
+
+            ui.label("Character diff borders:");
+            ui.add(DragValue::new(&mut self.draft.char_diff_corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px corner radius"));
+            ui.end_row();
         });
         ui.add_space(8.0);
         show_preview(ui);

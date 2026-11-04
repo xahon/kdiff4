@@ -1,4 +1,5 @@
 mod app;
+mod char_diff;
 mod config;
 mod editing;
 mod fonts;

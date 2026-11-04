@@ -130,10 +130,18 @@ pub struct Comparison {
 }
 
 
-/// Changed column ranges of each line of one row, per source document; empty where the row has no line.
+/// Consecutive characters of one line, as a column range, and per source document of its row whether that document's line has the same characters at the same place. A line's own document is always `true`, a document with a void in the row always `false`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CharRun {
+    pub columns: Range<usize>,
+    pub same_in: Vec<bool>,
+}
+
+
+/// Per source document of one row, the runs that cover its line from start to end; empty where the row has no line or the line is empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharDiff {
-    pub changed: Vec<Vec<Range<usize>>>,
+    pub runs: Vec<Vec<CharRun>>,
 }
 
 
@@ -235,7 +243,7 @@ pub trait ComparisonEngine: Send + Sync {
     fn compare(&self, input: &CompareInput<'_>, job: &Job<'_>) -> Result<Comparison, EngineError>;
     /// Status of a region with these hunks, e.g. one part of a split region.
     fn classify(&self, hunks: &[SourceLines<'_>]) -> Result<RegionStatus, EngineError>;
-    /// Character-level diff of the lines sharing one row.
+    /// Character-level diff of the lines sharing one row, in source document order; `None` is a void.
     fn char_diff(&self, row: &[Option<&str>], options: &ComparisonOptions) -> Result<CharDiff, EngineError>;
 
     fn compare_binary(&self, sources: &[&[u8]], job: &Job<'_>) -> Result<BinaryComparison, EngineError> {

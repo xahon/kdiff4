@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::engine::{Comparison, ComparisonOptions, EngineCapabilities, Region};
+use crate::engine::{CharRun, Comparison, ComparisonOptions, EngineCapabilities, Region};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -197,6 +197,26 @@ pub struct Snapshot {
     pub options: ComparisonOptions,
     /// The region navigation is at, if any.
     pub current_region: Option<usize>,
+    /// Per source document, in `documents` order, the character-level diff of its lines. Rows depend only on the comparison, so D's edits never change them.
+    pub char_diffs: Vec<LineCharRuns>,
+}
+
+
+/// Per line of one source document, the char runs of the line in its row; empty for a line whose row has no differences.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineCharRuns {
+    pub lines: Vec<Vec<CharRun>>,
+}
+
+
+impl LineCharRuns {
+    /// Empty for a line out of range.
+    pub fn line(&self, line: usize) -> &[CharRun] {
+        self.lines
+            .get(line)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 

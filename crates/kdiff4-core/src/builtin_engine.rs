@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use imara_diff::{Algorithm, Diff, Hunk, InternedInput, Interner};
-use kdiff4_protocol::engine::{CharDiff, CompareInput, Comparison, ComparisonEngine, ComparisonOptions, DiffAlgorithm, EngineCapabilities, EngineError, HunkChange, Job, MergeStatus, Region, RegionStatus, Row, SourceLines, Token};
+use kdiff4_protocol::engine::{CharDiff, CharRun, CompareInput, Comparison, ComparisonEngine, ComparisonOptions, DiffAlgorithm, EngineCapabilities, EngineError, HunkChange, Job, MergeStatus, Region, RegionStatus, Row, SourceLines, Token};
 
 
 pub const BUILTIN_ENGINE_ID: &str = "builtin";
@@ -72,30 +72,41 @@ impl ComparisonEngine for BuiltinEngine {
             .iter()
             .map(|line| line.map(|line| line.chars().collect()))
             .collect();
-        let mut changed: Vec<Vec<Range<usize>>> = vec![Vec::new(); lines.len()];
+        let mut same: Vec<Vec<Vec<bool>>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| vec![initial_same_in(&lines, index); line.as_ref().map_or(0, Vec::len)])
+            .collect();
         for left in 0..lines.len() {
             for right in left + 1..lines.len() {
                 let (Some(left_chars), Some(right_chars)) = (&lines[left], &lines[right]) else { continue };
                 if left_chars == right_chars {
                     continue;
                 }
-                if left_chars.len() > limit || right_chars.len() > limit {
-                    changed[left].push(0..left_chars.len());
-                    changed[right].push(0..right_chars.len());
-                    continue;
-                }
-                let codes = |chars: &Vec<char>| chars.iter().map(|&char| char as u32).collect::<Vec<u32>>();
-                for hunk in diff_hunks(Algorithm::Myers, codes(left_chars), codes(right_chars)) {
-                    changed[left].push(range(&hunk.before));
-                    changed[right].push(range(&hunk.after));
+                let changed: Vec<(Range<usize>, Range<usize>)> = if left_chars.len() > limit || right_chars.len() > limit {
+                    vec![(0..left_chars.len(), 0..right_chars.len())]
+                } else {
+                    let codes = |chars: &Vec<char>| chars.iter().map(|&char| char as u32).collect::<Vec<u32>>();
+                    diff_hunks(Algorithm::Myers, codes(left_chars), codes(right_chars))
+                        .iter()
+                        .map(|hunk| (range(&hunk.before), range(&hunk.after)))
+                        .collect()
+                };
+                for (left_columns, right_columns) in changed {
+                    for column in left_columns {
+                        same[left][column][right] = false;
+                    }
+                    for column in right_columns {
+                        same[right][column][left] = false;
+                    }
                 }
             }
         }
-        let changed = changed
+        let runs = same
             .into_iter()
-            .map(coalesced)
+            .map(char_runs)
             .collect();
-        Ok(CharDiff { changed })
+        Ok(CharDiff { runs })
     }
 }
 
@@ -301,18 +312,26 @@ fn without_whitespace(hunk: &SourceLines<'_>) -> String {
 }
 
 
-/// Sorted, with overlapping and touching ranges joined and empty ones dropped.
-fn coalesced(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
-    ranges.retain(|range| !range.is_empty());
-    ranges.sort_by_key(|range| range.start.clone());
-    let mut joined: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        match joined.last_mut() {
-            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
-            _ => joined.push(range),
+/// Per source document of a row, whether it has a line the line at `index` can match: its own line always does, a void never.
+fn initial_same_in(lines: &[Option<Vec<char>>], index: usize) -> Vec<bool> {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(other, line)| other == index || line.is_some())
+        .collect()
+}
+
+
+/// Joins consecutive characters with the same flags into runs.
+fn char_runs(flags: Vec<Vec<bool>>) -> Vec<CharRun> {
+    let mut runs: Vec<CharRun> = Vec::new();
+    for (column, same_in) in flags.into_iter().enumerate() {
+        match runs.last_mut() {
+            Some(run) if run.same_in == same_in => run.columns.end = column + 1,
+            _ => runs.push(CharRun { columns: column..column + 1, same_in }),
         }
     }
-    joined
+    runs
 }
 
 
@@ -554,49 +573,52 @@ mod tests {
     }
 
 
-    fn char_diff(row: &[Option<&str>]) -> Vec<Vec<Range<usize>>> {
-        BuiltinEngine.char_diff(row, &ComparisonOptions::default()).unwrap().changed
+    fn char_diff(row: &[Option<&str>]) -> Vec<Vec<CharRun>> {
+        BuiltinEngine.char_diff(row, &ComparisonOptions::default()).unwrap().runs
+    }
+
+
+    fn run(columns: Range<usize>, same_in: &[bool]) -> CharRun {
+        CharRun { columns, same_in: same_in.to_vec() }
     }
 
 
     #[test]
-    fn char_diff_marks_changed_columns() {
-        assert_eq!(char_diff(&[Some("abc"), Some("abd")]), [vec![2..3], vec![2..3]]);
-        assert_eq!(char_diff(&[Some("abc"), Some("abc")]), [vec![], vec![]]);
-        assert_eq!(char_diff(&[Some("ac"), Some("abc")]), [vec![], vec![1..2]]);
+    fn char_diff_runs_cover_each_line() {
+        assert_eq!(char_diff(&[Some("abc"), Some("abd")]), [vec![run(0..2, &[true, true]), run(2..3, &[true, false])], vec![run(0..2, &[true, true]), run(2..3, &[false, true])]]);
+        assert_eq!(char_diff(&[Some("abc"), Some("abc")]), [vec![run(0..3, &[true, true])], vec![run(0..3, &[true, true])]]);
+        assert_eq!(char_diff(&[Some("ac"), Some("abc")]), [vec![run(0..2, &[true, true])], vec![run(0..1, &[true, true]), run(1..2, &[false, true]), run(2..3, &[true, true])]]);
+        assert_eq!(char_diff(&[Some(""), Some("a")]), [vec![], vec![run(0..1, &[false, true])]]);
     }
 
 
     #[test]
     fn char_diff_counts_characters_not_bytes() {
-        assert_eq!(char_diff(&[Some("äöü"), Some("äxü")]), [vec![1..2], vec![1..2]]);
+        assert_eq!(char_diff(&[Some("äöü"), Some("äxü")])[1], [run(0..1, &[true, true]), run(1..2, &[false, true]), run(2..3, &[true, true])]);
     }
 
 
     #[test]
-    fn char_diff_joins_differences_to_every_other_line() {
-        assert_eq!(char_diff(&[Some("abc"), Some("xbc"), Some("abz")]), [vec![0..1, 2..3], vec![0..1, 2..3], vec![0..1, 2..3]]);
+    fn char_diff_tells_which_documents_share_each_run() {
+        let runs = char_diff(&[Some("abc"), Some("xbc"), Some("xbz")]);
+        assert_eq!(runs[0], [run(0..1, &[true, false, false]), run(1..2, &[true, true, true]), run(2..3, &[true, true, false])]);
+        assert_eq!(runs[1], [run(0..1, &[false, true, true]), run(1..2, &[true, true, true]), run(2..3, &[true, true, false])]);
+        assert_eq!(runs[2], [run(0..1, &[false, true, true]), run(1..2, &[true, true, true]), run(2..3, &[false, false, true])]);
     }
 
 
     #[test]
-    fn char_diff_skips_voids() {
-        assert_eq!(char_diff(&[None, Some("abc"), Some("abd")]), [vec![], vec![2..3], vec![2..3]]);
-        assert_eq!(char_diff(&[Some("abc"), None]), [vec![], vec![]]);
+    fn char_diff_never_matches_voids() {
+        assert_eq!(char_diff(&[None, Some("ab"), Some("ab")]), [vec![], vec![run(0..2, &[false, true, true])], vec![run(0..2, &[false, true, true])]]);
+        assert_eq!(char_diff(&[Some("ab"), None]), [vec![run(0..2, &[true, false])], vec![]]);
     }
 
 
     #[test]
     fn char_diff_marks_long_lines_as_a_whole() {
         let options = ComparisonOptions { char_diff_line_limit: 3, ..ComparisonOptions::default() };
-        let changed = BuiltinEngine.char_diff(&[Some("abcd"), Some("abce")], &options).unwrap().changed;
-        assert_eq!(changed, [vec![0..4], vec![0..4]]);
-    }
-
-
-    #[test]
-    fn coalesced_joins_overlapping_and_touching_ranges() {
-        assert_eq!(coalesced(vec![4..6, 0..2, 1..3, 3..3, 6..7, 9..10]), [0..3, 4..7, 9..10]);
+        let runs = BuiltinEngine.char_diff(&[Some("abcd"), Some("abce")], &options).unwrap().runs;
+        assert_eq!(runs, [vec![run(0..4, &[true, false])], vec![run(0..4, &[false, true])]]);
     }
 
 
