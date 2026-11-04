@@ -15,7 +15,7 @@ use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewSty
 use crate::theme::{self, Palette};
 
 
-const SPLITTER_HEIGHT: f32 = 6.0;
+const SPLITTER_HEIGHT: f32 = 0.0;
 const MIN_MERGE_FRACTION: f32 = 0.1;
 const MAX_MERGE_FRACTION: f32 = 0.9;
 pub const DEFAULT_MERGE_FRACTION: f32 = 0.5;
@@ -177,6 +177,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
             let merge_height = (usable * state.merge_fraction).round();
             ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
             if options.overview_strip {
+                splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
                 ui.allocate_ui(vec2(total.x, strip_height), |ui| actions.extend(overview::show(ui, mirror, state, &source_style)));
             }
             splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
