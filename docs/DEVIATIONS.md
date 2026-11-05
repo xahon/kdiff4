@@ -29,6 +29,7 @@ None yet. The owner decides which kdiff3 bugs get fixed. When you find one while
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
 - Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
 - Void space in the output pane: D can line up with A, B and C, padded with void rows, and scroll with them. kdiff3's merge pane always has just its own lines.
+- Language selector in the status bar (see GUI in `ARCHITECTURE.md`): the language of the documents is detected from their paths and first lines and can be picked from a list, each with its logo. kdiff3 has no notion of a document's language. For now it is a label only; nothing is highlighted.
 
 ### Merge result
 

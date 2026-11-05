@@ -3,6 +3,7 @@ mod char_diff;
 mod config;
 mod editing;
 mod fonts;
+mod language;
 mod mirror;
 mod open_dialog;
 mod overview;

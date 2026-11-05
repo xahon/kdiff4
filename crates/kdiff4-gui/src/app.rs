@@ -9,6 +9,7 @@ use crate::char_diff::CharDiffLook;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::fonts::{self, FontScan};
+use crate::language::{self, Language, LanguageState};
 use crate::mirror::{DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
 use crate::panes::{self, PaneAction, PaneOptions, PaneState};
@@ -100,6 +101,7 @@ pub struct KdiffApp {
     status: Option<Status>,
     engine_stopped: bool,
     mirror: Option<Mirror>,
+    language: LanguageState,
     panes: PaneState,
     pending: HashMap<RequestId, Pending>,
     window_enlarged: bool,
@@ -118,6 +120,7 @@ impl KdiffApp {
     pub fn new(ctx: &egui::Context, client: Client, startup: Startup) -> KdiffApp {
         let repaint_ctx = ctx.clone();
         client.set_waker(Box::new(move || repaint_ctx.request_repaint()));
+        egui_extras::install_image_loaders(ctx);
         let config_path = config::default_config_path();
         let (config, config_writable) = match config_path.as_deref() {
             Some(path) => match config::load(path) {
@@ -142,7 +145,7 @@ impl KdiffApp {
             pending.insert(id, Pending::Open);
         }
         let view = config.view.clone();
-        let mut app = KdiffApp { client, config_path, config, config_writable, form, form_open: true, error: None, status: None, engine_stopped: false, mirror: None, panes: PaneState::default(), pending, window_enlarged: false, settings: None, font_scan: FontScan::default(), applied_view: None, frame_radius: None, title_bar_refreshed: false };
+        let mut app = KdiffApp { client, config_path, config, config_writable, form, form_open: true, error: None, status: None, engine_stopped: false, mirror: None, language: LanguageState::default(), panes: PaneState::default(), pending, window_enlarged: false, settings: None, font_scan: FontScan::default(), applied_view: None, frame_radius: None, title_bar_refreshed: false };
         app.apply_view(ctx, &view);
         app
     }
@@ -313,7 +316,9 @@ impl KdiffApp {
                     self.panes = PaneState { merge_fraction: self.panes.merge_fraction.clone(), ..PaneState::default() };
                     self.status = None;
                 }
-                self.mirror = Some(Mirror::from_snapshot(snapshot, self.view().align_output));
+                let mirror = Mirror::from_snapshot(snapshot, self.view().align_output);
+                self.language.follow(&mirror);
+                self.mirror = Some(mirror);
                 self.panes.void_row = None;
                 self.form_open = false;
                 self.error = None;
@@ -991,16 +996,9 @@ impl KdiffApp {
     }
 
 
-    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip.
-    fn show_status(&self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            let (text, color) = match self.status.as_ref() {
-                Some(status) if status.is_error => (status.text.as_str(), ui.visuals().error_fg_color),
-                Some(status) => (status.text.as_str(), theme::palette_of(ui).weak_text),
-                None => ("Ready", theme::palette_of(ui).weak_text),
-            };
-            ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
-        });
+    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip. The language selector sits at the right end; returns the language picked in it.
+    fn show_status(&self, ui: &mut egui::Ui) -> Option<Language> {
+        status_bar(ui, self.status.as_ref(), self.language.current())
     }
 
 
@@ -1060,7 +1058,9 @@ impl eframe::App for KdiffApp {
                 });
             }
             Some(mirror) => {
-                self.show_status(ui);
+                if let Some(picked) = self.show_status(ui) {
+                    self.language.pick(picked, mirror);
+                }
                 pane_actions = panes::show_session(ui, mirror, &mut self.panes, &pane_options);
                 self.panes.reveal_caret = false;
                 if self.form_open {
@@ -1139,6 +1139,26 @@ fn navigation_noun(to: Navigation) -> &'static str {
         Navigation::PreviousConflict => "previous conflict",
         Navigation::NextConflict => "next conflict",
     }
+}
+
+
+/// The message at the left, cut to what fits beside the language selector at the right.
+fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language) -> Option<Language> {
+    let mut picked = None;
+    egui::Panel::bottom("status_bar").show(ui, |ui| {
+        let (text, color) = match status {
+            Some(status) if status.is_error => (status.text.as_str(), ui.visuals().error_fg_color),
+            Some(status) => (status.text.as_str(), theme::palette_of(ui).weak_text),
+            None => ("Ready", theme::palette_of(ui).weak_text),
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            picked = language::show_selector(ui, language);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+            });
+        });
+    });
+    picked
 }
 
 
@@ -1343,6 +1363,37 @@ mod tests {
         assert_eq!(wide, egui::vec2(60.0 + 8.0, TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + 14.0 + 2.0));
         let narrow = toolbar_button_size(egui::vec2(5.0, 14.0), padding);
         assert_eq!(narrow.x, TOOLBAR_ICON_SIZE + 8.0);
+    }
+
+
+    /// What the status bar drew for a message in a window 500 wide: the selector's height and right edge, and the message's right edge.
+    fn status_bar_layout(text: Option<&str>) -> (f32, f32, f32) {
+        use egui_kittest::kittest::Queryable;
+        let status = text.map(|text| Status { text: text.to_string(), is_error: false });
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(500.0, 200.0))
+            .build_ui(move |ui| {
+                egui_extras::install_image_loaders(ui.ctx());
+                theme::apply_style(ui.ctx(), &config::ViewConfig::default());
+                status_bar(ui, status.as_ref(), &Language::plain_text());
+            });
+        harness.run();
+        let selector = harness.get_by_label("Language of the documents").rect();
+        let message = harness.get_by_label_contains(text.unwrap_or("Ready")).rect();
+        (selector.height(), selector.right(), message.right())
+    }
+
+
+    #[test]
+    fn the_status_bar_keeps_the_selector_at_the_right_and_cuts_long_messages() {
+        let (height, selector_right, short_right) = status_bar_layout(None);
+        assert!(selector_right > 450.0, "the selector sits at the right edge, not at {selector_right}");
+        assert!(short_right < 100.0, "a short message stays at the left");
+        let long = "A very long message that does not fit beside the language selector in a window five hundred pixels wide, so it has to be cut. ".repeat(3);
+        let (long_height, long_selector_right, long_right) = status_bar_layout(Some(&long));
+        assert_eq!(long_height, height, "the bar keeps its height");
+        assert_eq!(long_selector_right, selector_right, "a long message doesn't move the selector");
+        assert!(long_right <= selector_right - 100.0, "the message stops before the selector, not at {long_right}");
     }
 
 
