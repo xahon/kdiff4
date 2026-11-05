@@ -1,7 +1,7 @@
 use egui::{Button, Checkbox, Color32, ComboBox, DragValue, Label, RichText, ScrollArea, Theme, Ui};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
-use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_REGION_CORNER_RADIUS, MAX_REGION_GAP, MAX_SCROLL_STEP_LINES, MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig};
+use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES, MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig};
 use crate::fonts::MonospaceFamily;
 use crate::theme;
 
@@ -128,7 +128,7 @@ impl SettingsDialog {
     /// How the panes draw text and regions.
     fn panes_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
         let theme = active_theme(ui);
-        egui::Grid::new("settings_panes_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        section(ui, "panes_text", "Panes: Text", |ui| {
             ui.label("Font:");
             ui.horizontal(|ui| {
                 self.font_family_combo(ui, families);
@@ -161,7 +161,9 @@ impl SettingsDialog {
                 ui.add_space(4.0);
             });
             ui.end_row();
+        });
 
+        section(ui, "panes_content", "Panes: Content", |ui| {
             ui.label("Show:");
             ui.vertical(|ui| {
                 ui.checkbox(&mut self.draft.show_line_numbers, "Line numbers");
@@ -185,7 +187,9 @@ impl SettingsDialog {
                 });
             });
             ui.end_row();
+        });
 
+        section(ui, "panes_scrolling", "Panes: Navigation and scrolling", |ui| {
             ui.label("Context above jumps:");
             ui.add(DragValue::new(&mut self.draft.jump_context_lines).range(0..=MAX_JUMP_CONTEXT_LINES).speed(0.1).suffix(" lines")).on_hover_text("Lines kept above a difference or conflict that navigation jumps to.");
             ui.end_row();
@@ -204,35 +208,31 @@ impl SettingsDialog {
                 });
             });
             ui.end_row();
+        });
 
-            ui.label("Jumped-to region:");
+        section(ui, "region_boxes", "Region boxes: Borders", |ui| {
+            ui.label("Corner radius:");
+            ui.add(DragValue::new(&mut self.draft.region_corner_radius).range(0..=MAX_REGION_CORNER_RADIUS).speed(0.1).suffix(" px")).on_hover_text("Rounding of the boxes drawn around the regions that differ.");
+            ui.end_row();
 
+            ui.label("Opacity of other regions:");
+            ui.add(DragValue::new(&mut self.draft.other_region_border_percent).range(0..=MAX_OTHER_REGION_BORDER_PERCENT).speed(0.5).suffix(" %")).on_hover_text("Opacity of the borders of all regions except the one navigation is at.");
+            ui.end_row();
+        });
+
+        section(ui, "jumped_to_region", "Jumped-to region: Highlight", |ui| {
+            ui.label("Background:");
             ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color).on_hover_text("The background of the region navigation is at, in every pane, void space included.");
             ui.end_row();
+        });
 
-            ui.label("Region boxes:");
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Gap");
-                    ui.add(DragValue::new(&mut self.draft.region_gap).range(0..=MAX_REGION_GAP).speed(0.1).suffix(" px")).on_hover_text("Space between the boxes of adjacent regions.");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Corner radius");
-                    ui.add(DragValue::new(&mut self.draft.region_corner_radius).range(0..=MAX_REGION_CORNER_RADIUS).speed(0.1).suffix(" px")).on_hover_text("Rounding of the boxes drawn around the regions that differ.");
-                });
-            });
-            ui.end_row();
-
-            ui.label("Character diff:");
+        section(ui, "char_diff_colors", "Character diff: Colors", |ui| {
+            ui.label("Colors:");
             ui.horizontal(|ui| {
                 ui.color_edit_button_srgb(&mut self.draft.char_diff_red).on_hover_text("Changes made in only B or C, and text of A that B or C removed.");
                 ui.color_edit_button_srgb(&mut self.draft.char_diff_blue).on_hover_text("Changes made alike in B and C.");
                 ui.color_edit_button_srgb(&mut self.draft.char_diff_green).on_hover_text("Text of B and C kept from A, in lines that differ.");
             });
-            ui.end_row();
-
-            ui.label("Character diff borders:");
-            ui.add(DragValue::new(&mut self.draft.char_diff_corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px corner radius"));
             ui.end_row();
         });
     }
@@ -241,7 +241,7 @@ impl SettingsDialog {
     /// Colors and theming of the window around the panes.
     fn appearance_tab(&mut self, ui: &mut Ui) {
         let theme = active_theme(ui);
-        egui::Grid::new("settings_appearance_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        section(ui, "window_appearance", "Window: Appearance", |ui| {
             ui.label("Theme:");
             ComboBox::from_id_salt("theme_choice").selected_text(theme_choice_name(self.draft.theme.clone())).show_ui(ui, |ui| {
                 for choice in [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System] {
@@ -268,7 +268,7 @@ impl SettingsDialog {
             ui.label(RichText::new("Open files to change how they are compared.").weak());
             return;
         };
-        egui::Grid::new("settings_comparison_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        section(ui, "comparison_algorithm", "Comparison: Algorithm", |ui| {
             ui.label("Algorithm:");
             ComboBox::from_id_salt("diff_algorithm").selected_text(algorithm_name(draft.algorithm)).show_ui(ui, |ui| {
                 for algorithm in [DiffAlgorithm::Histogram, DiffAlgorithm::Myers] {
@@ -281,8 +281,9 @@ impl SettingsDialog {
             let myers = draft.algorithm == DiffAlgorithm::Myers;
             ui.add_enabled(myers, egui::Checkbox::new(&mut draft.try_hard, "Minimal diff")).on_hover_text("Myers only: find the smallest diff, which can be slow on large files.");
             ui.end_row();
-
-            ui.label("Character diff limit:");
+        });
+        section(ui, "comparison_char_diff", "Comparison: Character diff", |ui| {
+            ui.label("Line limit:");
             ui.add(DragValue::new(&mut draft.char_diff_line_limit).range(0..=MAX_CHAR_DIFF_LINE_LIMIT).speed(10.0).suffix(" chars")).on_hover_text("Longer lines are marked as different as a whole.");
             ui.end_row();
         });
@@ -301,6 +302,18 @@ impl SettingsDialog {
             }
         });
     }
+}
+
+
+/// A titled group of settings in its own rect, laid out as label and control rows. `title` starts with the name of what the settings change.
+fn section(ui: &mut Ui, id: &str, title: &str, rows: impl FnOnce(&mut Ui)) {
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).strong());
+        ui.separator();
+        egui::Grid::new(id).num_columns(2).spacing([12.0, 8.0]).show(ui, rows);
+    });
 }
 
 

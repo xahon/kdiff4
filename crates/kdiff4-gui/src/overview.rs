@@ -232,10 +232,10 @@ fn paint_lines(ui: &mut Ui, lenses: &[Lens<'_>], sources: usize, state: &PaneSta
             continue;
         };
         let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
+        text_view::paint_char_backgrounds(&painter, segments, galley, text_origin.x, rect, &style.char_diff);
         if let Some(cursor) = caret {
             text_view::paint_selection(&painter, lens.lines, line, text_rect, galley, cursor, row_height, palette);
         }
-        text_view::paint_char_borders(&painter, segments, galley, text_origin.x, rect, &style.char_diff);
         text_view::paint_whitespace(&painter, lens.lines.line(line), terminator, galley, text_origin.x, rect, char_width, style);
         painter.galley(text_origin, galley.clone(), palette.pane_text);
         if let Some(cursor) = caret
@@ -489,7 +489,7 @@ mod tests {
     }
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN, corner_radius: 0 };
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN };
 
 
     /// The strip in a test harness, and what its frames did: the actions it returned, the rect it took, the height `height` reserves for it, and its row height and line count.
@@ -511,7 +511,7 @@ mod tests {
             .with_step_dt(0.01)
             .build_ui_state(
                 |ui, test: &mut StripTest| {
-                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() };
+                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, char_diff: LOOK, whitespace: WhitespaceConfig::default() };
                     let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
                     test.actions.extend(shown.inner);
                     test.rect = shown.response.rect;

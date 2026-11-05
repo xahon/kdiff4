@@ -14,11 +14,11 @@ pub enum CharColor {
 }
 
 
-/// How a run of characters is drawn: its text color, and whether a border goes around it.
+/// How a run of characters is drawn: its text color, and whether a background is filled behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CharStyle {
     pub color: CharColor,
-    pub border: bool,
+    pub background: bool,
 }
 
 
@@ -33,8 +33,8 @@ pub struct SameIn {
 
 /// The char-diff rules: how a run of `document` is drawn, from where its characters are the same. `None` is plain text. A 2-way diff follows the same rules with C missing.
 pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
-    let bordered = |color: CharColor| Some(CharStyle { color, border: true });
-    let plain = |color: CharColor| Some(CharStyle { color, border: false });
+    let filled = |color: CharColor| Some(CharStyle { color, background: true });
+    let plain = |color: CharColor| Some(CharStyle { color, background: false });
     let missing_from_b_or_c = !same.b || same.c == Some(false);
     let same_in_other_side = match document {
         Document::B => same.c.unwrap_or(false),
@@ -42,23 +42,22 @@ pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
         Document::A | Document::D => false,
     };
     match (document, same.a, same_in_other_side) {
-        (Document::A, _, _) if missing_from_b_or_c => bordered(CharColor::Red),
+        (Document::A, _, _) if missing_from_b_or_c => filled(CharColor::Red),
         (Document::A, _, _) => None,
-        (Document::B | Document::C, false, false) => bordered(CharColor::Red),
-        (Document::B | Document::C, false, true) => bordered(CharColor::Blue),
+        (Document::B | Document::C, false, false) => filled(CharColor::Red),
+        (Document::B | Document::C, false, true) => filled(CharColor::Blue),
         (Document::B | Document::C, true, _) => plain(CharColor::Green),
         (Document::D, _, _) => None,
     }
 }
 
 
-/// The colors and border rounding char-diff runs are drawn with.
+/// The colors char-diff runs are drawn with.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharDiffLook {
     pub red: Color32,
     pub blue: Color32,
     pub green: Color32,
-    pub corner_radius: u8,
 }
 
 
@@ -70,10 +69,11 @@ impl CharDiffLook {
             CharColor::Green => self.green.clone(),
         }
     }
+
 }
 
 
-/// The styled column ranges of a line of `document` with `runs`, in order; neighbors with the same style are joined, so a border goes around all of them. `sources` is how many source documents the row has. Plain runs are left out.
+/// The styled column ranges of a line of `document` with `runs`, in order; neighbors with the same style are joined, so one background covers all of them. `sources` is how many source documents the row has. Plain runs are left out.
 pub fn segments(document: Document, runs: &[CharRun], sources: usize) -> Vec<(Range<usize>, CharStyle)> {
     let flag = |run: &CharRun, index: usize| run.same_in.get(index).cloned().unwrap_or(false);
     let mut segments: Vec<(Range<usize>, CharStyle)> = Vec::new();
@@ -94,9 +94,9 @@ mod tests {
     use super::*;
 
 
-    const RED: Option<CharStyle> = Some(CharStyle { color: CharColor::Red, border: true });
-    const BLUE: Option<CharStyle> = Some(CharStyle { color: CharColor::Blue, border: true });
-    const GREEN: Option<CharStyle> = Some(CharStyle { color: CharColor::Green, border: false });
+    const RED: Option<CharStyle> = Some(CharStyle { color: CharColor::Red, background: true });
+    const BLUE: Option<CharStyle> = Some(CharStyle { color: CharColor::Blue, background: true });
+    const GREEN: Option<CharStyle> = Some(CharStyle { color: CharColor::Green, background: false });
 
 
     fn same(a: bool, b: bool, c: Option<bool>) -> SameIn {

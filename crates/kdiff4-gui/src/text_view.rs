@@ -28,8 +28,8 @@ const ACTIVE_GUTTER_STROKE: f32 = 2.0;
 /// Space between the margin and the text.
 const TEXT_GAP: f32 = 4.0;
 pub const CONFLICT_MARKER: &str = "<Merge Conflict>";
+const CHAR_DIFF_BACKGROUND_ALPHA: u8 = 80;
 const REGION_BORDER_WIDTH: f32 = 1.0;
-const CHAR_DIFF_BORDER_WIDTH: f32 = 1.0;
 /// Whitespace markers are drawn in the weak text color at this opacity, so they stay behind the text.
 const WHITESPACE_OPACITY: f32 = 0.6;
 
@@ -55,9 +55,9 @@ pub struct ViewStyle<'a> {
     pub current_region_color: Color32,
     /// Rows one wheel notch scrolls.
     pub scroll_step_rows: usize,
-    /// Space between the boxes of adjacent regions, in pixels.
-    pub region_gap: f32,
     pub region_corner_radius: u8,
+    /// Opacity of the borders of the regions other than the current one, from 0 to 1.
+    pub other_region_border_opacity: f32,
     pub char_diff: CharDiffLook,
     pub whitespace: WhitespaceConfig,
 }
@@ -248,13 +248,13 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 let text_rect = Rect::from_min_max(pos2(rect.left() + margin.total(), rect.top()), pos2(rect.right().max(viewport.right()), rect.bottom()));
                 if let Some(region) = pane_row.region
                     && pane_row.region != previous_region
-                    && let Some(region_rect) = rows.region_rows(region).and_then(|range| region_box(range, row, rect.top(), row_height, viewport.x_range(), style.region_gap))
+                    && let Some(region_rect) = rows.region_rows(region).and_then(|range| region_box(range, row, rect.top(), row_height, viewport.x_range()))
                 {
                     if pane_row.region == style.current_region {
                         ui.painter().rect_filled(region_rect, style.region_corner_radius, style.current_region_color);
                     }
                     if pane_row.boxed {
-                        boxes.push(region_rect);
+                        boxes.push((region_rect, pane_row.region == style.current_region));
                     }
                 }
                 previous_region = pane_row.region;
@@ -272,21 +272,22 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     continue;
                 };
                 let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
+                paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, &style.char_diff);
                 if let Some(caret) = caret {
                     paint_selection(&text_painter, lines, line, text_rect, &galley, caret.cursor, row_height, palette);
                 }
                 let caret_x = caret
                     .filter(|caret| caret.void_row.is_none() && caret.cursor.head.line == line)
                     .map(|caret| text_origin.x + galley.pos_from_cursor(CCursor::new(caret.cursor.head.column)).min.x);
-                paint_char_borders(&text_painter, &segments, &galley, text_origin.x, rect, &style.char_diff);
                 paint_whitespace(&text_painter, lines.line(line), &terminator, &galley, text_origin.x, rect, char_width, style);
                 text_painter.galley(text_origin, galley, palette.pane_text);
                 if let Some(x) = caret_x {
                     paint_caret(&text_painter, x, rect, palette);
                 }
             }
-            for region_rect in boxes {
-                ui.painter().rect_stroke(region_rect, style.region_corner_radius, Stroke::new(REGION_BORDER_WIDTH, palette.region_border), StrokeKind::Inside);
+            for (region_rect, current) in boxes {
+                let color = if current { palette.region_border } else { palette.region_border.gamma_multiply(style.other_region_border_opacity) };
+                ui.painter().rect_stroke(region_rect, style.region_corner_radius, Stroke::new(REGION_BORDER_WIDTH, color), StrokeKind::Inside);
             }
         })
     });
@@ -482,15 +483,14 @@ pub fn paint_caret(painter: &Painter, x: f32, rect: Rect, palette: &Palette) {
 }
 
 
-/// The box of a region spanning `rows`, as wide as `x_range`, given that its row `row` starts at `row_top`. Half the gap is taken off its top and bottom, so adjacent boxes are `gap` apart. `None` when the region has no rows.
-fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_range: Rangef, gap: f32) -> Option<Rect> {
+/// The box of a region spanning `rows`, as wide as `x_range`, given that its row `row` starts at `row_top`. `None` when the region has no rows.
+fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_range: Rangef) -> Option<Rect> {
     if !rows.contains(&row) {
         return None;
     }
     let top = row_top - (row - rows.start) as f32 * row_height;
     let bottom = row_top + (rows.end - row) as f32 * row_height;
-    let inset = (gap / 2.0).clamp(0.0, ((bottom - top) / 2.0 - REGION_BORDER_WIDTH).max(0.0));
-    Some(Rect::from_x_y_ranges(x_range, Rangef::new(top + inset, bottom - inset)))
+    Some(Rect::from_x_y_ranges(x_range, Rangef::new(top, bottom)))
 }
 
 
@@ -607,10 +607,10 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
 }
 
 
-/// Draws a border around each char-diff segment that has one, in the row `rect`; the text starts at `text_left`.
-pub fn paint_char_borders(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
+/// Fills the background of each char-diff segment that has one, over the full height of the row `rect`; the text starts at `text_left`.
+pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
     for (columns, char_style) in segments {
-        if !char_style.border || columns.is_empty() {
+        if !char_style.background || columns.is_empty() {
             continue;
         }
         let left = text_left + galley.pos_from_cursor(CCursor::new(columns.start.clone())).min.x;
@@ -618,8 +618,7 @@ pub fn paint_char_borders(painter: &Painter, segments: &[(Range<usize>, CharStyl
         if right <= left {
             continue;
         }
-        let border = Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom()));
-        painter.rect_stroke(border, look.corner_radius.clone(), Stroke::new(CHAR_DIFF_BORDER_WIDTH, look.color(char_style.color.clone())), StrokeKind::Inside);
+        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, look.color(char_style.color.clone()).gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
     }
 }
 
@@ -700,12 +699,12 @@ mod tests {
     use crate::theme::LIGHT;
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN, corner_radius: 0 };
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN };
     const PLAIN: Color32 = Color32::BLACK;
 
 
     fn styled(color: CharColor) -> CharStyle {
-        CharStyle { color, border: false }
+        CharStyle { color, background: false }
     }
 
 
@@ -814,21 +813,18 @@ mod tests {
 
 
     #[test]
-    fn region_boxes_span_the_region_less_half_the_gap() {
+    fn region_boxes_span_all_rows_of_the_region() {
         let x_range = Rangef::new(0.0, 200.0);
-        let rect = region_box(4..7, 5, 50.0, 10.0, x_range, 4.0).unwrap();
-        assert_eq!(rect, Rect::from_min_max(pos2(0.0, 42.0), pos2(200.0, 68.0)));
-        assert_eq!(region_box(4..7, 4, 40.0, 10.0, x_range, 4.0), Some(rect));
-        assert_eq!(region_box(4..7, 4, 40.0, 10.0, x_range, 0.0), Some(Rect::from_min_max(pos2(0.0, 40.0), pos2(200.0, 70.0))));
-        let thin = region_box(0..1, 0, 0.0, 4.0, x_range, 8.0).unwrap();
-        assert_eq!(thin.y_range(), Rangef::new(1.0, 3.0));
-        assert_eq!(region_box(3..3, 3, 0.0, 10.0, x_range, 2.0), None);
-        assert_eq!(region_box(3..5, 7, 0.0, 10.0, x_range, 2.0), None);
+        let rect = region_box(4..7, 5, 50.0, 10.0, x_range).unwrap();
+        assert_eq!(rect, Rect::from_min_max(pos2(0.0, 40.0), pos2(200.0, 70.0)));
+        assert_eq!(region_box(4..7, 4, 40.0, 10.0, x_range), Some(rect));
+        assert_eq!(region_box(3..3, 3, 0.0, 10.0, x_range), None);
+        assert_eq!(region_box(3..5, 7, 0.0, 10.0, x_range), None);
     }
 
 
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_gap: 0.0, region_corner_radius: 0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
     }
 
 

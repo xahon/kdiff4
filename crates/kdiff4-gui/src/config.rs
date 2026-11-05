@@ -21,11 +21,10 @@ pub const MAX_SCROLL_STEP_LINES: u8 = 20;
 pub const DEFAULT_SCROLL_STEP_LINES: u8 = 3;
 /// A translucent yellow: text keeps its contrast on both themes.
 pub const DEFAULT_CURRENT_REGION_COLOR: [u8; 4] = [255, 214, 0, 72];
-pub const MAX_REGION_GAP: u8 = 8;
-pub const DEFAULT_REGION_GAP: u8 = 3;
 pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
 pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
-pub const DEFAULT_CHAR_DIFF_CORNER_RADIUS: u8 = 2;
+pub const MAX_OTHER_REGION_BORDER_PERCENT: u8 = 100;
+pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
 /// Char-diff text colors: dark enough to keep 4.5:1 contrast on every light-theme background they are drawn on.
 pub const DEFAULT_CHAR_DIFF_RED: [u8; 3] = [0xB0, 0x00, 0x00];
 pub const DEFAULT_CHAR_DIFF_BLUE: [u8; 3] = [0x00, 0x3C, 0xB4];
@@ -92,13 +91,11 @@ pub struct ViewConfig {
     pub scroll_step_lines: u8,
     /// RGBA background of the jumped-to region, void space included.
     pub current_region_color: [u8; 4],
-    /// Space between the boxes of adjacent regions, in pixels.
-    pub region_gap: u8,
     /// Rounding of the region boxes, in pixels.
     pub region_corner_radius: u8,
-    /// Rounding of the borders around char-diff runs, in pixels.
-    pub char_diff_corner_radius: u8,
-    /// RGB of char-diff text and borders: changes made on one side, changes made alike in B and C, and text kept from A.
+    /// Opacity of the borders of the regions other than the jumped-to one, in percent.
+    pub other_region_border_percent: u8,
+    /// RGB of char-diff text and backgrounds: changes made on one side, changes made alike in B and C, and text kept from A.
     pub char_diff_red: [u8; 3],
     pub char_diff_blue: [u8; 3],
     pub char_diff_green: [u8; 3],
@@ -111,7 +108,7 @@ pub struct ViewConfig {
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_gap: DEFAULT_REGION_GAP, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, char_diff_corner_radius: DEFAULT_CHAR_DIFF_CORNER_RADIUS, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -121,12 +118,11 @@ impl ViewConfig {
     pub fn sanitized(mut self) -> ViewConfig {
         self.font_size = if self.font_size.is_finite() { self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) } else { DEFAULT_FONT_SIZE };
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
-        self.char_diff_corner_radius = self.char_diff_corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.smooth_scroll_ms = self.smooth_scroll_ms.clamp(MIN_SMOOTH_SCROLL_MS, MAX_SMOOTH_SCROLL_MS);
         self.scroll_step_lines = self.scroll_step_lines.clamp(MIN_SCROLL_STEP_LINES, MAX_SCROLL_STEP_LINES);
-        self.region_gap = self.region_gap.min(MAX_REGION_GAP);
         self.region_corner_radius = self.region_corner_radius.min(MAX_REGION_CORNER_RADIUS);
+        self.other_region_border_percent = self.other_region_border_percent.min(MAX_OTHER_REGION_BORDER_PERCENT);
         if self.font_family.as_deref().is_some_and(|family| family.trim().is_empty()) {
             self.font_family = None;
         }
@@ -303,7 +299,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_gap: 2, region_corner_radius: 4, char_diff_corner_radius: 5, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -350,12 +346,12 @@ show_overview_strip = false
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\nregion_gap = 50\nregion_corner_radius = 50\nchar_diff_corner_radius = 99\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\nregion_corner_radius = 50\nother_region_border_percent = 250\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
-        assert_eq!((view.region_gap, view.region_corner_radius), (MAX_REGION_GAP, MAX_REGION_CORNER_RADIUS));
+        assert_eq!(view.region_corner_radius, MAX_REGION_CORNER_RADIUS);
+        assert_eq!(view.other_region_border_percent, MAX_OTHER_REGION_BORDER_PERCENT);
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
-        assert_eq!(view.char_diff_corner_radius, MAX_CORNER_RADIUS);
         assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!((view.smooth_scroll_ms, view.scroll_step_lines), (MAX_SMOOTH_SCROLL_MS, MIN_SCROLL_STEP_LINES));
 
