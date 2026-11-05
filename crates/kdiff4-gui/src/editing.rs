@@ -231,6 +231,13 @@ pub fn line_at(lines: Lines<'_>, line: usize) -> Cursor {
 }
 
 
+/// The text of `line` without its line break.
+pub fn line_text_at(lines: Lines<'_>, line: usize) -> Cursor {
+    let start = clamp(lines, Position { line, column: 0 });
+    Cursor { anchor: start, head: Position { line: start.line, column: lines.line_chars(start.line) } }
+}
+
+
 fn word_left(lines: Lines<'_>, position: Position) -> Position {
     if position.column == 0 {
         return move_caret(lines, position, Motion::Left);

@@ -34,11 +34,15 @@ pub enum PaneAction {
     Drag { document: Document, position: Position, void_row: Option<usize> },
     SelectWord(Document, Position),
     SelectLine(Document, usize),
+    /// A triple-click in the overview strip: the text of the line without its line break, so the caret stays on the line.
+    SelectLineText(Document, usize),
     /// A click on a gutter block of a region.
     SelectRegion(Document, usize),
     /// Enter in a header path field, with the field's text.
     CommitPath(Document, String),
     Browse(Document),
+    /// The overview strip took a press; Up and Down now switch between its lines.
+    FocusStrip,
 }
 
 
@@ -51,6 +55,8 @@ pub struct PaneState {
     pub void_row: Option<usize>,
     /// The caret is not drawn, as after a jump, until it is moved again.
     pub caret_hidden: bool,
+    /// The caret was last placed in the overview strip, so Up and Down switch between its lines instead of moving by rows.
+    pub strip_focused: bool,
     /// A region to scroll every pane to, with context rows above it, unless every pane already shows all of it. Kept until every pane has been laid out once.
     pub jump: Option<usize>,
     /// Scroll the caret into view on the next frame.
@@ -72,7 +78,7 @@ pub struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, void_row: None, caret_hidden: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_scroll: SmoothScroll::default(), output_scroll: SmoothScroll::default(), viewports: [None; 4] }
+        PaneState { caret: None, void_row: None, caret_hidden: false, strip_focused: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_scroll: SmoothScroll::default(), output_scroll: SmoothScroll::default(), viewports: [None; 4] }
     }
 }
 
@@ -97,6 +103,7 @@ impl PaneState {
     pub fn set_hidden_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
         self.set_caret(document, cursor, void_row);
         self.caret_hidden = true;
+        self.strip_focused = false;
     }
 
 
@@ -146,6 +153,16 @@ struct PaneScroll {
 }
 
 
+/// Shows the overview strip; whatever it returns also gives the strip the keyboard.
+fn strip_actions(ui: &mut Ui, mirror: &Mirror, state: &PaneState, style: &ViewStyle<'_>, actions: &mut Vec<PaneAction>) {
+    let shown = overview::show(ui, mirror, state, style);
+    if !shown.is_empty() {
+        actions.extend(shown);
+        actions.push(PaneAction::FocusStrip);
+    }
+}
+
+
 /// Source panes side by side, then the overview strip when it is on; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = &theme::palette_of(ui);
@@ -170,7 +187,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         if mirror.output().is_none() {
             ui.allocate_ui(vec2(total.x, (total.y - strip_space).max(0.0)), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
             if options.overview_strip {
-                ui.allocate_ui(vec2(total.x, strip_height), |ui| actions.extend(overview::show(ui, mirror, state, &source_style)));
+                ui.allocate_ui(vec2(total.x, strip_height), |ui| strip_actions(ui, mirror, state, &source_style, &mut actions));
             }
         } else {
             let usable = (total.y - strip_space - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
@@ -178,7 +195,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
             ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
             if options.overview_strip {
                 splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
-                ui.allocate_ui(vec2(total.x, strip_height), |ui| actions.extend(overview::show(ui, mirror, state, &source_style)));
+                ui.allocate_ui(vec2(total.x, strip_height), |ui| strip_actions(ui, mirror, state, &source_style, &mut actions));
             }
             splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
             ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut scrolls));
@@ -484,6 +501,17 @@ mod tests {
         assert_eq!(state.visible_caret(Document::A), None);
         state.set_caret(Document::A, cursor, None);
         assert_eq!(state.visible_caret(Document::A), Some(Caret { cursor, void_row: None }));
+    }
+
+
+    #[test]
+    fn jumps_take_the_keyboard_back_from_the_strip() {
+        let mut state = PaneState::default();
+        state.strip_focused = true;
+        state.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), None);
+        assert!(state.strip_focused, "moving the caret keeps the strip focused");
+        state.set_hidden_caret(Document::A, Cursor::at(Position { line: 4, column: 0 }), None);
+        assert!(!state.strip_focused);
     }
 
 

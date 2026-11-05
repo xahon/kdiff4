@@ -101,6 +101,11 @@ fn view_of(mirror: &Mirror, document: Document) -> Option<(Lines<'_>, Rows<'_>)>
 
 /// The strip's lines: A, B and C, then D, on the rows that line up with the caret. Without a caret, the start of the current region, or the first row.
 fn lenses<'a>(mirror: &'a Mirror, state: &PaneState) -> Vec<Lens<'a>> {
+    lenses_for(mirror, state.caret, state.void_row.clone())
+}
+
+
+fn lenses_for<'a>(mirror: &'a Mirror, caret: Option<(Document, Cursor)>, void_row: Option<usize>) -> Vec<Lens<'a>> {
     let sources: Vec<(Document, Lines<'a>, Rows<'a>)> = mirror
         .documents()
         .iter()
@@ -110,8 +115,8 @@ fn lenses<'a>(mirror: &'a Mirror, state: &PaneState) -> Vec<Lens<'a>> {
     let Some(first) = sources.first().map(|(_, _, rows)| *rows) else {
         return Vec::new();
     };
-    let caret_row = |rows: Rows<'_>, cursor: Cursor| text_view::caret_row(rows, Caret { cursor, void_row: state.void_row.clone() });
-    let (reference, focus) = match state.caret {
+    let caret_row = |rows: Rows<'_>, cursor: Cursor| text_view::caret_row(rows, Caret { cursor, void_row: void_row.clone() });
+    let (reference, focus) = match caret {
         Some((Document::D, cursor)) => (first, output.map(|(_, rows)| Focus::Output(caret_row(rows, cursor)))),
         Some((document, cursor)) => match sources.iter().find(|(source, _, _)| *source == document) {
             Some((_, _, rows)) => (*rows, Some(Focus::Sources(caret_row(*rows, cursor)))),
@@ -282,7 +287,7 @@ fn pointer_actions(ui: &mut Ui, lenses: &[Lens<'_>], galleys: &[Option<Arc<Galle
     let pressed_on = ui.data(|data| data.get_temp::<Option<usize>>(press_id)).flatten();
     let action = if response.triple_clicked() {
         let lens = &lenses[index_at(pointer)];
-        lens.line().map(|line| PaneAction::SelectLine(lens.document.clone(), line))
+        lens.line().map(|line| PaneAction::SelectLineText(lens.document.clone(), line))
     } else if response.double_clicked() {
         let index = index_at(pointer);
         let lens = &lenses[index];
@@ -310,6 +315,30 @@ fn press(lens: &Lens<'_>, column: usize, extend: bool) -> Option<PaneAction> {
         None => lens.rows.caret_at_row(row, 0, end),
     };
     Some(PaneAction::Press { document: lens.document.clone(), position, void_row, extend })
+}
+
+
+/// Whether the strip shows the same rows with the caret at `cursor` in `document`, on `void_row` if it sits on a void, as it does with the caret of `state`.
+pub fn stays_on_rows(mirror: &Mirror, state: &PaneState, document: Document, cursor: Cursor, void_row: Option<usize>) -> bool {
+    let rows = |lenses: Vec<Lens<'_>>| lenses.iter().map(|lens| lens.row).collect::<Vec<_>>();
+    rows(lenses(mirror, state)) == rows(lenses_for(mirror, Some((document, cursor)), void_row))
+}
+
+
+/// Where Up (`direction` -1) or Down (1) takes the caret in the strip: the nearest line above or below the caret's document that has a row, at the same column. `None` at the first or last line.
+pub fn neighbor_press(mirror: &Mirror, state: &PaneState, direction: isize) -> Option<(Document, Position, Option<usize>)> {
+    let (caret_document, cursor) = state.caret?;
+    let lenses = lenses(mirror, state);
+    let mut index = lenses
+        .iter()
+        .position(|lens| lens.document == caret_document)?
+        .checked_add_signed(direction)?;
+    loop {
+        if let Some(PaneAction::Press { document, position, void_row, .. }) = press(lenses.get(index)?, cursor.head.column, false) {
+            return Some((document, position, void_row));
+        }
+        index = index.checked_add_signed(direction)?;
+    }
 }
 
 
@@ -489,6 +518,36 @@ mod tests {
     }
 
 
+    #[test]
+    fn arrows_go_to_the_next_line_of_the_strip_that_has_a_row() {
+        let mirror = mirror(None);
+        let mut state = PaneState::default();
+        state.set_caret(Document::A, Cursor::at(Position { line: 3, column: 2 }), None);
+        assert_eq!(neighbor_press(&mirror, &state, -1), None);
+        assert_eq!(neighbor_press(&mirror, &state, 1), Some((Document::B, Position { line: 3, column: 0 }, Some(3))));
+        state.set_caret(Document::B, Cursor::at(Position { line: 3, column: 0 }), Some(3));
+        assert_eq!(neighbor_press(&mirror, &state, -1), Some((Document::A, Position { line: 3, column: 0 }, None)));
+        assert_eq!(neighbor_press(&mirror, &state, 1), None, "D has no row that lines up here");
+        state.set_caret(Document::D, Cursor::at(Position { line: 2, column: 1 }), None);
+        assert_eq!(neighbor_press(&mirror, &state, -1), Some((Document::B, Position { line: 2, column: 1 }, None)));
+        assert_eq!(neighbor_press(&mirror, &state, 1), None);
+        assert_eq!(neighbor_press(&mirror, &PaneState::default(), 1), None);
+    }
+
+
+    #[test]
+    fn the_caret_stays_on_the_strip_rows_only_within_its_row() {
+        let mirror = mirror(None);
+        let mut state = PaneState::default();
+        state.set_caret(Document::D, Cursor::at(Position { line: 2, column: 0 }), None);
+        assert!(stays_on_rows(&mirror, &state, Document::D, Cursor::at(Position { line: 2, column: 2 }), None));
+        assert!(!stays_on_rows(&mirror, &state, Document::D, Cursor::at(Position { line: 3, column: 0 }), None), "the next line of D is another row");
+        state.set_caret(Document::B, Cursor::at(Position { line: 3, column: 0 }), Some(3));
+        assert!(stays_on_rows(&mirror, &state, Document::B, Cursor::at(Position { line: 3, column: 0 }), Some(3)));
+        assert!(!stays_on_rows(&mirror, &state, Document::B, Cursor::at(Position { line: 3, column: 0 }), None), "leaving a void for the line after it is another row");
+    }
+
+
     const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED };
 
 
@@ -590,7 +649,7 @@ mod tests {
         let mut harness = harness(mirror(None), caret_on_a3(0));
         let a = right_of(harness.state(), 0);
         assert_eq!(click(&mut harness, a, 2, Modifiers::NONE).last(), Some(&PaneAction::SelectWord(Document::A, Position { line: 3, column: 2 })));
-        assert_eq!(click(&mut harness, a, 3, Modifiers::NONE).last(), Some(&PaneAction::SelectLine(Document::A, 3)));
+        assert_eq!(click(&mut harness, a, 3, Modifiers::NONE).last(), Some(&PaneAction::SelectLineText(Document::A, 3)));
     }
 
 

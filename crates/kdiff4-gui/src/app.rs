@@ -12,6 +12,7 @@ use crate::fonts::{self, FontScan};
 use crate::language::{self, Language, LanguageState};
 use crate::mirror::{DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
+use crate::overview;
 use crate::panes::{self, PaneAction, PaneOptions, PaneState};
 use crate::paths;
 use crate::rows::{self, Rows};
@@ -534,7 +535,9 @@ impl KdiffApp {
 
     fn handle_pane_action(&mut self, ctx: &egui::Context, action: PaneAction) {
         match action {
+            PaneAction::FocusStrip => self.panes.strip_focused = true,
             PaneAction::Press { document, position, void_row, extend } => {
+                self.panes.strip_focused = false;
                 let cursor = match self.panes.caret {
                     Some((current, cursor)) if extend && current == document => Cursor { anchor: cursor.anchor, head: position },
                     _ => Cursor::at(position),
@@ -546,11 +549,19 @@ impl KdiffApp {
                 }
             }
             PaneAction::SelectWord(document, position) => {
+                self.panes.strip_focused = false;
                 if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
                     self.panes.set_caret(document, editing::word_at(lines, position), None);
                 }
             }
+            PaneAction::SelectLineText(document, line) => {
+                self.panes.strip_focused = false;
+                if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
+                    self.panes.set_caret(document, editing::line_text_at(lines, line), None);
+                }
+            }
             PaneAction::SelectLine(document, line) => {
+                self.panes.strip_focused = false;
                 if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
                     self.panes.set_caret(document, editing::line_at(lines, line), None);
                 }
@@ -565,6 +576,7 @@ impl KdiffApp {
                 }
             }
             PaneAction::SelectRegion(document, region) => {
+                self.panes.strip_focused = false;
                 self.caret_to_region(document, region, false);
                 self.panes.reveal_caret = false;
                 if let Some(focused) = ctx.memory(|memory| memory.focused()) {
@@ -616,7 +628,9 @@ impl KdiffApp {
             match event {
                 egui::Event::Key { key: Key::A, pressed: true, modifiers, .. } if modifiers.command => self.select_all(),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                    if let Some(motion) = motion_for(key, modifiers, self.panes.page_rows) {
+                    if self.panes.strip_focused && modifiers.is_none() && matches!(key, Key::ArrowUp | Key::ArrowDown) {
+                        self.move_strip_line(if key == Key::ArrowUp { -1 } else { 1 });
+                    } else if let Some(motion) = motion_for(key, modifiers, self.panes.page_rows) {
                         self.move_caret(motion, modifiers.shift);
                     } else if document == Document::D
                         && let Some(edit_key) = edit_key_for(key, modifiers)
@@ -639,6 +653,17 @@ impl KdiffApp {
     }
 
 
+    /// Moves the caret to the next line of the overview strip above (`direction` -1) or below (1), keeping its column.
+    fn move_strip_line(&mut self, direction: isize) {
+        let Some(mirror) = self.mirror.as_ref() else { return };
+        let Some((document, position, void_row)) = overview::neighbor_press(mirror, &self.panes, direction) else { return };
+        let Some(lines) = lines_of(mirror, document.clone()) else { return };
+        let position = editing::clamp(lines, position);
+        self.panes.set_caret(document, Cursor::at(position), void_row);
+        self.panes.reveal_caret = true;
+    }
+
+
     /// Moves the caret; `extend` (Shift) grows or shrinks the selection instead of dropping it.
     fn move_caret(&mut self, motion: Motion, extend: bool) {
         let (document, cursor) = match self.panes.caret {
@@ -653,8 +678,20 @@ impl KdiffApp {
             (Some(lines), Some(rows)) => (lines, rows),
             _ => return,
         };
-        let (cursor, void_row) = move_by_rows(lines, rows, Caret { cursor, void_row: self.panes.void_row.clone() }, motion, extend);
-        self.panes.set_caret(document, cursor, void_row);
+        let caret = Caret { cursor, void_row: self.panes.void_row.clone() };
+        let mut moved = move_by_rows(lines, rows, caret.clone(), motion.clone(), extend);
+        if self.panes.strip_focused && !overview::stays_on_rows(mirror, &self.panes, document.clone(), moved.0, moved.1.clone()) {
+            let fallback = match motion {
+                Motion::Right | Motion::WordRight => Motion::LineEnd,
+                Motion::Left | Motion::WordLeft => Motion::LineStart,
+                _ => return,
+            };
+            moved = move_by_rows(lines, rows, caret, fallback, extend);
+            if !overview::stays_on_rows(mirror, &self.panes, document.clone(), moved.0, moved.1.clone()) {
+                return;
+            }
+        }
+        self.panes.set_caret(document, moved.0, moved.1);
         self.panes.reveal_caret = true;
     }
 
@@ -665,7 +702,11 @@ impl KdiffApp {
             None => return,
         };
         if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-            self.panes.set_caret(document, editing::select_all(lines), None);
+            let selection = match self.panes.caret {
+                Some((_, cursor)) if self.panes.strip_focused => editing::line_text_at(lines, cursor.head.line),
+                _ => editing::select_all(lines),
+            };
+            self.panes.set_caret(document, selection, None);
         }
     }
 
@@ -695,6 +736,9 @@ impl KdiffApp {
             None => return,
         };
         let Some(output) = mirror.output() else { return };
+        if self.panes.strip_focused && changes_line_structure(output.lines(), cursor, self.panes.void_row.is_some(), &key) {
+            return;
+        }
         let target = match self.panes.void_row {
             Some(row) if !cursor.has_selection() && cursor.head.column == 0 => mirror.empty_region_at_row(row),
             _ => None,
@@ -1249,6 +1293,22 @@ fn motion_for(key: Key, modifiers: Modifiers, page_rows: usize) -> Option<Motion
 }
 
 
+/// Whether `key` with the caret at `cursor` would join, split, add or remove lines, or edit around a void, which the strip's fixed row must not allow.
+fn changes_line_structure(lines: Lines<'_>, cursor: Cursor, on_void: bool, key: &EditKey) -> bool {
+    let (start, end) = cursor.range();
+    if start.line != end.line {
+        return true;
+    }
+    match key {
+        EditKey::Insert(text) => text.contains(['\n', '\r']),
+        _ if on_void => true,
+        EditKey::Newline => true,
+        EditKey::Backspace | EditKey::DeleteWordLeft => !cursor.has_selection() && cursor.head.column == 0,
+        EditKey::Delete | EditKey::DeleteWordRight => !cursor.has_selection() && cursor.head.column >= lines.line_chars(cursor.head.line),
+    }
+}
+
+
 /// Enter works with Ctrl held too, so a fast Ctrl+V, Enter sequence loses no line breaks. Ctrl+Backspace and Ctrl+Delete delete by words.
 fn edit_key_for(key: Key, modifiers: Modifiers) -> Option<EditKey> {
     if modifiers.alt {
@@ -1312,6 +1372,26 @@ mod tests {
         assert_eq!(motion_for(Key::A, Modifiers::NONE, 7), None);
         assert_eq!(motion_for(Key::ArrowLeft, Modifiers::COMMAND, 7), Some(Motion::WordLeft));
         assert_eq!(motion_for(Key::ArrowRight, Modifiers::COMMAND.plus(Modifiers::SHIFT), 7), Some(Motion::WordRight));
+    }
+
+
+    #[test]
+    fn strip_edits_never_change_the_lines() {
+        let ranges = [0..2, 3..5];
+        let lines = Lines { text: "ab\ncd", ranges: &ranges };
+        let at = |line, column| Cursor::at(Position { line, column });
+        let insert = |text: &str| EditKey::Insert(text.to_string());
+        assert!(!changes_line_structure(lines, at(0, 1), false, &insert("x")));
+        assert!(changes_line_structure(lines, at(0, 1), false, &insert("x\ny")));
+        assert!(changes_line_structure(lines, at(0, 1), false, &EditKey::Newline));
+        assert!(changes_line_structure(lines, at(1, 0), false, &EditKey::Backspace));
+        assert!(!changes_line_structure(lines, at(1, 1), false, &EditKey::Backspace));
+        assert!(changes_line_structure(lines, at(0, 2), false, &EditKey::Delete));
+        assert!(!changes_line_structure(lines, at(0, 1), false, &EditKey::Delete));
+        assert!(changes_line_structure(lines, Cursor { anchor: Position { line: 0, column: 0 }, head: Position { line: 1, column: 0 } }, false, &insert("x")), "a selection over a line break");
+        assert!(!changes_line_structure(lines, Cursor { anchor: Position { line: 0, column: 0 }, head: Position { line: 0, column: 2 } }, false, &EditKey::Backspace));
+        assert!(!changes_line_structure(lines, at(1, 0), true, &insert("x")));
+        assert!(changes_line_structure(lines, at(1, 0), true, &EditKey::Delete), "on a void the key would act on the line after it");
     }
 
 
