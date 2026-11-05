@@ -84,4 +84,4 @@ Listed in `docs/DEVIATIONS.md`. When porting an area, check that list first and 
 3. New behavior has tests; bug fixes have regression tests.
 4. `ARCHITECTURE.md` and `DEVIATIONS.md` updated if affected.
 5. New high-level coding entities are updated in `ARCHITECTURE.md` glossary. Removed entites are removed from glossary.
-6. Work is left uncommitted in master or commited into a feature branch. Prefer leaving uncommited and unstaged in master.
+6. Commit to a feature branch.
