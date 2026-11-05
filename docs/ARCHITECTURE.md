@@ -80,7 +80,6 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | Line diff | `imara-diff` (Histogram default, Myers optional) | core |
 | Encoding decode/encode | `encoding_rs` | core |
 | Encoding detection | `chardetng` | core |
-| Directory compare (v1.1) | `walkdir`, `ignore` | core |
 | Config | `serde`, `toml`, `dirs` | core, gui |
 | GUI | `egui`, `eframe`, `egui_extras` | gui |
 | File dialogs | `rfd` | gui |
@@ -546,9 +545,107 @@ Usage: `kdiff4 [OPTIONS] FILE1 [FILE2] [FILE3]`
 - Level: kdiff4's crates log at info and above, dependencies at warn and above. The `KDIFF4_LOG` environment variable (off, error, warn, info, debug, trace) changes kdiff4's level for one run; an unknown value is reported and info is used.
 - Logged at info: start (with the log folder), the launch arguments, opened files, reloads, output path changes, saves, and exit. Requests and D edits are logged at debug, failed requests at warn, and panics at error.
 
-## Directory compare (v1.1, optional, pending decision)
+## Directory compare (v1.1, optional, not implemented)
 
-Separate module in core built on `walkdir` + `ignore`: tree of entries with per-side metadata, comparison by size/date/content, merge operations as a plan applied in one pass. GUI: tree view plus the existing file diff for a selected entry. Not designed in detail until v1.0 ships.
+Nothing of this is built. This section is a digest of how kdiff3 compares and merges folders, which is the behavioral spec, followed by the design for porting it and the decisions the owner has to make first. kdiff3 sources are in `../kdiff3/src`: `directorymergewindow.cpp` (tree model, operation proposals, execution, folder view), `MergeFileInfos.cpp` (per-entry data, equality, ages), `DirectoryInfo.cpp` (the three folders and the destination), `fileaccess.cpp` and `DefaultFileAccessJobHandler.cpp` (listing and name filters), `CvsIgnoreList.cpp`, `GitIgnoreList.cpp` and `CompositeIgnoreList.cpp` (ignore files), `pdiff.cpp` (entry points and view switching), and the chapter on folders in `../kdiff3/doc/en/index.docbook`, which is partly out of date. Where the docs and the code disagree, this section follows the code.
+
+### How kdiff3 compares and merges folders
+
+#### Modes and entry points
+
+- Folder mode starts when A is a folder: from the command line, the Open dialog, or by selecting two or three folders in a folder view. B (and C) must be folders too; a folder next to a file is an error ("Can't compare file with folder") and the Open dialog comes back. The scan then checks that A, B and C exist and are folders, and names each one that is not. The destination is not checked until something is written there.
+- Three modes. Two folders: a merge of A and B. Three folders: a merge in which A is the base of B and C. Sync mode: only with exactly two folders and no destination, and only when the option is on; its goal is that A and B are equal afterwards.
+- The destination is the output folder when one is given (`-o`), else C when there is a C, else B. With three folders the destination must not be A or B. A destination that is one of the inputs means the merge happens in place.
+- The folder view is a mode of the main window with an info pane under the tree. The user switches between folder view, text view and a split view, and the tree stays alive while files are opened from it. Opening an item (double click or Enter) compares its files, or merges them when the session has a destination. Items can also be picked explicitly by clicking their A, B or C cell, up to three, all files or all folders, and then compared or merged; a merge of explicit picks writes to the C pick, else to the B pick. Picked folders open a new folder comparison in a new window.
+- With no destination, a freshly scanned comparison jumps into the first differing file by itself, which is what `git difftool --dir-diff` relies on. That mode pairs real files with symlinks into the work tree, so links to files are followed by default.
+- A file in A with folders in B and C: kdiff3 looks for a file of the same name inside those folders and uses it (a file-mode feature, not a folder comparison).
+- Closing a folder comparison exits with code 0 whether or not anything was saved. `--auto` is ignored for folders, with a message on stderr.
+
+#### Scan
+
+- Each input folder is listed on its own, recursively unless the recursive option is off. A folder's entries are listed first, then filtered, and only then are the subfolders that survived the filter listed, so ignored folders are never entered. Hidden entries are included unless the option is off (a leading dot on Unix, the hidden attribute on Windows). Special files such as devices, sockets and broken links are listed too. Progress is reported per input folder and the scan can be canceled. A folder that cannot be read gives one warning naming the sides, and the user may continue or cancel.
+- Filtering at scan time, per listed folder: a file is dropped when it does not match the file pattern or matches the file anti-pattern; a folder is dropped when it matches the folder anti-pattern; anything is dropped when an ignore list matches its name. Patterns are lists of wildcards separated by semicolons, with `*`, `?` and bracket sets, matched against the bare name. Defaults: file pattern `*`, file anti-pattern `*.orig;*.o;*.obj;*.rej;*.bak`, folder anti-pattern `CVS;.deps;.svn;.hg;.git`. Dropped entries are never compared. Showing more after loosening a pattern needs a rescan; showing fewer takes effect at once, because the same patterns are applied again when the tree's visibility is refreshed.
+- Links: a link to a folder is entered only with the follow-folder-links option, a link to a file is compared as its target only with the follow-file-links option, otherwise links are compared as links. Both options are on by default in the code (the docs say off). There is no cycle protection when folder links are followed. An entry counts as a normal file when it is a file, a folder or a link, and links are followed up to 15 levels to find out; anything else (devices, pipes, sockets, or links to them) is not normal and ends up as an error operation.
+- Ignore files, with the "use ignore file" option (off by default), combine two lists. The CVS list holds the standard CVS names and wildcards (`core`, `tags`, `CVS`, `*.o`, `*.so`, `*~`, `*.bak`, `*.orig`, `*.rej`, `*.exe` and more, but no git names), the user's home ignore file, the `CVSIGNORE` environment variable and the folder's own `.cvsignore`; a lone `!` drops everything collected for that folder; its patterns apply to that folder only. The git list reads a folder's `.gitignore` and treats every non-comment line as a wildcard on the bare name: no negation, no anchoring, no directory-only patterns, and the patterns of a folder apply to every path that starts with the folder's path text, which includes subfolders.
+
+#### Pairing and tree
+
+- Entries of A, B and C are paired by relative path into one entry with up to three sides. Components compare case-sensitively or not by option (insensitive by default on Windows, sensitive elsewhere). An entry's name comes from the first side that exists, in the order A, B, C.
+- The parent of an entry is the entry of its folder, which exists because folders are listed too. Children are sorted folders first, then by name ignoring case; the name column toggles the order, and only the name sorts.
+- Columns: name; A, B and C (C only with three folders), each an icon whose color is the side's age and whose shape says file, folder, link or missing; operation; status; and four count columns (unsolved, solved, nonwhite, white) that exist only in full-analysis mode, the solved one only with three folders. Age colors default to green (newest), olive (middle), red (oldest) and black (missing).
+- An info pane shows the folder paths ("A (Base)" with three folders, "(Dest)" for a side that is the destination) and, per side of the current entry, type (with "-Link"), size, rwx permissions, modification time and link target, or "not available".
+
+#### Equality and ages
+
+- Each entry has equality flags for A-B, A-C and B-C. An entry is equal when A-B is equal, and with three folders also A-C.
+- Default (binary) comparison: different sizes are unequal at once; otherwise the files are read side by side in chunks of 100,000 bytes and compared, with progress and cancellation. The other modes are: trust size (same size is equal); trust size and date (same size and modification time is equal); the same but fall back to binary when the date differs. Without follow-file-links, a link against a link is equal when the target texts are equal and a link against a normal file is an error; a non-normal file against a normal one is an error as well. Read errors and these errors are collected and shown as a list afterwards; when 30 have piled up the scan stops, and between 15 and 29 only a generic message is shown. Folders are never read: a folder pair starts as equal when it exists on both sides, and a type mismatch (folder against file, link against non-link) clears the flag. A folder's final equality comes from its children, see below.
+- Full analysis replaces the binary comparison: each pair is run through the diff and merge pipeline without showing it, which needs unsaved output saved first and hides the main window. It yields the four conflict counts and the binary-equality flags. With "white space differences considered equal" (default on) a pair whose differences are all whitespace counts as equal. It is much slower and is the only mode with the count columns. (A "binary comparison" option exists too, but it is only the radio button that is on when full analysis is off.)
+- Ages: the sides that exist are ranked newest, middle, oldest by modification time, with equal sides sharing a rank; if no side ended up oldest, the middle ones become oldest. The ranks come from a map keyed by timestamp, so when two sides share a timestamp one of them gets no rank in the first pass; a fallback then ranks it and sets the conflicting-ages flag, which is how equal dates with different contents are detected. The flag turns into an error operation in copy-newer mode. Equal contents never set it. Folders get ranks by side order instead: C newest, then B, then A, equal sides sharing.
+- A folder is equal when it exists on the same sides and all of its visible descendants are equal. Any visible unequal descendant marks all of its ancestors unequal, and this is recomputed from scratch on each visibility refresh, so it depends on which entries are shown (see below).
+
+#### Visibility
+
+- Five toggles: show identical files (the only one that is saved; the others are on at start), show different files, show files only in A, only in B, only in C. An entry is visible when it exists on every side and is equal and identical files are shown; or it exists on at least two sides, is not equal and different files are shown (folders count as different files whatever the toggle says, so disabling "different" never hides a folder); or it exists on only one side and that side's toggle is on. The name patterns are applied on top: a folder must not match the folder anti-pattern, a file must match the file pattern and not the file anti-pattern.
+- Because folder equality counts only visible descendants, hiding the entries that differ makes their folders look identical. Kdiff3 does this.
+- Also: fold all, unfold all, and an option to unfold all on load. After a scan a status report counts folders, equal files, different files and, with three folders, manual merges; it can be turned off for good.
+
+#### Operations
+
+- Two-folder and three-folder merge operations: copy A, B or C to the destination, delete from the destination, merge to the destination (a 2-way merge of A and B, or a 3-way merge with A as base; a missing side is passed as nothing, so a missing A makes a base-less merge). Sync mode operations: copy A to B, copy B to A, delete A, delete B, delete both, merge to A, merge to B, merge to both. No operation. Three error operations that block a run: conflicting file types, changed and deleted, conflicting ages.
+- Proposal with two folders (merge mode): equal gives copy B to the destination, or nothing when the destination is A or B; both exist and differ gives merge, which for a folder only creates it in the destination; with copy-newer on, a file pair gives copy newer, and equal dates give the conflicting-ages error; only B gives copy B; only A gives copy A. Sync mode: equal gives nothing; differ gives merge to both (or copy newer); only A gives copy A to B; only B gives copy B to A.
+- Proposal with three folders: all equal gives copy C, or nothing when the destination is an input (the usual case). All exist: A and B equal or B and C equal gives copy C; A and C equal gives copy B; otherwise merge. A and B exist without C: equal gives delete from the destination, else the changed-and-deleted error; likewise A and C without B. B and C exist without A: equal gives copy C, else merge. Only C gives copy C; only B gives copy B; only A gives delete from the destination. Whatever the above says, an entry whose types conflict (folder against file, link against non-link, a non-normal file) gets the conflicting-file-types error.
+- Setting an operation on an entry recomputes its children from it. A copy operation becomes the children's default, so children missing in the copied side get a delete operation; a conflicting-types error gives its children the plain merge default; a merge operation gives the children their own automatic proposals; no operation and the delete operations pass down unchanged. Choosing A, B, C, auto or nothing for all items asks for confirmation and applies to every top-level entry, recursively. The operation column offers only valid choices (C only with three folders and when it exists, merge only when the types fit and at least two sides exist). Keys: Ctrl+1, Ctrl+2, Ctrl+3 choose A, B, C when that side exists; Ctrl+4 merges; Ctrl+Del deletes (in sync mode it deletes whichever of A and B exist); Ctrl+Space does nothing.
+
+#### Execution
+
+- F7 starts or continues the run over all visible entries, F6 runs the current entry and its children, Shift+F5 rescans (after a confirmation while a run is in progress). Starting is refused, with the entry scrolled into view and a message, while an unfinished entry has an error operation. The F7 that starts a run asks first: do it, simulate it, or cancel; F6 and a continuing F7 do not. A simulation goes through every step without touching the disk and lists what it would do in a verbose text window; real runs fill the same window and show it when something fails.
+- Entries run in tree order, depth first. Each has a status: none, to do, in progress, done, skipped, not saved or error. A folder is done when all its children are. Done entries are not run again until their operation is changed. Changing an operation clears the status.
+- Copy: an existing destination is removed first (renamed to `.orig` when backups are on), unless both are folders of the same kind. A link is copied as a link, unless following applies for its kind. A folder copy only creates the folder, since its children have operations of their own. Parent folders are created as needed. A file copy keeps the modification time and permissions. Delete: with backups on, the target is renamed to its name plus `.orig`, after removing an existing `.orig` without a further backup; otherwise the target is removed, folders recursively but never through a link; a missing target is success. Making a folder replaces a file in the way (always with a backup, whatever the option says) and creates missing parents. Backups default to on.
+- Merge of a file: parent folders are created and the file merge opens with A, B, C and the destination path as output, and the run pauses with the entry in progress. When the user saves the output at that path, the entry is done, and the user presses F7 to go on. In sync mode, merge to both saves in B and then copies B over A; if that copy fails the entry is marked as an error and turns into copy B to A. If the output is not saved before leaving, the entry becomes "not saved". Merge of a folder just creates it. Outside a run, the current file can be merged on its own into the destination.
+- The destination path of an entry is the destination folder plus the relative path; when the destination folder is B or C, the entry's own path on that side is used.
+- On an error the run stops, the status text is shown and the entry is marked. Continuing asks whether to retry the entry or skip it.
+- Kdiff3 shows a beta-status warning before a run. It has no working way to save or load a merge state, and no menu entries for sync mode or copy-newer: those actions are commented out, and the two options are settings only.
+
+#### Options
+
+Kdiff3 names, with defaults: `RecursiveDirs` on; `FilePattern`, `FileAntiPattern`, `DirAntiPattern` as above; `UseCvsIgnore` off; `FindHidden` on; `FollowFileLinks` on; `FollowDirLinks` on; `CaseSensitiveFilenameComparison` off on Windows, on elsewhere; `UnfoldSubdirs` off; `SkipDirStatus` off; comparison mode (`BinaryComparison` on, `FullAnalysis`, `TrustDate`, `TrustDateFallbackToBinary`, `TrustSize`, all off); `WhiteSpaceEqual` on; `SyncMode` off; `CopyNewer` off; `CreateBakFiles` on; `ShowIdenticalFiles` on; the four age colors.
+
+### Port design
+
+- Placement: the folder logic goes to `kdiff4-core` as modules for scanning and name filters, ignore lists, pairing and the tree, equality and ages, operation proposals, and execution; the messages go to `kdiff4-protocol`; the tree view goes to `kdiff4-gui`. The engine stays free of GUI crates, and the GUI holds no folder logic: which operations are valid for an entry, which entries are visible and what the status is all come from the engine.
+- Sessions: the host gets a folder session next to the file session; they coexist, as kdiff3's folder tree outlives the files opened from it. Opening an item sends the existing open command for the file session and leaves the folder session alone. The folder session has its own revision and its own snapshot, delta and mirror, separate from the file session's. Both the scan and the comparison are cancelable host jobs that report progress.
+- Size: trees can hold hundreds of thousands of entries, so the snapshot is a flat list with parent links, deltas are per entry (equality, operation, status, visibility) and the GUI flattens the unfolded part into a virtualized table, never one widget per entry. Visibility toggles can be applied on the host or in the mirror; the folder-equality rule above needs the host to own them.
+- Manual merge handoff stays in the host: when a run reaches a merge entry, the host opens the file session with the destination as D, pauses the run, and resumes it on the command to continue once D has been saved at that path. The unsaved-output question before leaving a merge stays a GUI dialog.
+- Dependencies: `std::fs` is enough for listing, links, times and permissions; Windows hidden attributes come from the standard Windows file extension traits without `unsafe`. A file copy has to set the modification time itself, since the standard copy keeps only the permissions. The wildcard matcher (`*`, `?`, bracket sets, semicolon lists) is small and goes into core. `walkdir` and `ignore`, planned in the Crates table, fit badly: kdiff3 filters a folder before it descends and has its own link rules, and `ignore` implements real gitignore semantics, which differ from kdiff3's, see the decisions below. Any dependency needs the owner's approval.
+- Full analysis needs a headless entry in core that runs the built-in engine on a file pair without a session and returns the conflict counts and binary-equality flags. It can be left to a later slice.
+- Config: a `[folder]` section in `config.toml` for the options that change results (recursive, the three patterns, ignore files, hidden, both link options, case sensitivity, comparison mode, white space equal, sync mode, copy newer), sharing the backup option with `[save]`. In `gui.toml`: show identical files, unfold on load, skip the status report, and the four age colors in `[colors]`.
+- CLI and Open dialog: a folder as A starts folder mode, with `-o` naming the destination folder; mixing a file with a folder is an error as in kdiff3; Browse in the Open form must be able to pick folders. The two lines of `DEVIATIONS.md` that say directory compare is dropped and a directory argument is an error go away when this lands.
+- Tests: kdiff3 has unit tests only for the ignore lists and file access, none for the tree, the proposals or the execution, so those expectations come from this section. Port the ignore-list cases (CVS: exact, prefix, suffix and wildcard patterns, the case flag, `!` reset, isolation between folders; git: comments, case, subfolder inheritance, isolation between folders; the composite list). Test the proposals as a table over which sides exist, which are equal, the mode and the options. Build fixture trees under `test_data/` for the scan, pairing and equality (with `insta` snapshots of the resulting tree), and check execution against real temporary folders, with properties such as: a simulated run changes nothing on disk; copying A to a new destination reproduces A's filtered tree; a run never touches a side that is not its destination.
+- Suggested order: scan and filters with ignore lists; pairing, equality, ages and visibility; proposals; execution and simulation; protocol and host; the GUI view; CLI, Open dialog and config.
+
+### kdiff3 quirks found
+
+Per the rules in `AGENTS.md`, port these as they are and ask the owner before fixing any.
+
+- Pattern case handling is inconsistent: the scan matches names case-insensitively on Windows and case-sensitively elsewhere whatever the case option says, while the visibility refresh follows the option; and the compiled-pattern cache is keyed by the pattern text alone, so the case mode of its first use sticks.
+- Folder equality depends on which entries are visible (see Visibility).
+- The `.gitignore` support is much smaller than git's (see Scan), and a folder's patterns also reach a sibling whose path merely starts with the same text.
+- Following folder links has no cycle protection, and the docs promise a crash for a link into its own folder.
+- Reloading drops which folders were unfolded and every chosen operation (the code to keep them is commented out).
+
+### Decisions for the owner
+
+Decided on 2026-11-06 (the work plan is `FOLDER_COMPARE_PLAN.md`):
+
+- Scan on `std::fs` and a small matcher, not `walkdir` and `ignore`.
+- The first version has ignore files, sync mode, copy-newer and full analysis, besides the plain merge modes.
+- Delivery on one branch.
+
+Still open; until the owner says otherwise the plan ports kdiff3 as it is, with one worker thread per job:
+
+- kdiff3's ignore semantics, or real gitignore semantics as a documented deviation.
+- Which of the quirks above to fix.
+- Whether the binary comparison may run on several threads, which needs a dependency or hand-rolled threading.
 
 ## Out of scope
 

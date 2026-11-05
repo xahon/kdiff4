@@ -13,6 +13,7 @@ Rust re-implementation of kdiff3: 2-way/3-way file diff and merge tool with a GU
 
 - `docs/ARCHITECTURE.md`: workspace layout, crate dependency rules, data model, protocol, config, GUI design, CLI, glossary.
 - `docs/DEVIATIONS.md`: fixed kdiff3 bugs and intentional differences.
+- `docs/FOLDER_COMPARE_PLAN.md`: work plan for folder diff and merge, with the decisions made. Delete it when the feature has landed.
 
 Keep these up to date in the same change that makes them stale.
 
