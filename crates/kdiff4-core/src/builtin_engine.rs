@@ -3,6 +3,8 @@ use std::ops::Range;
 use imara_diff::{Algorithm, Diff, Hunk, InternedInput, Interner};
 use kdiff4_protocol::engine::{CharDiff, CharRun, CompareInput, Comparison, ComparisonEngine, ComparisonOptions, DiffAlgorithm, EngineCapabilities, EngineError, HunkChange, Job, MergeStatus, Region, RegionStatus, Row, SourceLines, Token};
 
+use crate::fine_diff;
+
 
 pub const BUILTIN_ENGINE_ID: &str = "builtin";
 
@@ -85,12 +87,14 @@ impl ComparisonEngine for BuiltinEngine {
                 }
                 let changed: Vec<(Range<usize>, Range<usize>)> = if left_chars.len() > limit || right_chars.len() > limit {
                     vec![(0..left_chars.len(), 0..right_chars.len())]
-                } else {
-                    let codes = |chars: &Vec<char>| chars.iter().map(|&char| char as u32).collect::<Vec<u32>>();
-                    diff_hunks(Algorithm::Myers, codes(left_chars), codes(right_chars))
-                        .iter()
-                        .map(|hunk| (range(&hunk.before), range(&hunk.after)))
+                } else if (left, right) == (0, 2) {
+                    // kdiff3: diff.cpp, Diff3Line::fineDiff diffs C against A, and the result depends on the direction
+                    fine_diff::changed_ranges(right_chars, left_chars)
+                        .into_iter()
+                        .map(|(right_columns, left_columns)| (left_columns, right_columns))
                         .collect()
+                } else {
+                    fine_diff::changed_ranges(left_chars, right_chars)
                 };
                 for (left_columns, right_columns) in changed {
                     for column in left_columns {
@@ -585,25 +589,55 @@ mod tests {
 
     #[test]
     fn char_diff_runs_cover_each_line() {
-        assert_eq!(char_diff(&[Some("abc"), Some("abd")]), [vec![run(0..2, &[true, true]), run(2..3, &[true, false])], vec![run(0..2, &[true, true]), run(2..3, &[false, true])]]);
+        assert_eq!(char_diff(&[Some("abcdef"), Some("abcdeg")]), [vec![run(0..5, &[true, true]), run(5..6, &[true, false])], vec![run(0..5, &[true, true]), run(5..6, &[false, true])]]);
         assert_eq!(char_diff(&[Some("abc"), Some("abc")]), [vec![run(0..3, &[true, true])], vec![run(0..3, &[true, true])]]);
-        assert_eq!(char_diff(&[Some("ac"), Some("abc")]), [vec![run(0..2, &[true, true])], vec![run(0..1, &[true, true]), run(1..2, &[false, true]), run(2..3, &[true, true])]]);
+        assert_eq!(char_diff(&[Some("abcdefgh"), Some("abcdXefgh")]), [vec![run(0..8, &[true, true])], vec![run(0..4, &[true, true]), run(4..5, &[false, true]), run(5..9, &[true, true])]]);
         assert_eq!(char_diff(&[Some(""), Some("a")]), [vec![], vec![run(0..1, &[false, true])]]);
     }
 
 
     #[test]
+    fn char_diff_marks_lines_without_a_long_match_as_a_whole() {
+        assert_eq!(char_diff(&[Some("abc"), Some("abd")]), [vec![run(0..3, &[true, false])], vec![run(0..3, &[false, true])]]);
+    }
+
+
+    #[test]
     fn char_diff_counts_characters_not_bytes() {
-        assert_eq!(char_diff(&[Some("äöü"), Some("äxü")])[1], [run(0..1, &[true, true]), run(1..2, &[false, true]), run(2..3, &[true, true])]);
+        assert_eq!(char_diff(&[Some("äöüßäöü"), Some("äöüßxäöü")])[1], [run(0..4, &[true, true]), run(4..5, &[false, true]), run(5..8, &[true, true])]);
     }
 
 
     #[test]
     fn char_diff_tells_which_documents_share_each_run() {
-        let runs = char_diff(&[Some("abc"), Some("xbc"), Some("xbz")]);
-        assert_eq!(runs[0], [run(0..1, &[true, false, false]), run(1..2, &[true, true, true]), run(2..3, &[true, true, false])]);
-        assert_eq!(runs[1], [run(0..1, &[false, true, true]), run(1..2, &[true, true, true]), run(2..3, &[true, true, false])]);
-        assert_eq!(runs[2], [run(0..1, &[false, true, true]), run(1..2, &[true, true, true]), run(2..3, &[false, false, true])]);
+        let runs = char_diff(&[Some("abcdefg"), Some("xbcdefg"), Some("xbcdefz")]);
+        assert_eq!(runs[0], [run(0..1, &[true, false, false]), run(1..6, &[true, true, true]), run(6..7, &[true, true, false])]);
+        assert_eq!(runs[1], [run(0..1, &[false, true, true]), run(1..6, &[true, true, true]), run(6..7, &[true, true, false])]);
+        assert_eq!(runs[2], [run(0..1, &[false, true, true]), run(1..6, &[true, true, true]), run(6..7, &[false, false, true])]);
+    }
+
+
+    #[test]
+    fn char_diff_does_not_match_single_letters_of_renamed_words() {
+        let runs = char_diff(&[Some("let total = price * quantity;"), Some("let total = cost * quantity;")]);
+        assert_eq!(runs[0], [run(0..12, &[true, true]), run(12..17, &[true, false]), run(17..29, &[true, true])]);
+        assert_eq!(runs[1], [run(0..12, &[true, true]), run(12..16, &[false, true]), run(16..28, &[true, true])]);
+    }
+
+
+    #[test]
+    fn char_diff_of_three_changed_expressions_does_not_mark_the_space_all_have_after_the_equals_sign() {
+        let runs = char_diff(&[Some("let total = price * quantity;"), Some("let total = cost * quantity;"), Some("let total = price * count + tax;")]);
+        assert_eq!(runs[0], [run(0..12, &[true, true, true]), run(12..17, &[true, false, true]), run(17..20, &[true, true, true]), run(20..28, &[true, true, false]), run(28..29, &[true, true, true])]);
+        assert_eq!(runs[1], [run(0..12, &[true, true, true]), run(12..16, &[false, true, false]), run(16..27, &[true, true, false]), run(27..28, &[true, true, true])]);
+        assert_eq!(runs[2], [run(0..12, &[true, true, true]), run(12..20, &[true, false, true]), run(20..31, &[false, false, true]), run(31..32, &[true, true, true])]);
+    }
+
+
+    #[test]
+    fn char_diff_diffs_c_against_a_not_a_against_c() {
+        let runs = char_diff(&[Some("alpha a"), None, Some("a a")]);
+        assert_eq!(runs, [vec![run(0..4, &[true, false, false]), run(4..7, &[true, false, true])], vec![], vec![run(0..3, &[true, false, true])]]);
     }
 
 

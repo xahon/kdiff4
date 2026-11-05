@@ -272,7 +272,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     continue;
                 };
                 let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
-                paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, &style.char_diff);
+                paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, palette, &style.char_diff);
                 if let Some(caret) = caret {
                     paint_selection(&text_painter, lines, line, text_rect, &galley, caret.cursor, row_height, palette);
                 }
@@ -596,7 +596,7 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
             ranges.push((at..start, plain.clone()));
         }
         if end > start {
-            ranges.push((start..end, look.color(char_style.color.clone())));
+            ranges.push((start..end, look.text_color(char_style, plain.clone())));
         }
         at = end;
     }
@@ -607,10 +607,19 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
 }
 
 
-/// Fills the background of each char-diff segment that has one, over the full height of the row `rect`; the text starts at `text_left`.
-pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, look: &CharDiffLook) {
+/// The background of a char-diff segment: red at partial alpha, or the stronger fill of the document the characters differ from.
+fn char_background(style: &CharStyle, palette: &Palette, look: &CharDiffLook) -> Color32 {
+    match style {
+        CharStyle::Red => look.red.gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA),
+        CharStyle::Document(document) => palette.colors(document.clone()).gutter_active.clone(),
+    }
+}
+
+
+/// Fills the background of each char-diff segment, over the full height of the row `rect`; the text starts at `text_left`.
+pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, palette: &Palette, look: &CharDiffLook) {
     for (columns, char_style) in segments {
-        if !char_style.background || columns.is_empty() {
+        if columns.is_empty() {
             continue;
         }
         let left = text_left + galley.pos_from_cursor(CCursor::new(columns.start.clone())).min.x;
@@ -618,7 +627,7 @@ pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, Char
         if right <= left {
             continue;
         }
-        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, look.color(char_style.color.clone()).gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
+        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, char_background(char_style, palette, look));
     }
 }
 
@@ -694,18 +703,13 @@ pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::char_diff::CharColor;
     use crate::rows::{Block, RowMap};
-    use crate::theme::LIGHT;
+    use crate::theme::{DARK, LIGHT};
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN };
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED };
     const PLAIN: Color32 = Color32::BLACK;
-
-
-    fn styled(color: CharColor) -> CharStyle {
-        CharStyle { color, background: false }
-    }
+    const FROM_B: CharStyle = CharStyle::Document(kdiff4_protocol::Document::B);
 
 
     #[test]
@@ -716,21 +720,30 @@ mod tests {
 
 
     #[test]
-    fn segments_color_their_bytes() {
-        let segments = [(1..2, styled(CharColor::Red)), (2..4, styled(CharColor::Blue))];
-        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, Color32::BLUE), (4..5, PLAIN)]);
+    fn red_segments_color_their_bytes_and_document_segments_keep_the_plain_color() {
+        let segments = [(1..2, CharStyle::Red), (2..4, FROM_B)];
+        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, PLAIN), (4..5, PLAIN)]);
     }
 
 
     #[test]
     fn segment_columns_are_characters() {
-        assert_eq!(colored_byte_ranges("äöü", &[(1..2, styled(CharColor::Green))], PLAIN, &LOOK), [(0..2, PLAIN), (2..4, Color32::GREEN), (4..6, PLAIN)]);
+        assert_eq!(colored_byte_ranges("äöü", &[(1..2, CharStyle::Red)], PLAIN, &LOOK), [(0..2, PLAIN), (2..4, Color32::RED), (4..6, PLAIN)]);
     }
 
 
     #[test]
     fn segments_past_the_end_are_cut_off() {
-        assert_eq!(colored_byte_ranges("ab", &[(1..9, styled(CharColor::Red)), (9..12, styled(CharColor::Blue))], PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED)]);
+        assert_eq!(colored_byte_ranges("ab", &[(1..9, CharStyle::Red), (9..12, FROM_B)], PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED)]);
+    }
+
+
+    #[test]
+    fn red_backgrounds_are_translucent_and_document_backgrounds_are_the_stronger_document_fill() {
+        assert_eq!(char_background(&CharStyle::Red, &LIGHT, &LOOK), Color32::RED.gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
+        for (palette, document) in [(&LIGHT, kdiff4_protocol::Document::A), (&LIGHT, kdiff4_protocol::Document::B), (&LIGHT, kdiff4_protocol::Document::C), (&DARK, kdiff4_protocol::Document::B)] {
+            assert_eq!(char_background(&CharStyle::Document(document), palette, &LOOK), palette.colors(document).gutter_active);
+        }
     }
 
 

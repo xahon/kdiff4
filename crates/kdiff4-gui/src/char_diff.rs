@@ -5,20 +5,11 @@ use kdiff4_protocol::Document;
 use kdiff4_protocol::engine::CharRun;
 
 
-/// One of the configured char-diff colors.
+/// How a run of characters is marked: red when its characters differ from every other document of the row, otherwise in the color of the one other document they differ from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CharColor {
+pub enum CharStyle {
     Red,
-    Blue,
-    Green,
-}
-
-
-/// How a run of characters is drawn: its text color, and whether a background is filled behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CharStyle {
-    pub color: CharColor,
-    pub background: bool,
+    Document(Document),
 }
 
 
@@ -31,45 +22,44 @@ pub struct SameIn {
 }
 
 
-/// The char-diff rules: how a run of `document` is drawn, from where its characters are the same. `None` is plain text. A 2-way diff follows the same rules with C missing.
+/// The char-diff rules: how a run of `document` is marked, from where its characters are the same. `None` is plain text. A document with no line in the row is never the same, and a 2-way diff follows the same rules with C missing.
 pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
-    let filled = |color: CharColor| Some(CharStyle { color, background: true });
-    let plain = |color: CharColor| Some(CharStyle { color, background: false });
-    let missing_from_b_or_c = !same.b || same.c == Some(false);
-    let same_in_other_side = match document {
-        Document::B => same.c.unwrap_or(false),
-        Document::C => same.b,
-        Document::A | Document::D => false,
-    };
-    match (document, same.a, same_in_other_side) {
-        (Document::A, _, _) if missing_from_b_or_c => filled(CharColor::Red),
-        (Document::A, _, _) => None,
-        (Document::B | Document::C, false, false) => filled(CharColor::Red),
-        (Document::B | Document::C, false, true) => filled(CharColor::Blue),
-        (Document::B | Document::C, true, _) => plain(CharColor::Green),
-        (Document::D, _, _) => None,
+    if document == Document::D {
+        return None;
+    }
+    let others: Vec<(Document, bool)> = [(Document::A, Some(same.a)), (Document::B, Some(same.b)), (Document::C, same.c)]
+        .into_iter()
+        .filter(|(other, _)| *other != document)
+        .filter_map(|(other, same)| same.map(|same| (other, same)))
+        .collect();
+    let different: Vec<Document> = others
+        .iter()
+        .filter(|(_, same)| !same)
+        .map(|(other, _)| other.clone())
+        .collect();
+    match different.as_slice() {
+        [] => None,
+        [other] if others.len() > 1 => Some(CharStyle::Document(other.clone())),
+        _ => Some(CharStyle::Red),
     }
 }
 
 
-/// The colors char-diff runs are drawn with.
+/// The color red char-diff runs are drawn with; runs of a document are drawn with that document's color of the theme.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharDiffLook {
     pub red: Color32,
-    pub blue: Color32,
-    pub green: Color32,
 }
 
 
 impl CharDiffLook {
-    pub fn color(&self, color: CharColor) -> Color32 {
-        match color {
-            CharColor::Red => self.red.clone(),
-            CharColor::Blue => self.blue.clone(),
-            CharColor::Green => self.green.clone(),
+    /// The color of the text of a run: red text for red runs, `plain` for the runs of a document.
+    pub fn text_color(&self, style: &CharStyle, plain: Color32) -> Color32 {
+        match style {
+            CharStyle::Red => self.red.clone(),
+            CharStyle::Document(_) => plain,
         }
     }
-
 }
 
 
@@ -94,9 +84,10 @@ mod tests {
     use super::*;
 
 
-    const RED: Option<CharStyle> = Some(CharStyle { color: CharColor::Red, background: true });
-    const BLUE: Option<CharStyle> = Some(CharStyle { color: CharColor::Blue, background: true });
-    const GREEN: Option<CharStyle> = Some(CharStyle { color: CharColor::Green, background: false });
+    const RED: Option<CharStyle> = Some(CharStyle::Red);
+    const FROM_A: Option<CharStyle> = Some(CharStyle::Document(Document::A));
+    const FROM_B: Option<CharStyle> = Some(CharStyle::Document(Document::B));
+    const FROM_C: Option<CharStyle> = Some(CharStyle::Document(Document::C));
 
 
     fn same(a: bool, b: bool, c: Option<bool>) -> SameIn {
@@ -105,31 +96,42 @@ mod tests {
 
 
     #[test]
-    fn changes_made_on_one_side_only_are_red() {
+    fn text_equal_in_all_documents_is_plain() {
+        assert_eq!(char_style(Document::A, same(true, true, Some(true))), None);
+        assert_eq!(char_style(Document::B, same(true, true, Some(true))), None);
+        assert_eq!(char_style(Document::C, same(true, true, Some(true))), None);
+    }
+
+
+    #[test]
+    fn text_that_differs_from_both_other_documents_is_red() {
+        assert_eq!(char_style(Document::A, same(true, false, Some(false))), RED);
         assert_eq!(char_style(Document::B, same(false, true, Some(false))), RED);
         assert_eq!(char_style(Document::C, same(false, false, Some(true))), RED);
     }
 
 
     #[test]
-    fn changes_made_alike_in_b_and_c_are_blue() {
-        assert_eq!(char_style(Document::B, same(false, true, Some(true))), BLUE);
-        assert_eq!(char_style(Document::C, same(false, true, Some(true))), BLUE);
+    fn text_changed_only_in_b_is_b_colored_where_it_was_kept() {
+        assert_eq!(char_style(Document::A, same(true, false, Some(true))), FROM_B);
+        assert_eq!(char_style(Document::C, same(true, false, Some(true))), FROM_B);
+        assert_eq!(char_style(Document::B, same(false, true, Some(false))), RED);
     }
 
 
     #[test]
-    fn text_kept_from_a_is_green() {
-        assert_eq!(char_style(Document::B, same(true, true, Some(true))), GREEN);
-        assert_eq!(char_style(Document::C, same(true, false, Some(true))), GREEN);
+    fn text_changed_only_in_c_is_c_colored_where_it_was_kept() {
+        assert_eq!(char_style(Document::A, same(true, true, Some(false))), FROM_C);
+        assert_eq!(char_style(Document::B, same(true, true, Some(false))), FROM_C);
+        assert_eq!(char_style(Document::C, same(false, false, Some(true))), RED);
     }
 
 
     #[test]
-    fn text_of_a_missing_from_b_or_c_is_red_in_a() {
-        assert_eq!(char_style(Document::A, same(true, false, Some(true))), RED);
-        assert_eq!(char_style(Document::A, same(true, true, Some(false))), RED);
-        assert_eq!(char_style(Document::A, same(true, true, Some(true))), None);
+    fn text_changed_only_in_a_is_a_colored_where_b_and_c_kept_it() {
+        assert_eq!(char_style(Document::B, same(false, true, Some(true))), FROM_A);
+        assert_eq!(char_style(Document::C, same(false, true, Some(true))), FROM_A);
+        assert_eq!(char_style(Document::A, same(true, false, Some(false))), RED);
     }
 
 
@@ -138,13 +140,21 @@ mod tests {
         assert_eq!(char_style(Document::A, same(true, false, None)), RED);
         assert_eq!(char_style(Document::A, same(true, true, None)), None);
         assert_eq!(char_style(Document::B, same(false, true, None)), RED);
-        assert_eq!(char_style(Document::B, same(true, true, None)), GREEN);
+        assert_eq!(char_style(Document::B, same(true, true, None)), None);
     }
 
 
     #[test]
     fn output_has_no_char_diff() {
         assert_eq!(char_style(Document::D, same(false, false, Some(false))), None);
+    }
+
+
+    #[test]
+    fn only_red_text_has_its_own_color() {
+        let look = CharDiffLook { red: Color32::RED };
+        assert_eq!(look.text_color(&CharStyle::Red, Color32::BLACK), Color32::RED);
+        assert_eq!(look.text_color(&CharStyle::Document(Document::B), Color32::BLACK), Color32::BLACK);
     }
 
 
@@ -155,22 +165,39 @@ mod tests {
 
     #[test]
     fn segments_join_neighbors_with_the_same_style() {
-        let runs = [run(0..2, &[true, true, true]), run(2..3, &[false, true, false]), run(3..4, &[false, true, false]), run(4..6, &[true, true, false])];
-        let red = RED.unwrap();
-        let green = GREEN.unwrap();
-        assert_eq!(segments(Document::B, &runs, 3), [(0..2, green), (2..4, red), (4..6, green)]);
+        let runs = [run(0..2, &[true, true, true]), run(2..3, &[false, true, false]), run(3..4, &[false, true, false]), run(4..6, &[true, true, false]), run(6..7, &[true, true, false])];
+        assert_eq!(segments(Document::B, &runs, 3), [(2..4, CharStyle::Red), (4..7, CharStyle::Document(Document::C))]);
+    }
+
+
+    #[test]
+    fn segments_keep_neighbors_with_different_styles_apart() {
+        let runs = [run(0..1, &[true, false, true]), run(1..2, &[true, true, false])];
+        assert_eq!(segments(Document::A, &runs, 3), [(0..1, CharStyle::Document(Document::B)), (1..2, CharStyle::Document(Document::C))]);
+    }
+
+
+    #[test]
+    fn a_word_changed_in_one_document_is_that_documents_color_in_the_others_and_red_in_it() {
+        let a = [run(0..12, &[true, true, true]), run(12..17, &[true, false, true]), run(17..20, &[true, true, true]), run(20..28, &[true, true, false]), run(28..29, &[true, true, true])];
+        let b = [run(0..12, &[true, true, true]), run(12..16, &[false, true, false]), run(16..27, &[true, true, false]), run(27..28, &[true, true, true])];
+        let c = [run(0..12, &[true, true, true]), run(12..20, &[true, false, true]), run(20..31, &[false, false, true]), run(31..32, &[true, true, true])];
+        let (from_b, from_c) = (CharStyle::Document(Document::B), CharStyle::Document(Document::C));
+        assert_eq!(segments(Document::A, &a, 3), [(12..17, from_b), (20..28, from_c)]);
+        assert_eq!(segments(Document::B, &b, 3), [(12..16, CharStyle::Red), (16..27, from_c)]);
+        assert_eq!(segments(Document::C, &c, 3), [(12..20, from_b), (20..31, CharStyle::Red)]);
     }
 
 
     #[test]
     fn segments_leave_plain_runs_out() {
         let runs = [run(0..2, &[true, true]), run(2..3, &[true, false]), run(3..5, &[true, true])];
-        assert_eq!(segments(Document::A, &runs, 2), [(2..3, RED.unwrap())]);
+        assert_eq!(segments(Document::A, &runs, 2), [(2..3, CharStyle::Red)]);
     }
 
 
     #[test]
     fn segments_treat_missing_flags_as_different() {
-        assert_eq!(segments(Document::B, &[run(0..1, &[])], 3), [(0..1, RED.unwrap())]);
+        assert_eq!(segments(Document::B, &[run(0..1, &[])], 3), [(0..1, CharStyle::Red)]);
     }
 }

@@ -227,12 +227,8 @@ impl SettingsDialog {
         });
 
         section(ui, "char_diff_colors", "Character diff: Colors", |ui| {
-            ui.label("Colors:");
-            ui.horizontal(|ui| {
-                ui.color_edit_button_srgb(&mut self.draft.char_diff_red).on_hover_text("Changes made in only B or C, and text of A that B or C removed.");
-                ui.color_edit_button_srgb(&mut self.draft.char_diff_blue).on_hover_text("Changes made alike in B and C.");
-                ui.color_edit_button_srgb(&mut self.draft.char_diff_green).on_hover_text("Text of B and C kept from A, in lines that differ.");
-            });
+            ui.label("Red:");
+            ui.color_edit_button_srgb(&mut self.draft.char_diff_red).on_hover_text("Text that differs from every other document. Text that differs from just one other document is drawn on the color of that document.");
             ui.end_row();
         });
     }

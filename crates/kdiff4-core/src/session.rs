@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn snapshot_has_char_diffs_of_rows_that_differ() {
         let dir = temp_dir("char-diffs");
-        let session = merge_of(&dir, &["same", "abc"], &["same", "xbc"], &["same", "xbz"]);
+        let session = merge_of(&dir, &["same", "abcdefg"], &["same", "xbcdefg"], &["same", "xbcdefz"]);
         let snapshot = session.snapshot();
         assert_eq!(snapshot.char_diffs.len(), 3);
         let same_in = |document: usize, line: usize| -> Vec<Vec<bool>> {
@@ -687,7 +687,7 @@ mod tests {
         };
         assert!(snapshot.char_diffs.iter().all(|diff| diff.line(0).is_empty()));
         assert_eq!(same_in(1, 1), [vec![false, true, true], vec![true, true, true], vec![true, true, false]]);
-        assert_eq!(snapshot.char_diffs[2].line(1)[2].columns, 2..3);
+        assert_eq!(snapshot.char_diffs[2].line(1)[2].columns, 6..7);
     }
 
 

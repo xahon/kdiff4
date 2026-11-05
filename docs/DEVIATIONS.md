@@ -4,10 +4,12 @@ Reference: kdiff3 at `../kdiff3`, HEAD `33e56f0c`, v1.14.70. Anything not listed
 
 ## Fixed kdiff3 bugs
 
-None yet. The owner decides which kdiff3 bugs get fixed. When you find one while porting, port kdiff3's behavior, report the bug to the owner, and leave it unfixed until they approve. When a fix is approved, add a row here in the same change as the fix:
+The owner decides which kdiff3 bugs get fixed. When you find one while porting, port kdiff3's behavior, report the bug to the owner, and leave it unfixed until they approve. When a fix is approved, add a row here in the same change as the fix:
 
 | # | Area | kdiff3 behavior | Kdiff4 behavior | Reference | Test |
 |---|---|---|---|---|---|
+| 1 | Character diff | A short match (fewer than 4 characters) between two changes is merged into the change after it only in the first step of the line diff, so a replaced word is marked in fragments (`quantity` against `count + tax` as `q[u]a[nt]i[t]y`) | Every short match is merged except the first step's, and that one only when another match is long, like kdiff3 0.9.98, so a replaced word is marked whole | `diff.cpp`, `DiffList::optimize`: commit `92b1326e` turned `dli == begin()` into `index > 0` | `fine_diff::tests::short_matches_inside_a_change_are_merged_into_it` |
+| 2 | Character diff | A change can start with a character both lines have at the same place, because the match search pulls it back into the change: the space after the `=` of `let total = cost * quantity;` and `let total = price * count + tax;` is marked in both | When the lines have a long match, a change starts at its first differing character, so that space is not marked | `diff.cpp`, `DiffList::calcDiff`, the step that goes back over equal characters | `fine_diff::tests::a_change_does_not_start_with_the_space_both_lines_have_there` |
 
 - Reference: kdiff3 file and function, or bug report URL.
 - Test: name of the regression test that pins the fixed behavior.

@@ -232,7 +232,7 @@ fn paint_lines(ui: &mut Ui, lenses: &[Lens<'_>], sources: usize, state: &PaneSta
             continue;
         };
         let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
-        text_view::paint_char_backgrounds(&painter, segments, galley, text_origin.x, rect, &style.char_diff);
+        text_view::paint_char_backgrounds(&painter, segments, galley, text_origin.x, rect, palette, &style.char_diff);
         if let Some(cursor) = caret {
             text_view::paint_selection(&painter, lens.lines, line, text_rect, galley, cursor, row_height, palette);
         }
@@ -489,7 +489,7 @@ mod tests {
     }
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED, blue: Color32::BLUE, green: Color32::GREEN };
+    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED };
 
 
     /// The strip in a test harness, and what its frames did: the actions it returned, the rect it took, the height `height` reserves for it, and its row height and line count.

@@ -25,10 +25,8 @@ pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
 pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
 pub const MAX_OTHER_REGION_BORDER_PERCENT: u8 = 100;
 pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
-/// Char-diff text colors: dark enough to keep 4.5:1 contrast on every light-theme background they are drawn on.
+/// Char-diff red text color: dark enough to keep 4.5:1 contrast on every light-theme background it is drawn on.
 pub const DEFAULT_CHAR_DIFF_RED: [u8; 3] = [0xB0, 0x00, 0x00];
-pub const DEFAULT_CHAR_DIFF_BLUE: [u8; 3] = [0x00, 0x3C, 0xB4];
-pub const DEFAULT_CHAR_DIFF_GREEN: [u8; 3] = [0x00, 0x66, 0x00];
 
 
 #[derive(Debug, Error)]
@@ -95,10 +93,8 @@ pub struct ViewConfig {
     pub region_corner_radius: u8,
     /// Opacity of the borders of the regions other than the jumped-to one, in percent.
     pub other_region_border_percent: u8,
-    /// RGB of char-diff text and backgrounds: changes made on one side, changes made alike in B and C, and text kept from A.
+    /// RGB of the char-diff text and background of characters that differ from every other document.
     pub char_diff_red: [u8; 3],
-    pub char_diff_blue: [u8; 3],
-    pub char_diff_green: [u8; 3],
     pub theme: ThemeChoice,
     pub light_colors: ThemeColors,
     pub dark_colors: ThemeColors,
@@ -108,7 +104,7 @@ pub struct ViewConfig {
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, char_diff_red: DEFAULT_CHAR_DIFF_RED, char_diff_blue: DEFAULT_CHAR_DIFF_BLUE, char_diff_green: DEFAULT_CHAR_DIFF_GREEN, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, char_diff_red: DEFAULT_CHAR_DIFF_RED, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -299,7 +295,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, char_diff_red: [9, 8, 7], char_diff_blue: [6, 5, 4], char_diff_green: [3, 2, 1], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, char_diff_red: [9, 8, 7], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());

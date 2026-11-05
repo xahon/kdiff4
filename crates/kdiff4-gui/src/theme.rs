@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn default_char_diff_colors_are_readable_in_the_light_theme() {
         let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
-        let colors = [crate::config::DEFAULT_CHAR_DIFF_RED, crate::config::DEFAULT_CHAR_DIFF_BLUE, crate::config::DEFAULT_CHAR_DIFF_GREEN];
+        let colors = [crate::config::DEFAULT_CHAR_DIFF_RED];
         let [r, g, b, a] = crate::config::DEFAULT_CURRENT_REGION_COLOR;
         let blend = |over: u8, under: u8| ((over as f32 * a as f32 + under as f32 * (255 - a) as f32) / 255.0).round() as u8;
         let highlight = Color32::from_rgb(blend(r, LIGHT.pane_bg.r()), blend(g, LIGHT.pane_bg.g()), blend(b, LIGHT.pane_bg.b()));
@@ -300,6 +300,16 @@ mod tests {
                 assert!(contrast_ratio(colors.gutter_border, colors.gutter_active) >= 1.5, "{colors:?} in {palette:?}");
                 assert!(contrast_ratio(colors.gutter_active, colors.header) >= 1.3, "active blocks must stand out: {colors:?} in {palette:?}");
                 assert!(contrast_ratio(palette.text, colors.gutter_active) >= 4.5, "D's origin letters: {colors:?} in {palette:?}");
+            }
+        }
+    }
+
+
+    #[test]
+    fn char_diff_fills_of_the_documents_stand_out_from_the_pane() {
+        for palette in [LIGHT, DARK] {
+            for colors in palette.sources.iter() {
+                assert!(contrast_ratio(colors.gutter_active, palette.pane_bg) >= 1.5, "{colors:?} in {palette:?}");
             }
         }
     }
