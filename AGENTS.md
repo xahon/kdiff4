@@ -48,6 +48,10 @@ cargo run -- base.txt left.txt right.txt -o out.txt
 - American English spelling everywhere: code, comments, docs.
 - In docs, refer to files by name in backticks, not with markdown links.
 
+## Session naming
+
+Name every session `<Domain>: <name>`, e.g. `Gui: Add diff toolbar` or `Core: Fix line matching`. Set the title on the first turn, as soon as the task is clear, and again if the scope changes. The app's auto-generated title does not count.
+
 ## Known kdiff3 bugs
 
 Listed in `docs/DEVIATIONS.md`. When porting an area, check that list first and implement the fixed behavior, not kdiff3's.
