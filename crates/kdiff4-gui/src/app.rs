@@ -58,10 +58,7 @@ const TOOLBAR_ICON_SIZE: f32 = 18.0;
 const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
 const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
-pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
-const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
-const SESSION_WINDOW_SIZE: [f32; 2] = [1280.0, 800.0];
 
 /// What a request in flight was for, so its response can be reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +107,6 @@ pub struct KdiffApp {
     language: LanguageState,
     panes: PaneState,
     pending: HashMap<RequestId, Pending>,
-    window_enlarged: bool,
     settings: Option<SettingsDialog>,
     font_scan: FontScan,
     /// The view settings currently applied to the egui context: the saved ones, or the settings dialog's draft.
@@ -164,7 +160,6 @@ impl KdiffApp {
             language: LanguageState::default(),
             panes: PaneState::default(),
             pending,
-            window_enlarged: false,
             settings: None,
             font_scan: FontScan::default(),
             applied_view: None,
@@ -208,9 +203,6 @@ impl KdiffApp {
             self.font_scan.start(ctx);
             let options = self.mirror.as_ref().map(Mirror::options);
             self.settings = Some(SettingsDialog::new(&self.config.view, options));
-            if !self.window_enlarged {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SETTINGS_WINDOW_SIZE.into()));
-            }
         }
     }
 
@@ -229,9 +221,6 @@ impl KdiffApp {
                 }
             }
             SettingsAction::Cancel | SettingsAction::OpenConfigFile => self.apply_view(ctx, dialog.original()),
-        }
-        if !self.window_enlarged {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(INITIAL_WINDOW_SIZE.into()));
         }
     }
 
@@ -307,10 +296,10 @@ impl KdiffApp {
         self.send(Command::Resync, Pending::Resync);
     }
 
-    fn drain_messages(&mut self, ctx: &egui::Context) {
+    fn drain_messages(&mut self) {
         while !self.engine_stopped {
             match self.client.try_recv() {
-                Ok(Some(message)) => self.handle_message(ctx, message),
+                Ok(Some(message)) => self.handle_message(message),
                 Ok(None) => break,
                 Err(error) => {
                     self.engine_stopped = true;
@@ -321,7 +310,7 @@ impl KdiffApp {
         }
     }
 
-    fn handle_message(&mut self, ctx: &egui::Context, message: HostMessage) {
+    fn handle_message(&mut self, message: HostMessage) {
         match message {
             HostMessage::Event(Event::Snapshot(snapshot)) => {
                 if self.is_opening() {
@@ -337,10 +326,6 @@ impl KdiffApp {
                 self.panes.void_row = None;
                 self.form_open = false;
                 self.error = None;
-                if !self.window_enlarged {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SESSION_WINDOW_SIZE.into()));
-                    self.window_enlarged = true;
-                }
             }
             HostMessage::Event(Event::Delta(delta)) => {
                 let from_undo = delta.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::UndoRedo));
@@ -1235,8 +1220,8 @@ impl KdiffApp {
 }
 
 impl eframe::App for KdiffApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_messages(ctx);
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_messages();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

@@ -43,7 +43,7 @@ pub struct Startup {
 /// Runs the window on the calling thread until the user closes it.
 pub fn run(client: Client, startup: Startup) -> Result<(), GuiError> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("Kdiff4").with_inner_size(app::INITIAL_WINDOW_SIZE),
+        viewport: egui::ViewportBuilder::default().with_title("Kdiff4").with_maximized(true),
         ..Default::default()
     };
     eframe::run_native("Kdiff4", options, Box::new(|cc| Ok(Box::new(app::KdiffApp::new(&cc.egui_ctx, client, startup))))).map_err(|error| GuiError::Eframe(error.to_string()))
