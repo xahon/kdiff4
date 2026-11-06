@@ -100,6 +100,11 @@ pub enum Command {
         number: u32,
         to: u32,
     },
+    /// Shows the complete alignment `number` at `slot` of the display order of the other alignments, counting from 0 at the top. Where the documents disagree on the order, the alignment's hunks are lifted in the documents that don't agree with that place and shown there. Nothing is compared again until `ApplyAlignments`. Rejected when `number` is not a complete alignment, when `slot` is past the last alignment, or when no document keeps its order at that slot.
+    PlaceAlignment {
+        number: u32,
+        slot: usize,
+    },
     /// Removes every mark. The comparison keeps the alignments it was computed with until `ApplyAlignments`.
     ClearAlignmentMarks,
     /// Compares again with the alignments the marks give: every number marked in all source documents. Like a reload, D is rebuilt from the new regions, its choices, edits and undo history are dropped, and the host answers with a new snapshot. Does nothing when the marks give the alignments already applied. Fails with `ErrorKind::NeedsConfirmation` when D holds choices or edits and `confirmed` is not set.
@@ -252,6 +257,9 @@ pub struct AlignmentMark {
     /// The marked lines. An empty range is an anchor: the position before that line.
     pub lines: Range<usize>,
     pub status: MarkStatus,
+    /// Its alignment shows it away from its place in the document. Taken from the applied alignments when `status` is `Applied`, from where the alignment would be shown otherwise.
+    #[serde(default)]
+    pub lifted: bool,
 }
 
 impl AlignmentMark {
@@ -266,6 +274,33 @@ pub struct Alignments {
     pub marks: Vec<AlignmentMark>,
     /// The marks give other alignments than the comparison was computed with, so Apply would compare again.
     pub changed: bool,
+    /// Every complete alignment that is lifted in some document, with the places it could be shown at instead, ordered by number.
+    #[serde(default)]
+    pub insets: Vec<InsetChoice>,
+    /// Set only in the answer to a mark: the alignment that mark completed, when it is an inset and the user should say where to show it. It is shown at the option that fits the documents best until then.
+    #[serde(default)]
+    pub ask: Option<u32>,
+}
+
+/// Where an alignment that the documents disagree on can be shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsetChoice {
+    pub number: u32,
+    /// The index in `options` of where it is shown now.
+    pub current: usize,
+    /// Each way to lift it: one per set of documents that keep their order. The documents that don't are the ones whose hunk moves.
+    pub options: Vec<InsetOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsetOption {
+    /// The place in the display order of the other alignments, counting from 0 at the top: the `slot` of `PlaceAlignment`.
+    pub slot: usize,
+    /// The alignments shown right above and right below that place.
+    pub above: Option<u32>,
+    pub below: Option<u32>,
+    /// The documents whose hunk is lifted there.
+    pub lifted: Vec<Document>,
 }
 
 impl Alignments {
@@ -467,6 +502,7 @@ mod tests {
             number,
             lines,
             status: MarkStatus::Pending,
+            lifted: false,
         }
     }
 
@@ -481,6 +517,7 @@ mod tests {
         let alignments = Alignments {
             marks: vec![mark(Document::A, 1, 0..1), mark(Document::B, 1, 2..4), mark(Document::B, 2, 5..5)],
             changed: true,
+            ..Alignments::default()
         };
         let numbers = |document| -> Vec<u32> { alignments.of(document).map(|mark| mark.number).collect() };
         assert_eq!(numbers(Document::A), [1]);

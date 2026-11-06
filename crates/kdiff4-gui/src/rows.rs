@@ -42,10 +42,11 @@ pub struct RowMap {
 }
 
 impl RowMap {
-    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. `merge` tells which regions D holds a hand edit of; they stand out like differences. Falls back to one plain row per line when the comparison doesn't hold every line of the document exactly once, in order.
+    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. `merge` tells which regions D holds a hand edit of; they stand out like differences. Falls back to one plain row per line when the comparison doesn't hold every line of the document exactly once. Lines may come in any order: an inset hunk is shown away from its place in the document.
     pub fn for_source(comparison: &Comparison, merge: &[RegionMerge], document_index: usize, line_count: usize, heights: Option<&[usize]>) -> RowMap {
         let mut rows = Vec::new();
-        let mut row_of_line = Vec::with_capacity(line_count);
+        let mut row_of_line = vec![usize::MAX; line_count];
+        let mut shown = 0;
         let mut region_starts = Vec::with_capacity(comparison.regions.len());
         for (index, region) in comparison.regions.iter().enumerate() {
             region_starts.push(rows.len());
@@ -60,10 +61,11 @@ impl RowMap {
             for row in &region.rows {
                 let line = row.lines.get(document_index).cloned().flatten();
                 if let Some(line) = line {
-                    if line != row_of_line.len() {
-                        return RowMap::fallback(line_count, "lines out of order");
+                    if row_of_line.get(line).is_none_or(|row| *row != usize::MAX) {
+                        return RowMap::fallback(line_count, "a line is missing or shown twice");
                     }
-                    row_of_line.push(rows.len());
+                    row_of_line[line] = rows.len();
+                    shown += 1;
                 }
                 rows.push(PaneRow {
                     line,
@@ -75,7 +77,7 @@ impl RowMap {
             }
             pad(&mut rows, index, region_starts[index], heights, boxed, block);
         }
-        if row_of_line.len() != line_count {
+        if shown != line_count {
             return RowMap::fallback(line_count, "lines missing");
         }
         RowMap { rows, row_of_line, region_starts }
@@ -133,7 +135,16 @@ impl RowMap {
 
     #[cfg(test)]
     pub fn from_rows(rows: Vec<PaneRow>) -> RowMap {
-        let row_of_line = rows.iter().enumerate().filter_map(|(index, row)| row.line.map(|_| index)).collect();
+        let lines: Vec<usize> = rows.iter().filter_map(|row| row.line).collect();
+        let row_of_line = if lines.windows(2).all(|pair| pair[0] < pair[1]) {
+            rows.iter().enumerate().filter_map(|(index, row)| row.line.map(|_| index)).collect()
+        } else {
+            let mut row_of_line = vec![0; lines.len()];
+            for (index, line) in rows.iter().enumerate().filter_map(|(index, row)| row.line.map(|line| (index, line))) {
+                row_of_line[line] = index;
+            }
+            row_of_line
+        };
         RowMap {
             rows,
             row_of_line,
@@ -522,10 +533,25 @@ mod tests {
                 ..PaneRow::default()
             })
         );
+        let mut twice = two_way_comparison();
+        twice.regions.push(twice.regions[0].clone());
+        let map = RowMap::for_source(&twice, &[], 0, 2, None);
+        assert_eq!(Rows::Mapped(&map).len(), 2);
+        assert_eq!(Rows::Mapped(&map).row_of_line(1), 1);
+    }
+
+    #[test]
+    fn lines_shown_away_from_their_place_keep_their_rows() {
         let mut shuffled = two_way_comparison();
         shuffled.regions.swap(0, 2);
         let map = RowMap::for_source(&shuffled, &[], 0, 2, None);
-        assert_eq!(Rows::Mapped(&map).row_of_line(1), 1);
+        let rows = Rows::Mapped(&map);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.row_of_line(1), 0);
+        assert_eq!(rows.row_of_line(0), 3);
+        assert_eq!(rows.row(0).and_then(|row| row.line), Some(1));
+        assert_eq!(rows.row(3).and_then(|row| row.line), Some(0));
+        assert_eq!(rows.line_at_or_after(1), Some(0));
     }
 
     fn state(choice: Choice, edited: bool, output_lines: usize) -> RegionMerge {

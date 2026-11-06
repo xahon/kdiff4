@@ -146,6 +146,8 @@ pub enum MenuAction {
     RemoveMark(u32),
     /// Give the mark with the first number the second.
     RenumberMark(u32, u32),
+    /// Show the alignment with the first number at the place with the second index among the other alignments.
+    PlaceMark(u32, usize),
 }
 
 /// Where the context menu was opened: the positions an anchor can go to, whether that is on a void row, and the marks of the alignment column under the pointer, as indices into the pane marks.
@@ -249,6 +251,7 @@ pub fn show(
     let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.pane_text).size().x;
     let margin = margin_widths(style, lines.count(), char_width, row_height);
     let places: Vec<Place> = marks.marks.iter().map(|mark| alignment_gutter::place(mark, rows, lines.count())).collect();
+    let arrows: Vec<alignment_gutter::Arrow> = marks.marks.iter().filter_map(|mark| alignment_gutter::arrow(mark, rows, lines.count())).collect();
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -313,6 +316,7 @@ pub fn show(
                         color,
                         palette,
                         &font_id,
+                        &arrows,
                     );
                 }
                 let caret_on_void = caret.and_then(|caret| caret.void_row) == Some(row);
@@ -503,6 +507,15 @@ fn show_menu(ui: &mut Ui, target: &MenuTarget, marks: PaneMarks<'_>, can_mark_se
             });
             if ui.button("Remove").clicked() {
                 action = Some(MenuAction::RemoveMark(mark.number));
+            }
+            if let Some(choice) = marks.insets.iter().find(|choice| choice.number == mark.number).filter(|choice| choice.options.len() > 1) {
+                ui.menu_button("Show Elsewhere", |ui| {
+                    for option in choice.options.iter().enumerate().filter(|(index, _)| *index != choice.current).map(|(_, option)| option) {
+                        if ui.button(alignment_gutter::option_label(option)).clicked() {
+                            action = Some(MenuAction::PlaceMark(mark.number, option.slot));
+                        }
+                    }
+                });
             }
         });
     }
@@ -1161,6 +1174,7 @@ mod tests {
     /// A source pane in a test harness with one mark of B over lines 1 and 2, and what its frames did: the menu action it returned and where its first row and the columns are.
     struct MenuTest {
         marks: Vec<AlignmentMark>,
+        insets: Vec<kdiff4_protocol::InsetChoice>,
         highest: u32,
         alignment_color: Option<Color32>,
         caret: Option<Caret>,
@@ -1176,9 +1190,11 @@ mod tests {
             number: 1,
             lines: 1..3,
             status: kdiff4_protocol::MarkStatus::Pending,
+            lifted: false,
         }];
         let test = MenuTest {
             marks,
+            insets: Vec::new(),
             highest: 1,
             alignment_color,
             caret,
@@ -1208,6 +1224,7 @@ mod tests {
                 let marks = PaneMarks {
                     marks: &test.marks,
                     highest: test.highest,
+                    insets: &test.insets,
                 };
                 let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None);
                 if response.menu.is_some() {
@@ -1312,6 +1329,42 @@ mod tests {
         harness.get_by_label("2").click();
         harness.run_steps(4);
         assert_eq!(harness.state().menu, Some(MenuAction::RenumberMark(1, 2)));
+    }
+
+    #[test]
+    fn an_inset_can_be_shown_at_another_place_from_the_menu() {
+        let mut harness = menu_harness(Some(Color32::BLUE), None);
+        let option = |slot, above, below, lifted: &[Document]| kdiff4_protocol::InsetOption {
+            slot,
+            above,
+            below,
+            lifted: lifted.to_vec(),
+        };
+        harness.state_mut().insets = vec![kdiff4_protocol::InsetChoice {
+            number: 1,
+            current: 0,
+            options: vec![option(0, None, Some(2), &[Document::A, Document::C]), option(1, Some(2), None, &[Document::B])],
+        }];
+        let pos = on_alignment_column(harness.state(), 2);
+        right_click(&mut harness, pos);
+        harness.get_by_label("Alignment 1").click();
+        harness.run_steps(4);
+        harness.get_by_label("Show Elsewhere").click();
+        harness.run_steps(4);
+        assert!(harness.query_by_label("Above alignment 2 (moves A and C)").is_none());
+        harness.get_by_label("Below alignment 2 (moves B)").click();
+        harness.run_steps(4);
+        assert_eq!(harness.state().menu, Some(MenuAction::PlaceMark(1, 1)));
+    }
+
+    #[test]
+    fn marks_that_cannot_be_shown_elsewhere_have_no_such_menu() {
+        let mut harness = menu_harness(Some(Color32::BLUE), None);
+        let pos = on_alignment_column(harness.state(), 2);
+        right_click(&mut harness, pos);
+        harness.get_by_label("Alignment 1").click();
+        harness.run_steps(4);
+        assert!(harness.query_by_label("Show Elsewhere").is_none());
     }
 
     #[test]

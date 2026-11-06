@@ -456,7 +456,7 @@ mod tests {
     fn manual_alignments_separate_unrelated_insertions() {
         let documents = Documents::new(&[&["Bar", "Baz"], &["Bar", "Foo", "Baz"], &["Bar", "Qux", "Baz"]]);
         assert_eq!(documents.compare(&[]).regions[1].status, RegionStatus::Merge(MergeStatus::Conflict));
-        let alignments = [ManualAlignment { parts: vec![1..1, 1..2, 1..1] }, ManualAlignment { parts: vec![1..1, 2..2, 1..2] }];
+        let alignments = [ManualAlignment::new(vec![1..1, 1..2, 1..1]), ManualAlignment::new(vec![1..1, 2..2, 1..2])];
         let expected = [
             (vec![0..1, 0..1, 0..1], UNCHANGED_3),
             (vec![1..1, 1..2, 1..1], RegionStatus::Merge(MergeStatus::ChangedInB)),
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn two_way_manual_alignment() {
         let documents = Documents::new(&[&["a", "b", "c"], &["c", "b", "a"]]);
-        let alignments = [ManualAlignment { parts: vec![0..1, 2..3] }];
+        let alignments = [ManualAlignment::new(vec![0..1, 2..3])];
         let comparison = documents.compare(&alignments);
         assert_eq!(comparison.regions[0].hunks, [0..0, 0..2]);
         assert_eq!(
@@ -690,20 +690,27 @@ mod tests {
 
     const ALPHABET: [&str; 4] = ["a", "b", "c", " c"];
 
+    /// Random documents with random alignments. Every document may hold them in another order than the list; the parts that keep the list order are a longest stretch of the document's parts that is already in order, and the others are lifted.
     fn documents_with_alignments() -> impl Strategy<Value = (Vec<Vec<&'static str>>, Vec<ManualAlignment>)> {
-        (2usize..=3, 0usize..3)
+        (2usize..=3, 0usize..4)
             .prop_flat_map(|(documents, count)| {
                 vec(vec(select(ALPHABET.to_vec()), 0..15), documents).prop_flat_map(move |lines| {
                     let cuts: Vec<_> = lines.iter().map(|document| vec(0..=document.len(), count * 2)).collect();
-                    (Just(lines), cuts)
+                    let orders: Vec<_> = (0..lines.len()).map(|_| Just((0..count).collect::<Vec<usize>>()).prop_shuffle()).collect();
+                    (Just(lines), cuts, orders)
                 })
             })
-            .prop_map(|(lines, mut cuts)| {
+            .prop_map(|(lines, mut cuts, orders)| {
                 cuts.iter_mut().for_each(|document| document.sort());
                 let count = cuts.first().map(|document| document.len() / 2).unwrap_or(0);
+                let in_order: Vec<Vec<bool>> = orders.iter().map(|order| longest_increasing(order)).collect();
                 let alignments = (0..count)
-                    .map(|index| ManualAlignment {
-                        parts: cuts.iter().map(|document| document[index * 2]..document[index * 2 + 1]).collect(),
+                    .map(|index| {
+                        let parts = (0..cuts.len()).map(|document| {
+                            let part = orders[document][index];
+                            cuts[document][part * 2]..cuts[document][part * 2 + 1]
+                        });
+                        ManualAlignment::with_lifted(parts.collect(), in_order.iter().map(|document| !document[index]).collect())
                     })
                     .filter(|alignment| alignment.parts.iter().any(|part| !part.is_empty()))
                     .collect();
@@ -711,8 +718,20 @@ mod tests {
             })
     }
 
+    /// Which entries of `order` are in a longest increasing subsequence.
+    fn longest_increasing(order: &[usize]) -> Vec<bool> {
+        let mut best: Vec<Vec<usize>> = Vec::new();
+        for (index, value) in order.iter().enumerate() {
+            let mut chain = (0..index).filter(|before| order[*before] < *value).map(|before| best[before].clone()).max_by_key(|chain| chain.len()).unwrap_or_default();
+            chain.push(index);
+            best.push(chain);
+        }
+        let chain = best.into_iter().max_by_key(|chain| chain.len()).unwrap_or_default();
+        (0..order.len()).map(|index| chain.contains(&index)).collect()
+    }
+
     proptest! {
-        // Passing run_comparison means the result check accepted it: every line once, in order, alignments at region boundaries.
+        // Passing run_comparison means the result check accepted it: every line once, in display order, alignments at region boundaries.
         #[test]
         fn results_are_valid_and_statuses_match_hunks((lines, alignments) in documents_with_alignments(), myers in any::<bool>()) {
             let documents: Vec<&[&'static str]> = lines.iter().map(|document| document.as_slice()).collect();

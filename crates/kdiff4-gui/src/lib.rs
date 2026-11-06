@@ -5,6 +5,7 @@ mod config;
 mod editing;
 mod find;
 mod fonts;
+mod inset_dialog;
 mod language;
 mod minimap;
 mod mirror;

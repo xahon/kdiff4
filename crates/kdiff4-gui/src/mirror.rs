@@ -579,8 +579,10 @@ mod tests {
                 number: 1,
                 lines: 0..1,
                 status: kdiff4_protocol::MarkStatus::Pending,
+                lifted: false,
             }],
             changed: false,
+            ..Alignments::default()
         };
         assert_eq!(mirror.apply_delta(delta(2, None, Change::AlignmentsChanged(marked.clone()))), DeltaOutcome::Applied);
         assert_eq!(mirror.alignments(), &marked);

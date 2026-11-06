@@ -36,11 +36,12 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | protocol | `transport.rs` | the client and host endpoints and the in-process transport, with the waker that tells a front end a message arrived |
 | protocol | `engine/mod.rs` | the comparison engine interface, its input and result types, the cancel and progress handle, engine errors, and the single entry point the host compares through |
 | protocol | `engine/alignment.rs` | validation of manual alignments and the segmentation helper |
+| protocol | `engine/inset.rs` | the layout of documents whose alignments hold lifted parts, comparing it in display order, and bringing the regions back to the documents |
 | protocol | `engine/check.rs` | the result check run on every engine result |
 | protocol | `engine/test_engine.rs` | tests only: a minimal engine and input fixtures |
 | core | `text.rs` | decoding, line splitting, line-ending and BOM detection, and atomic writes |
 | core | `session.rs` | one open comparison: the sources, their regions and rows, D and its history, the comparison options, the alignment marks, the current region, the revision, and load, compare, apply alignments, merge ops (choices and edits), navigation, undo and save |
-| core | `alignment_marks.rs` | the alignment marks: numbering, the checks on marking, renumbering with swap, which numbers give alignments and the errors that name the user's numbers, each mark's status, and the alignments the comparison was last computed with |
+| core | `alignment_marks.rs` | the alignment marks: numbering, the checks on marking, renumbering with swap, which numbers give alignments and the errors that name the user's numbers, the display order of the alignments, where an inset could be shown and which documents lift its hunk, each mark's status, and the alignments the comparison was last computed with |
 | core | `merge.rs` | the merge state: regions with their choices, auto-resolve, building D from choices, which regions an edit touches, joining regions, which regions are differences and conflicts |
 | core | `undo.rs` | D's undo steps, each with the merge change it made, and the saved/modified tracking |
 | core | `host.rs` | the host thread: owns the engine registry and turns each command into a response plus a snapshot or delta |
@@ -53,7 +54,8 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | gui | `app.rs` | the application loop: menus, the toolbar and its buttons, shortcuts, caret moves, navigation, sending commands and handling their results, the status bar, and routing to dialogs and panes |
 | gui | `mirror.rs` | the front end's copy of the session, built from snapshots, deltas and current-region events, with a row map per pane; applies D edits at once and resyncs on a gap or a rejected edit |
 | gui | `rows.rs` | row maps: which line, or void, each row of a pane shows, its region and whether that region is boxed, where each line of D came from, padding for void space in D, and the caret on a row |
-| gui | `alignment_gutter.rs` | the alignment column of a source pane: where each mark sits in the rows, what the pointer is on, the tooltip, the numbers a mark can be renumbered to, and painting |
+| gui | `alignment_gutter.rs` | the alignment column of a source pane: where each mark sits in the rows, what the pointer is on, the tooltip, the numbers a mark can be renumbered to, the places an inset can be shown at, the arrows of lifted hunks, and painting |
+| gui | `inset_dialog.rs` | the window that asks where to show an inset alignment |
 | gui | `char_diff.rs` | the char-diff rules, which turn a char run or a region's gutter block into its style, and the styled column ranges of a line |
 | gui | `panes.rs` | pane layout with the overview strip's place, pane headers with path fields and Browse, the splitter above the merge pane, the scroll groups and their shared scrolling, wheel input, jumps and the caret hidden after a jump |
 | gui | `minimap.rs` | the minimap: the column of difference blocks and the view rectangle right of the panes, and turning a press or drag in it into scrolling |
@@ -159,14 +161,21 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Alignment number**: the number of a mark. Marks with the same number in different documents belong to the same alignment. A new mark takes the lowest number its document has not used.
 - **Applied, pending and unmatched marks**: a mark is applied when the comparison was computed with its alignment, pending when applying would put its alignment into effect, and unmatched when its number is not marked in every source document, so applying ignores it.
 - **Apply**: comparing all documents again with the alignments the marks give. It rebuilds D like a reload and can't be undone.
-- **Crossing alignments**: two manual alignments whose order differs between source documents. Rejected when applying.
+- **Inset alignment**: a manual alignment that the source documents disagree on the order of: its place among the other alignments differs between documents. It is shown in one place, and the documents that have it elsewhere lift its hunk. See Inset alignment.
+- **Lifted part**: a part of an inset alignment that is shown away from its place in its source document. Its old place is left out of that document's rows. An anchor has nothing to leave out, so lifting it only changes where its void rows are.
+- **Display order**: the order of the alignments in the rows. Once the lifted parts are taken out of their places, the alignments keep this order in every document.
+- **Layout**: the source documents in display order: every lifted part taken out of its place and put where its alignment is shown. The comparison runs on it like on documents without insets, and its regions are then brought back to the documents.
+- **Seam**: a place in a layout where the next line is not the line after the previous one in the document, because a lifted part was taken out or put in. A region is split at every seam it reaches over.
+- **Placement**: where the user shows an inset alignment among the others, chosen when the alignment is marked or later from the menu of the alignment column. The inset choice lists the placements an alignment has.
+- **Inset choice**: the places an inset alignment can be shown at, one per set of documents that keep their order there, and which one it is shown at now. Part of the alignments in snapshots and deltas.
+- **Inset arrow**: an arrow in the alignment column from the edge where a lifted hunk was taken from to the rows it is shown on.
 - **Segment**: a stretch of a source document between two consecutive manual alignments, or one alignment itself. Aligned independently of other segments.
 - **Comparison engine**: a pluggable algorithm that turns source documents, comparison options and manual alignments into regions, rows, region statuses and character-level diffs. Holds no session state. Selected by the engine config.
 - **Built-in engine**: the default comparison engine, in `kdiff4-core`, built on `imara-diff`.
 - **Engine registry**: the comparison engines the host can choose from, by id. The built-in engine is always present and is the default; a second engine with an id already taken is refused.
 - **Engine capabilities**: what a comparison engine supports: 2-way and 3-way comparison, native manual alignment, character-level diffs, progress, and which comparison options it honors. Every engine compares 2 source documents and binary files.
 - **Result check**: validation of an engine result before the host uses it: coverage, row consistency and manual alignment boundaries.
-- **Segmentation helper**: generic code that cuts documents at manual alignments and compares each segment separately, for comparison engines without native manual alignment.
+- **Segmentation helper**: generic code that cuts documents at manual alignments and compares each segment separately, for comparison engines without native manual alignment. It also compares the segments of a layout that has lifted parts, for every engine.
 
 ### Merge
 
@@ -225,7 +234,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Margin**: the strip left of a pane's text that stays in place when the text scrolls sideways: line numbers, then the gutter.
 - **Gutter**: the column of gutter blocks left of a pane's text, one row height wide.
 - **Gutter block**: a bordered block in the gutter spanning all rows of one region that differs, in every pane. Blocks of the current region are active. A block of a source pane is marked by the char-diff rules applied to its region.
-- **Alignment column**: the strip between the line numbers and the gutter in a source pane: a cyan bar over each marked range, with its number, and a chip with the number on the edge of each anchor.
+- **Alignment column**: the strip between the line numbers and the gutter in a source pane: a cyan bar over each marked range, with its number, a chip with the number on the edge of each anchor, and the inset arrows.
 - **Line origin**: in D, where a line came from: A, B or C for a line from a chosen hunk, M for a hand edit. Each line of D in a gutter block is filled with its origin's color and labeled with its letter.
 - **Current region**: the region navigation is at; in the GUI, the **jumped-to region**. Owned by the host and shown with a yellow background in every pane, void space included. A region of D that takes lines from two or three hunks is still one region.
 - **Region box**: the bordered box drawn around the rows of a region whose hunks differ, as wide as the pane, with no background and rounded corners. Regions whose hunks are all equal get none.
@@ -258,12 +267,12 @@ The algorithm that compares documents is pluggable. The engine config names the 
 Responsibilities are split so that every engine gets the same merge behavior:
 
 - The comparison engine computes: regions with their hunks, the rows of each region, region statuses (including whitespace conflicts), the status of a given set of hunks (used after a split), character-level diffs for the lines of one row, and binary compare. It honors the comparison options and the manual alignments it is given: the parts of each alignment share rows, and both ends of an alignment are region boundaries. This holds in 2-way and 3-way mode.
-- The session keeps the merge state: the manual alignment list and its validation (crossing and overlapping alignments are rejected before the engine sees them), deciding which part of the documents to recompute, splits, choices, auto-resolve, edited regions, undo, D, save, session files and navigation.
+- The session keeps the merge state: the manual alignment list and its validation (overlapping alignments, and alignments that keep no common order without a lifted part to explain it, are rejected before the engine sees them), deciding which part of the documents to recompute, splits, choices, auto-resolve, edited regions, undo, D, save, session files and navigation.
 - Line normalization stays in the session: it builds line keys and tokens and hands them to the engine together with the text, so ignore options behave the same with every engine.
 
 An engine reports its engine capabilities, which go into the snapshot so front ends can disable what it does not support. An engine without native manual alignment is driven through the segmentation helper, which gives it manual alignment for free. Binary compare has a byte-by-byte default that engines may replace.
 
-The host compares only through one entry point, which validates the input (2 or 3 source documents, 3 only if the engine supports it; one token per line; valid manual alignments), hands the alignments to the engine or to the segmentation helper, and runs the result check. The segmentation helper also checks each segment's result on its own, so an engine cannot spill a region across a segment boundary.
+The host compares only through one entry point, which validates the input (2 or 3 source documents, 3 only if the engine supports it; one token per line; valid manual alignments), hands the alignments to the engine or to the segmentation helper, and runs the result check. Alignments with lifted parts are laid out in display order first, so the engine sees documents and alignments that keep one order. The segmentation helper also checks each segment's result on its own, so an engine cannot spill a region across a segment boundary.
 
 Comparison runs on host worker threads with the cancel flag and progress reporting described under Threading and cancellation; the engine itself is synchronous. The host checks every engine result before using it: regions must cover every line of every source document exactly once, in order, and rows must be consistent with the regions and the manual alignments. A result that fails the check, or an engine failure, becomes a protocol error and a notice, never a corrupt session. Engine errors cross as their own error kinds: canceled, invalid request (bad input or manual alignments), or engine (unsupported feature, failure, or a result that failed the check).
 
@@ -321,14 +330,14 @@ Every mark has a number. A new mark takes the lowest number its document has not
 
 Marking, renumbering, removing and clearing change nothing in the regions, rows or D. The marks are kept as they are until the user applies them.
 
-**Alignments.** The marks with one number form an alignment only when every source document has one (A and B in 2-way mode; A, B and C in 3-way mode). Marks of any other number are kept and ignored when applying; they show in the alignment column as unmatched. All parts of one alignment occupy the same rows. Anchors, and ranges shorter than the longest part, are padded with void regions. The alignments are ordered by position, not by number: the numbers only pair marks across documents, so 2 above 1 is fine when it is so in every document.
+**Alignments.** The marks with one number form an alignment only when every source document has one (A and B in 2-way mode; A, B and C in 3-way mode). Marks of any other number are kept and ignored when applying; they show in the alignment column as unmatched. All parts of one alignment occupy the same rows. Anchors, and ranges shorter than the longest part, are padded with void regions. The alignments are ordered by position, not by number: the numbers only pair marks across documents, so 2 above 1 is fine when it is so in every document. Where the documents disagree on the order, see Inset alignment.
 
 **Rules for marks.**
 
 - Marked ranges of one document must not overlap, and an anchor must not lie strictly inside a range. This is checked when marking, and the mark is refused with a message.
 - Several anchors may share one position. Their order is decided by where the same alignments lie in the other documents; alignments at the same positions in every document are ordered by number.
 - An alignment whose parts are all anchors is refused.
-- Alignments must not cross: if X comes before Y in one source document, X comes before Y in every source document. This is checked when applying, because numbers can still change until then. The message names the user's numbers, the attempt is logged, and nothing changes.
+- Alignments that cross, because X comes before Y in one source document and after it in another, are insets. They are accepted and shown in one order; see Inset alignment.
 
 Example: Foo and Qux from above are separated with two alignments.
 
@@ -340,6 +349,29 @@ Example: Foo and Qux from above are separated with two alignments.
 The two anchors in A share a position and are ordered by number. Alignment 1 turns Foo into a Merge Region with voids in A and C, status Changed in B; alignment 2 does the same for Qux, status Changed in C. Both auto-resolve, so D gets Foo followed by Qux with no conflict. To get Qux first, give Qux's alignment the lower number in every document.
 
 **Applying.** Apply Alignments hands the alignments the marks give to the engine and compares all documents again from scratch. Like a reload, it rebuilds rows, regions, character-level diffs and D: choices, hand edits, splits and the undo history are dropped, and it is not an undo step. So the host refuses to apply while D holds an edited region or a choice that differs from what auto-resolve makes, unless the command says the user confirmed; the GUI then shows a warning with Proceed and Cancel. When the marks give the alignments already applied, applying does nothing and warns nothing. If the engine or the check fails, the session is unchanged.
+
+### Inset alignment
+
+An inset alignment is a manual alignment that the source documents disagree on the order of. Example, with the numbers of the marks in the order they stand in each document:
+
+| A | B | C |
+|---|---|---|
+| 1 | 2 | 1 |
+| 2 | 1 | 2 |
+
+Function 2 stands above function 1 in B, and below it in A and C. An inset alignment is a manual alignment like any other, except that the alignments don't keep one order in all documents. Rows can't show both orders, so the alignments are shown in one **display order** (1 above 2, or 2 above 1), each as one row of matching parts. In the documents whose own order differs, the hunk of one alignment is **lifted**: taken out of its place and shown with the parts of its alignment. Its old place is left out of that document's rows, and where the other documents have text there, the document shows voids. D follows the display order, so choosing the order of B above also puts B's order into D.
+
+**Where it is shown.** When a mark completes an alignment that crosses others, the alignment is shown where the fewest documents keep their order, which is where the document that differs from the others has it: that document most likely moved the code on purpose, and following its order puts the change into D. In the example, 2 is shown above 1, B keeps its order, and the hunks of A and C are lifted. Ties go to the first document, so a 2-way comparison keeps A's order and lifts B's hunk. The answer to the mark carries the places the alignment could be shown at (the inset choice) and asks the user, who picks another place in a window or keeps the suggestion, which is in effect already. Later the menu of the alignment column of any lifted alignment lists the other places: "Show Elsewhere". A place is "above", "below" or "between" other alignments, with the documents whose hunk it lifts. Placing, like marking, changes nothing in the comparison until the user applies.
+
+A place is kept until the marks of its alignment change; then the alignment is placed again by the rule above, without asking. Renumbering can therefore change places silently, and the menu can put it back.
+
+**Where a lifted part goes.** Between the alignments next to it in the display order, a lifted part is put at the start of the text there when it came from above, so the text stays below it, and at the end when it came from below. Where both meet in one stretch of text, the lifted parts keep their order and the text goes before the first one that came from below. A lifted anchor is put the same way, and nothing leaves its old place.
+
+**The comparison.** The engine never sees a lifted part. The documents are laid out in display order, compared like documents with alignments, and the regions are brought back to the documents. A region that reaches over a seam, where the next line of the layout is not the next line of the document, is split there and its parts are classified again. So every region is one stretch of lines in every document, and the check reads the regions in display order: in every document the regions cover each line once, and the regions of the lifted parts may stand out of the document's order.
+
+**Anchors and ranges.** Anchors take part like ranges: an alignment can be an inset by its anchors in some documents.
+
+**Arrows.** In the alignment column of a source pane, an arrow runs from the edge where a lifted hunk was taken from to the first row of the hunk, and shows after the alignments are applied. Anchors have no arrow.
 
 Clearing removes every mark but keeps the rows as they are; applying afterwards compares without alignments. Reloading a source document drops the marks and the applied alignments, since their lines moved. Changing the comparison options compares again with the applied alignments and keeps the marks.
 
@@ -412,7 +444,7 @@ All communication between the engine and anything else goes through this crate: 
 | host → client | Response | the id of the request it answers plus a result or a protocol error; exactly one per request |
 | host → client | Event | progress, snapshot, delta or notice |
 
-- Commands: open, reload, cancel, choose hunks for a region, choose a side for all unresolved regions, split a region, edit D, mark, remove, renumber and clear alignment marks, apply alignments, undo, redo, save, set engine config, navigate, set the current region. Every user action in any front end ends up as a command.
+- Commands: open, reload, cancel, choose hunks for a region, choose a side for all unresolved regions, split a region, edit D, mark, remove, renumber and clear alignment marks, place an inset alignment, apply alignments, undo, redo, save, set engine config, navigate, set the current region. Every user action in any front end ends up as a command.
 - Planned: save the session to a session file; open a session file.
 - Implemented so far: open; reload one source document from a (possibly new) path, answered with a new snapshot; set the choice of a region and choose one side for every unresolved region (both tagged with the revision their region indices refer to); edit D (replace a byte range, tagged with the revision it was made on; a stale revision or a range off character boundaries is rejected); set D's path without writing it (or clear it, making D unnamed); save; save as; undo and redo of D; resync (the host re-sends a snapshot); set the comparison options, which compares again and rebuilds D like a reload and is answered with a new snapshot; navigate to the next or previous difference or conflict from a region (the caret's, or the current one); set the current region. Navigation and setting the current region are answered with a current-region event. Navigating can ask to stop at applied alignments too. Marking, removing, renumbering and clearing alignment marks are answered with a delta carrying every mark with its status (applied, pending or unmatched) and whether applying would change the comparison. Applying alignments is answered with a new snapshot, does nothing when the marks give the alignments already applied, and fails with a needs-confirmation error when D holds choices or edits and the command does not say the user confirmed. Deltas so far: D changed by a merge op, undo or redo (the replaced range of D's text, the merge update, and whether D now differs from its saved text, which undo can bring back), D's path changed, D saved, the alignment marks changed. The snapshot carries each region's merge state and the alignment marks.
 - D's undo history is kept by the host. Typing on one line is one undo step, and so is a run of Backspace or of Delete; a line break, a paste, replacing a selection, a word deletion, save, undo and redo start a new step. Undoing back to the saved text clears the modified flag.

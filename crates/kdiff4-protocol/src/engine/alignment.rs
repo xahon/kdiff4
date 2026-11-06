@@ -2,7 +2,18 @@ use std::ops::Range;
 
 use super::{CompareInput, Comparison, ComparisonEngine, EngineError, Job, ManualAlignment, Region, Row, check_comparison, document_letter};
 
-/// Checks part counts, bounds and order. Alignments that overlap or cross, or that hold only anchors, are rejected.
+/// Whether two parts of one document can not both be marked: ranges must not overlap and an anchor must not lie strictly inside a range. Anchors may share a position, and ranges and anchors may touch.
+pub fn parts_collide(first: &Range<usize>, second: &Range<usize>) -> bool {
+    match (first.is_empty(), second.is_empty()) {
+        (true, true) => false,
+        (true, false) => second.start < first.start && first.start < second.end,
+        (false, true) => first.start < second.start && second.start < first.end,
+        (false, false) => first.start < second.end && second.start < first.end,
+    }
+}
+
+
+/// Checks part counts, bounds and order. Alignments that hold only anchors are rejected, and so are parts that overlap. In every document the parts that are not lifted must keep the order of the list; lifted parts may be anywhere that is free.
 pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]) -> Result<(), EngineError> {
     for (index, alignment) in alignments.iter().enumerate() {
         let number = index + 1;
@@ -11,6 +22,13 @@ pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]
                 "alignment {number} has {} parts, expected {}",
                 alignment.parts.len(),
                 line_counts.len()
+            )));
+        }
+        if !alignment.lifted.is_empty() && alignment.lifted.len() != alignment.parts.len() {
+            return Err(EngineError::InvalidAlignment(format!(
+                "alignment {number} has {} lifted flags, expected {}",
+                alignment.lifted.len(),
+                alignment.parts.len()
             )));
         }
         for (document, (part, count)) in alignment.parts.iter().zip(line_counts).enumerate() {
@@ -25,8 +43,10 @@ pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]
             return Err(EngineError::InvalidAlignment(format!("alignment {number} has only anchors")));
         }
     }
-    for (index, pair) in alignments.windows(2).enumerate() {
-        for (document, (previous, next)) in pair[0].parts.iter().zip(&pair[1].parts).enumerate() {
+    for document in 0..line_counts.len() {
+        let in_place: Vec<usize> = (0..alignments.len()).filter(|index| !alignments[*index].is_lifted(document)).collect();
+        for pair in in_place.windows(2) {
+            let (previous, next) = (&alignments[pair[0]].parts[document], &alignments[pair[1]].parts[document]);
             if previous.end <= next.start {
                 continue;
             }
@@ -34,10 +54,21 @@ pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]
             let relation = if overlap { "overlap" } else { "cross" };
             return Err(EngineError::InvalidAlignment(format!(
                 "alignments {} and {} {relation} in {}",
-                index + 1,
-                index + 2,
+                pair[0] + 1,
+                pair[1] + 1,
                 document_letter(document)
             )));
+        }
+        for lifted in (0..alignments.len()).filter(|index| alignments[*index].is_lifted(document)) {
+            let collides = |other: &usize| *other != lifted && parts_collide(&alignments[lifted].parts[document], &alignments[*other].parts[document]);
+            if let Some(other) = (0..alignments.len()).find(collides) {
+                return Err(EngineError::InvalidAlignment(format!(
+                    "alignments {} and {} overlap in {}",
+                    lifted.min(other) + 1,
+                    lifted.max(other) + 1,
+                    document_letter(document)
+                )));
+            }
         }
     }
     Ok(())
@@ -109,7 +140,7 @@ mod tests {
     use super::*;
 
     fn alignment(parts: &[Range<usize>]) -> ManualAlignment {
-        ManualAlignment { parts: parts.to_vec() }
+        ManualAlignment::new(parts.to_vec())
     }
 
     fn error_message(alignments: &[ManualAlignment], line_counts: &[usize]) -> String {
@@ -237,9 +268,7 @@ mod tests {
                 cuts.iter_mut().for_each(|document| document.sort());
                 let count = cuts.first().map(|document| document.len() / 2).unwrap_or(0);
                 let alignments = (0..count)
-                    .map(|index| ManualAlignment {
-                        parts: cuts.iter().map(|document| document[index * 2]..document[index * 2 + 1]).collect(),
-                    })
+                    .map(|index| ManualAlignment::new(cuts.iter().map(|document| document[index * 2]..document[index * 2 + 1]).collect()))
                     .filter(|alignment| alignment.parts.iter().any(|part| !part.is_empty()))
                     .collect();
                 (lines, alignments)

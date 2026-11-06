@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use semver::Version;
-use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostMessage, Navigation, RequestId, Response};
+use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostMessage, InsetChoice, Navigation, RequestId, Response};
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
@@ -24,6 +24,7 @@ use crate::text_view::{self, Caret};
 use crate::self_update::{self, UpdateInstall};
 use crate::theme;
 use crate::update_check::{self, CheckOutcome, ReleaseInfo, UpdateCheck, UpdateError};
+use crate::inset_dialog::{self, InsetAnswer};
 use crate::update_dialog::{self, AvailableAction, InstallOffer};
 use crate::window_frame;
 
@@ -145,6 +146,9 @@ pub struct KdiffApp {
     update_window: Option<UpdateWindow>,
     update_cache: CommonMarkCache,
     update_modal_id: egui::Id,
+    /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
+    inset_prompt: Option<InsetChoice>,
+    inset_modal_id: egui::Id,
 }
 
 impl KdiffApp {
@@ -201,6 +205,8 @@ impl KdiffApp {
             update_window: None,
             update_cache: CommonMarkCache::default(),
             update_modal_id: egui::Id::unique("update_window"),
+            inset_prompt: None,
+            inset_modal_id: egui::Id::unique("inset_prompt"),
         };
         app.apply_view(ctx, &view);
         app
@@ -553,6 +559,10 @@ impl KdiffApp {
                     Change::OutputEdited { range, text, .. } if from_undo => Some(range.start + text.len()),
                     _ => None,
                 };
+                let asked = match &delta.change {
+                    Change::AlignmentsChanged(alignments) => alignments.ask,
+                    _ => None,
+                };
                 let outcome = match self.mirror.as_mut() {
                     Some(mirror) => mirror.apply_delta(delta),
                     None => DeltaOutcome::Ignored,
@@ -571,6 +581,9 @@ impl KdiffApp {
                         }
                         if let Some(region) = chosen_region {
                             self.keep_caret_in_region(region);
+                        }
+                        if let Some(number) = asked {
+                            self.inset_prompt = self.mirror.as_ref().and_then(|mirror| mirror.alignments().insets.iter().find(|choice| choice.number == number).cloned());
                         }
                     }
                     DeltaOutcome::Ignored => {}
@@ -907,6 +920,9 @@ impl KdiffApp {
             }
             PaneAction::RenumberAlignmentMark(document, number, to) => {
                 self.send(Command::RenumberAlignmentMark { document, number, to }, Pending::AlignmentEdit);
+            }
+            PaneAction::PlaceAlignment(number, slot) => {
+                self.send(Command::PlaceAlignment { number, slot }, Pending::AlignmentEdit);
             }
             PaneAction::CommitPath(document, text) => {
                 let path = paths::clean_path_text(&text).map(PathBuf::from);
@@ -1294,6 +1310,26 @@ impl KdiffApp {
         }
     }
 
+    /// Asks where to show the alignment the last mark completed, when the documents disagree on its order. The answer is a `PlaceAlignment` unless the user keeps the suggestion, which is in effect already.
+    fn show_inset_prompt(&mut self, ctx: &egui::Context) {
+        let Some(choice) = self.inset_prompt.as_ref() else { return };
+        let mut answer = None;
+        let modal = egui::Modal::new(self.inset_modal_id).show(ctx, |ui| answer = inset_dialog::show(ui, choice));
+        if answer.is_none() && modal.should_close() {
+            answer = Some(InsetAnswer::Keep);
+        }
+        if let Some(answer) = answer {
+            self.answer_inset_prompt(answer);
+        }
+    }
+
+    fn answer_inset_prompt(&mut self, answer: InsetAnswer) {
+        let Some(choice) = self.inset_prompt.take() else { return };
+        if let InsetAnswer::Place(slot) = answer {
+            self.send(Command::PlaceAlignment { number: choice.number, slot }, Pending::AlignmentEdit);
+        }
+    }
+
     fn show_settings(&mut self, ctx: &egui::Context) {
         let families = self.font_scan.families();
         let dialog = match self.settings.as_mut() {
@@ -1649,6 +1685,7 @@ impl eframe::App for KdiffApp {
         if let Some(action) = form_action {
             self.handle_form_action(action);
         }
+        self.show_inset_prompt(&ctx);
         self.show_settings(&ctx);
         self.show_update_window(&ctx);
         self.update_window_frame(frame);
@@ -1969,12 +2006,13 @@ mod tests {
             number,
             lines,
             status: kdiff4_protocol::MarkStatus::Pending,
+            lifted: false,
         }
     }
 
     /// Gives the mirror these marks, the way a delta from the host does.
     fn set_marks(app: &mut KdiffApp, marks: Vec<kdiff4_protocol::AlignmentMark>, changed: bool) {
-        let change = Change::AlignmentsChanged(kdiff4_protocol::Alignments { marks, changed });
+        let change = Change::AlignmentsChanged(kdiff4_protocol::Alignments { marks, changed, ..Default::default() });
         let mirror = app.mirror.as_mut().unwrap();
         let revision = mirror.revision();
         mirror.apply_delta(kdiff4_protocol::Delta {
@@ -2041,6 +2079,77 @@ mod tests {
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
         press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::ApplyAlignments { confirmed: false }, Command::Redo]);
+    }
+
+    fn inset_choice() -> InsetChoice {
+        let option = |slot, above, below, lifted: &[Document]| kdiff4_protocol::InsetOption {
+            slot,
+            above,
+            below,
+            lifted: lifted.to_vec(),
+        };
+        InsetChoice {
+            number: 2,
+            current: 0,
+            options: vec![option(0, None, Some(1), &[Document::A]), option(1, Some(1), None, &[Document::B])],
+        }
+    }
+
+    fn deliver_marks(app: &mut KdiffApp, ctx: &egui::Context, alignments: kdiff4_protocol::Alignments) {
+        let revision = app.mirror.as_ref().unwrap().revision();
+        let delta = kdiff4_protocol::Delta {
+            revision: kdiff4_protocol::Revision(revision.0 + 1),
+            cause: None,
+            change: Change::AlignmentsChanged(alignments),
+        };
+        app.handle_message(ctx, HostMessage::Event(Event::Delta(delta)));
+    }
+
+    #[test]
+    fn a_mark_that_completes_an_inset_asks_where_to_show_it() {
+        let (mut app, host, ctx) = app_with_session();
+        let asking = kdiff4_protocol::Alignments {
+            insets: vec![inset_choice()],
+            ask: Some(2),
+            ..Default::default()
+        };
+        deliver_marks(&mut app, &ctx, asking);
+        assert_eq!(app.inset_prompt.as_ref().map(|choice| choice.number), Some(2));
+        deliver_marks(&mut app, &ctx, kdiff4_protocol::Alignments::default());
+        assert!(app.inset_prompt.is_some(), "only the user's answer closes the question");
+        drop(sent(app, host));
+    }
+
+    #[test]
+    fn marks_that_complete_nothing_ask_nothing() {
+        let (mut app, host, ctx) = app_with_session();
+        let quiet = kdiff4_protocol::Alignments {
+            insets: vec![inset_choice()],
+            ..Default::default()
+        };
+        deliver_marks(&mut app, &ctx, quiet);
+        assert!(app.inset_prompt.is_none());
+        drop(sent(app, host));
+    }
+
+    #[test]
+    fn choosing_another_place_sends_it_and_keeping_the_suggestion_sends_nothing() {
+        let (mut app, host, _ctx) = app_with_session();
+        app.inset_prompt = Some(inset_choice());
+        app.answer_inset_prompt(InsetAnswer::Place(1));
+        assert!(app.inset_prompt.is_none());
+        app.inset_prompt = Some(inset_choice());
+        app.answer_inset_prompt(InsetAnswer::Keep);
+        assert!(app.inset_prompt.is_none());
+        app.answer_inset_prompt(InsetAnswer::Place(0));
+        assert_eq!(sent(app, host), [Command::PlaceAlignment { number: 2, slot: 1 }]);
+    }
+
+    #[test]
+    fn placing_an_alignment_from_the_menu_sends_the_command() {
+        let (mut app, host, ctx) = app_with_session();
+        app.handle_pane_action(&ctx, PaneAction::PlaceAlignment(3, 0));
+        assert_eq!(sent(app, host), [Command::PlaceAlignment { number: 3, slot: 0 }]);
     }
 
     #[test]

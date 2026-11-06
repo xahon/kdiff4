@@ -1,14 +1,23 @@
 use std::collections::HashSet;
 
-use super::{CompareInput, Comparison, EngineError, Region, RegionStatus, document_letter};
+use super::inset::Layout;
+use super::{CompareInput, Comparison, EngineError, ManualAlignment, Region, RegionStatus, document_letter};
 
-/// Checks that regions cover every line of every source document exactly once and in order, that rows pair exactly the lines of their region, and that every manual alignment starts and ends at a region boundary.
+/// Checks that regions cover every line of every source document exactly once and in order, that rows pair exactly the lines of their region, and that every manual alignment starts and ends at a region boundary. Lifted parts are read in display order: the order is that of the document with them taken out of their place and put where their alignment is shown.
 pub fn check_comparison(comparison: &Comparison, input: &CompareInput<'_>) -> Result<(), EngineError> {
     let line_counts = input.line_counts();
+    if input.alignments.iter().any(ManualAlignment::has_lifted) {
+        let layout = Layout::new(input.alignments, &line_counts);
+        return check_regions(&layout.to_display(&comparison.regions)?, &line_counts, &layout.alignments);
+    }
+    check_regions(&comparison.regions, &line_counts, input.alignments)
+}
+
+fn check_regions(regions: &[Region], line_counts: &[usize], alignments: &[ManualAlignment]) -> Result<(), EngineError> {
     let mut cursor = vec![0; line_counts.len()];
     let mut boundaries = HashSet::new();
     boundaries.insert(cursor.clone());
-    for (index, region) in comparison.regions.iter().enumerate() {
+    for (index, region) in regions.iter().enumerate() {
         check_region(index + 1, region, &cursor)?;
         cursor = region.hunks.iter().map(|hunk| hunk.end.clone()).collect();
         boundaries.insert(cursor.clone());
@@ -16,7 +25,7 @@ pub fn check_comparison(comparison: &Comparison, input: &CompareInput<'_>) -> Re
     if cursor != line_counts {
         return Err(invalid(format!("regions end at lines {cursor:?}, the documents have {line_counts:?} lines")));
     }
-    for (index, alignment) in input.alignments.iter().enumerate() {
+    for (index, alignment) in alignments.iter().enumerate() {
         let starts: Vec<usize> = alignment.parts.iter().map(|part| part.start.clone()).collect();
         let ends: Vec<usize> = alignment.parts.iter().map(|part| part.end.clone()).collect();
         if !boundaries.contains(&starts) || !boundaries.contains(&ends) {
@@ -176,12 +185,12 @@ mod tests {
 
     #[test]
     fn rejects_alignment_inside_region() {
-        let alignments = [ManualAlignment { parts: vec![1..2, 2..3] }];
+        let alignments = [ManualAlignment::new(vec![1..2, 2..3])];
         assert_eq!(
             check(valid_regions(), &alignments),
             Err("manual alignment 1 does not start and end at region boundaries".to_string())
         );
-        let alignments = [ManualAlignment { parts: vec![1..2, 1..3] }];
+        let alignments = [ManualAlignment::new(vec![1..2, 1..3])];
         assert_eq!(check(valid_regions(), &alignments), Ok(()));
     }
 }

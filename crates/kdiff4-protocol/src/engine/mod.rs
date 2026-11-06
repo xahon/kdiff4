@@ -1,5 +1,6 @@
 mod alignment;
 mod check;
+mod inset;
 #[cfg(test)]
 mod test_engine;
 
@@ -11,7 +12,7 @@ use thiserror::Error;
 
 use crate::messages::{Document, ErrorKind, ProtocolError};
 
-pub use alignment::validate_alignments;
+pub use alignment::{parts_collide, validate_alignments};
 pub use check::check_comparison;
 
 /// Interned line key. Two lines are equal when their tokens are equal.
@@ -72,10 +73,33 @@ impl Default for ComparisonOptions {
     }
 }
 
-/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line.
+/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line. Alignments are listed in display order. A lifted part is an inset: it is shown with the other parts of its alignment, away from its place in the document, which is left empty (see Inset alignment in `ARCHITECTURE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManualAlignment {
     pub parts: Vec<Range<usize>>,
+    /// Per source document, whether its part is lifted. Empty when no part is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifted: Vec<bool>,
+}
+
+impl ManualAlignment {
+    pub fn new(parts: Vec<Range<usize>>) -> ManualAlignment {
+        ManualAlignment { parts, lifted: Vec::new() }
+    }
+
+    /// `lifted` is dropped when it lifts nothing, so alignments that show the same compare equal.
+    pub fn with_lifted(parts: Vec<Range<usize>>, lifted: Vec<bool>) -> ManualAlignment {
+        let lifted = if lifted.iter().any(|lifted| *lifted) { lifted } else { Vec::new() };
+        ManualAlignment { parts, lifted }
+    }
+
+    pub fn is_lifted(&self, document: usize) -> bool {
+        self.lifted.get(document).cloned().unwrap_or(false)
+    }
+
+    pub fn has_lifted(&self) -> bool {
+        self.lifted.iter().any(|lifted| *lifted)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,7 +261,7 @@ pub trait ComparisonEngine: Send + Sync {
 pub struct CompareInput<'a> {
     /// A, B and, in 3-way mode, C.
     pub sources: Vec<SourceLines<'a>>,
-    /// In document order, with line ranges relative to `sources`.
+    /// In display order, with line ranges relative to `sources`. Engines never see lifted parts: `run_comparison` lays the documents out in display order first.
     pub alignments: &'a [ManualAlignment],
     pub options: &'a ComparisonOptions,
 }
@@ -253,13 +277,22 @@ pub fn run_comparison(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, j
     let capabilities = engine.capabilities();
     validate_input(input, &capabilities)?;
     job.check_canceled()?;
-    let comparison = if input.alignments.is_empty() || capabilities.manual_alignment {
-        engine.compare(input, job)?
+    let comparison = if input.alignments.iter().any(ManualAlignment::has_lifted) {
+        inset::compare_with_insets(engine, input, job, &capabilities)?
     } else {
-        alignment::compare_segments(engine, input, job)?
+        compare_aligned(engine, input, job, &capabilities)?
     };
     check_comparison(&comparison, input)?;
     Ok(comparison)
+}
+
+/// Compares input whose alignments keep their order in every document.
+fn compare_aligned(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, job: &Job<'_>, capabilities: &EngineCapabilities) -> Result<Comparison, EngineError> {
+    if input.alignments.is_empty() || capabilities.manual_alignment {
+        engine.compare(input, job)
+    } else {
+        alignment::compare_segments(engine, input, job)
+    }
 }
 
 fn validate_input(input: &CompareInput<'_>, capabilities: &EngineCapabilities) -> Result<(), EngineError> {
@@ -368,7 +401,7 @@ mod tests {
     #[test]
     fn native_engine_gets_alignments() {
         let fixture = Fixture::new(&[&["a", "b", "c"], &["a", "x", "c"]]);
-        let alignments = [ManualAlignment { parts: vec![1..2, 1..2] }];
+        let alignments = [ManualAlignment::new(vec![1..2, 1..2])];
         let engine = SimpleEngine {
             manual_alignment: true,
             ..SimpleEngine::default()
@@ -380,7 +413,7 @@ mod tests {
     #[test]
     fn other_engines_get_segments() {
         let fixture = Fixture::new(&[&["a", "b", "c"], &["a", "x", "c"]]);
-        let alignments = [ManualAlignment { parts: vec![1..2, 1..2] }];
+        let alignments = [ManualAlignment::new(vec![1..2, 1..2])];
         let engine = SimpleEngine::default();
         with_job(|job| run_comparison(&engine, &fixture.input(&alignments), job)).unwrap();
         assert_eq!(engine.seen_alignments.into_inner().unwrap(), [0, 0, 0]);

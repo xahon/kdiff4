@@ -398,9 +398,76 @@ fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
 
     let id = client.send(Command::ClearAlignmentMarks).unwrap();
     let delta = expect_delta(&client);
-    assert_eq!(delta.change, Change::AlignmentsChanged(Alignments { marks: Vec::new(), changed: true }));
+    assert_eq!(delta.change, Change::AlignmentsChanged(Alignments { marks: Vec::new(), changed: true, ..Alignments::default() }));
     expect_ok(&client, id);
     let id = client.send(Command::ClearAlignmentMarks).unwrap();
+    expect_ok(&client, id);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
+#[test]
+fn insets_ask_where_to_show_them_and_can_be_placed_again() {
+    let dir = temp_dir("inset");
+    let a = write(&dir, "a.txt", "a\nb\n");
+    let b = write(&dir, "b.txt", "b\na\n");
+    let c = write(&dir, "c.txt", "a\nb\n");
+    let (mut client, host) = start();
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
+    expect_snapshot(&client);
+    expect_ok(&client, id);
+
+    let marks = [
+        (Document::A, 0..1),
+        (Document::A, 1..2),
+        (Document::B, 1..2),
+        (Document::B, 0..1),
+        (Document::C, 0..1),
+        (Document::C, 1..2),
+    ];
+    let mut asked = Vec::new();
+    for (document, lines) in marks {
+        let id = client.send(Command::MarkAlignment { document, lines }).unwrap();
+        let Change::AlignmentsChanged(alignments) = expect_delta(&client).change else {
+            panic!("expected the marks")
+        };
+        asked.push(alignments.ask);
+        expect_ok(&client, id);
+    }
+    assert_eq!(asked, [None, None, None, None, None, Some(2)]);
+
+    let id = client.send(Command::PlaceAlignment { number: 2, slot: 1 }).unwrap();
+    let Change::AlignmentsChanged(alignments) = expect_delta(&client).change else {
+        panic!("expected the marks")
+    };
+    assert_eq!(alignments.ask, None);
+    assert_eq!(alignments.insets.len(), 1);
+    assert_eq!(alignments.insets[0].current, 1);
+    assert!(alignments.changed);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::PlaceAlignment { number: 7, slot: 0 }).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response")
+    };
+    assert_eq!(response.id, id);
+    assert_eq!(response.result.unwrap_err().kind, ErrorKind::InvalidRequest);
+
+    let id = client.send(Command::ApplyAlignments { confirmed: true }).unwrap();
+    let snapshot = expect_snapshot(&client);
+    assert_eq!(snapshot.output.unwrap().text, "a\nb\n");
+    let hunks: Vec<_> = snapshot.comparison.regions.iter().map(|region| region.hunks.clone()).collect();
+    assert_eq!(hunks, [vec![0..1, 1..2, 0..1], vec![1..2, 0..1, 1..2]]);
+    assert!(snapshot.alignments.marks.iter().filter(|mark| mark.lifted).all(|mark| mark.document == Document::B));
     expect_ok(&client, id);
 
     drop(client);

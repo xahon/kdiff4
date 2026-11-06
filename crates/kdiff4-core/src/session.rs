@@ -228,22 +228,30 @@ impl Session {
         Ok(())
     }
 
-    /// Marks `lines` of `document` for alignment under the lowest number the document has not used. An empty range is an anchor. The comparison does not change until the alignments are applied.
+    /// Marks `lines` of `document` for alignment under the lowest number the document has not used. An empty range is an anchor. The comparison does not change until the alignments are applied. When the mark completes an alignment that the documents disagree on the order of, the answer says so (`Alignments::ask`): it is shown where the fewest documents keep their order until the user places it.
     pub fn mark_alignment(&mut self, document: Document, lines: Range<usize>) -> Result<Change, CoreError> {
         let number = self.alignments.mark(document.clone(), lines.clone(), &self.line_counts())?;
         log::info!("alignment: marked lines {}..{} of {} as alignment {number}", lines.start, lines.end, document.letter());
-        Ok(self.marks_changed())
+        let ask = self.alignments.is_inset(number, self.sources.len()).then_some(number);
+        Ok(self.marks_changed(ask))
     }
 
     pub fn remove_alignment_mark(&mut self, document: Document, number: u32) -> Result<Change, CoreError> {
         self.alignments.remove(document, number)?;
-        Ok(self.marks_changed())
+        Ok(self.marks_changed(None))
     }
 
     /// Gives a mark another number; a mark of the same document that has it takes the old one.
     pub fn renumber_alignment_mark(&mut self, document: Document, number: u32, to: u32) -> Result<Change, CoreError> {
         self.alignments.renumber(document, number, to)?;
-        Ok(self.marks_changed())
+        Ok(self.marks_changed(None))
+    }
+
+    /// Shows the alignment `number` at `slot` among the other alignments (see `Command::PlaceAlignment`). The comparison does not change until the alignments are applied.
+    pub fn place_alignment(&mut self, number: u32, slot: usize) -> Result<Change, CoreError> {
+        self.alignments.place(number, slot)?;
+        log::info!("alignment: alignment {number} placed at {slot}");
+        Ok(self.marks_changed(None))
     }
 
     /// Removes every mark; `None` when there were none. The applied alignments stay until the next apply.
@@ -252,7 +260,7 @@ impl Session {
             return None;
         }
         self.alignments.clear();
-        Some(self.marks_changed())
+        Some(self.marks_changed(None))
     }
 
     /// Compares again with the alignments the marks give (see `Command::ApplyAlignments`), rebuilding D like a reload. Returns whether anything changed: `false` when the marks give the alignments already applied. Without `confirmed`, a D that holds choices or edits is refused. On failure the session is unchanged.
@@ -275,9 +283,9 @@ impl Session {
         self.alignments.summary(self.sources.len())
     }
 
-    fn marks_changed(&mut self) -> Change {
+    fn marks_changed(&mut self, ask: Option<u32>) -> Change {
         self.revision += 1;
-        Change::AlignmentsChanged(self.alignment_summary())
+        Change::AlignmentsChanged(Alignments { ask, ..self.alignment_summary() })
     }
 
     fn line_counts(&self) -> Vec<usize> {
@@ -1501,10 +1509,9 @@ cc
         assert!(session.clear_alignment_marks().is_none());
     }
 
-    #[test]
-    fn crossing_alignments_are_refused_and_keep_the_session() {
-        let dir = temp_dir("alignment-crossing");
-        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+    /// A and C have a before b; B has them the other way around.
+    fn mark_a_and_b_reversed_in_b(session: &mut Session) -> Change {
+        let mut last = None;
         for (document, lines) in [
             (Document::A, 0..1),
             (Document::A, 1..2),
@@ -1513,13 +1520,92 @@ cc
             (Document::C, 0..1),
             (Document::C, 1..2),
         ] {
+            last = Some(session.mark_alignment(document, lines).unwrap());
+        }
+        last.unwrap()
+    }
+
+    fn hunks_of(session: &Session) -> Vec<Vec<Range<usize>>> {
+        session.snapshot().comparison.regions.iter().map(|region| region.hunks.clone()).collect()
+    }
+
+    #[test]
+    fn crossing_alignments_are_insets_shown_in_the_order_of_the_document_that_differs() {
+        let dir = temp_dir("alignment-inset");
+        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+        let Change::AlignmentsChanged(summary) = mark_a_and_b_reversed_in_b(&mut session) else {
+            panic!("expected the marks to change")
+        };
+        assert_eq!(summary.ask, Some(2));
+        assert_eq!(summary.insets.len(), 1);
+        assert_eq!(alignment_of(&session).ask, None);
+        assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
+        assert_eq!(hunks_of(&session), [vec![1..2, 0..1, 1..2], vec![0..1, 1..2, 0..1]]);
+        assert_eq!(output_text(&session), "b\na\n");
+        assert_consistent(&session);
+        let lifted: Vec<(Document, u32)> = alignment_of(&session).marks.iter().filter(|mark| mark.lifted).map(|mark| (mark.document.clone(), mark.number)).collect();
+        assert_eq!(lifted, [(Document::A, 2), (Document::C, 2)]);
+        assert!(alignment_of(&session).marks.iter().all(|mark| mark.status == MarkStatus::Applied));
+    }
+
+    #[test]
+    fn placing_an_inset_elsewhere_waits_for_apply_and_moves_the_other_documents() {
+        let dir = temp_dir("alignment-place");
+        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+        mark_a_and_b_reversed_in_b(&mut session);
+        session.apply_alignments(true, &BuiltinEngine).unwrap();
+        let before = session.snapshot().comparison;
+        let revision = session.revision();
+        let Change::AlignmentsChanged(summary) = session.place_alignment(2, 1).unwrap() else {
+            panic!("expected the marks to change")
+        };
+        assert_eq!(summary.ask, None);
+        assert!(summary.changed);
+        assert_eq!(session.revision().0, revision.0 + 1);
+        assert_eq!(session.snapshot().comparison, before);
+        assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
+        assert_eq!(hunks_of(&session), [vec![0..1, 1..2, 0..1], vec![1..2, 0..1, 1..2]]);
+        assert_eq!(output_text(&session), "a\nb\n");
+        assert_consistent(&session);
+        let lifted: Vec<(Document, u32)> = alignment_of(&session).marks.iter().filter(|mark| mark.lifted).map(|mark| (mark.document.clone(), mark.number)).collect();
+        assert_eq!(lifted, [(Document::B, 2)]);
+    }
+
+    #[test]
+    fn bad_places_are_rejected_without_a_change() {
+        let dir = temp_dir("alignment-bad-place");
+        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+        mark_a_and_b_reversed_in_b(&mut session);
+        let before = alignment_of(&session);
+        let revision = session.revision();
+        assert!(matches!(session.place_alignment(5, 0), Err(CoreError::InvalidMark { .. })));
+        assert!(matches!(session.place_alignment(2, 4), Err(CoreError::InvalidMark { .. })));
+        assert_eq!(alignment_of(&session), before);
+        assert_eq!(session.revision(), revision);
+    }
+
+    #[test]
+    fn insets_with_anchors_apply() {
+        let dir = temp_dir("alignment-inset-anchors");
+        let mut session = merge_of(&dir, &["a", "x", "b"], &["b", "x", "a"], &["a", "x", "b"]);
+        for (document, lines) in [
+            (Document::A, 0..1),
+            (Document::A, 2..3),
+            (Document::A, 1..1),
+            (Document::B, 2..3),
+            (Document::B, 0..1),
+            (Document::B, 1..2),
+            (Document::C, 0..1),
+            (Document::C, 2..3),
+            (Document::C, 1..1),
+        ] {
             session.mark_alignment(document, lines).unwrap();
         }
-        let before = session.snapshot();
-        let error = session.apply_alignments(true, &BuiltinEngine).unwrap_err();
-        assert_eq!(error.to_string(), "invalid manual alignment: alignments 1 and 2 cross in B");
-        assert_eq!(ProtocolError::from(error).kind, ErrorKind::InvalidRequest);
-        assert_eq!(session.snapshot(), before);
+        assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
+        assert_consistent(&session);
+        let mut lines: Vec<usize> = session.snapshot().comparison.regions.iter().flat_map(|region| region.rows.iter().filter_map(|row| row.lines[1])).collect();
+        lines.sort();
+        assert_eq!(lines, [0, 1, 2]);
     }
 
     #[test]

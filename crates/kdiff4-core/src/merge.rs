@@ -333,16 +333,34 @@ pub fn line_count(text: &str) -> usize {
     if text.is_empty() || text.ends_with('\n') { breaks } else { breaks + 1 }
 }
 
-/// One region spanning `regions`, which must be consecutive: their hunks and rows joined, its status classified again by `engine`.
+/// One region spanning `regions`, which must be consecutive: their hunks and rows joined, its status classified again by `engine`. Where the regions don't follow each other in a document, because an inset was lifted there, the hunk covers all of them and the status is classified from the lines of the rows.
 pub fn join(regions: &[Region], sources: &[Vec<&str>], engine: &dyn ComparisonEngine) -> Result<Region, CoreError> {
     let (Some(first), Some(last)) = (regions.first(), regions.last()) else {
         return Err(CoreError::InvalidChoice {
             reason: "nothing to join".to_string(),
         });
     };
-    let hunks: Vec<Range<usize>> = first.hunks.iter().zip(&last.hunks).map(|(start, end)| start.start.clone()..end.end.clone()).collect();
+    let follows = |document: usize| regions.windows(2).all(|pair| pair[0].hunks[document].end == pair[1].hunks[document].start);
+    let hunks: Vec<Range<usize>> = (0..first.hunks.len())
+        .map(|document| {
+            if follows(document) {
+                return first.hunks[document].start..last.hunks[document].end;
+            }
+            let start = regions.iter().map(|region| region.hunks[document].start).min().unwrap_or(0);
+            let end = regions.iter().map(|region| region.hunks[document].end).max().unwrap_or(0);
+            start..end
+        })
+        .collect();
     let rows: Vec<Row> = regions.iter().flat_map(|region| region.rows.iter().cloned()).collect();
-    let lines: Vec<Vec<&str>> = hunks.iter().zip(sources).map(|(hunk, lines)| lines.get(hunk.clone()).unwrap_or(&[]).to_vec()).collect();
+    let lines: Vec<Vec<&str>> = (0..hunks.len())
+        .map(|document| {
+            let source = sources.get(document).map(Vec::as_slice).unwrap_or(&[]);
+            if follows(document) {
+                return source.get(hunks[document].clone()).unwrap_or(&[]).to_vec();
+            }
+            rows.iter().filter_map(|row| row.lines[document]).filter_map(|line| source.get(line).copied()).collect()
+        })
+        .collect();
     let tokens = normalizer::tokenize(&lines);
     let hunk_lines: Vec<SourceLines<'_>> = lines.iter().zip(&tokens).map(|(lines, tokens)| SourceLines { lines, tokens }).collect();
     let status = engine.classify(&hunk_lines)?;
@@ -494,6 +512,17 @@ mod tests {
         let second = region(&[1..2, 1..2, 1..2], RegionStatus::Merge(MergeStatus::ChangedInB));
         let joined = join(&[first, second], &sources, &BuiltinEngine).unwrap();
         assert_eq!(joined.hunks, [0..2, 0..2, 0..2]);
+        assert_eq!(joined.rows.len(), 2);
+        assert_eq!(joined.status, RegionStatus::Merge(MergeStatus::Conflict));
+    }
+
+    #[test]
+    fn join_reaches_over_an_inset_and_classifies_its_lines() {
+        let sources = vec![vec!["a0", "a1", "a2"], vec!["b0", "a1", "a2"], vec!["c0", "a1", "a2"]];
+        let first = region(&[2..3, 2..3, 2..3], RegionStatus::Merge(MergeStatus::Unchanged));
+        let second = region(&[0..1, 0..1, 0..1], RegionStatus::Merge(MergeStatus::Conflict));
+        let joined = join(&[first, second], &sources, &BuiltinEngine).unwrap();
+        assert_eq!(joined.hunks, [0..3, 0..3, 0..3]);
         assert_eq!(joined.rows.len(), 2);
         assert_eq!(joined.status, RegionStatus::Merge(MergeStatus::Conflict));
     }

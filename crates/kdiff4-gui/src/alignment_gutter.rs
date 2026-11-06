@@ -1,7 +1,7 @@
 use std::ops::Range;
 
-use egui::{Align2, Color32, FontId, Painter, Rect, Stroke, StrokeKind, pos2};
-use kdiff4_protocol::{AlignmentMark, MarkStatus};
+use egui::{Align2, Color32, FontId, Painter, Rect, Shape, Stroke, StrokeKind, pos2};
+use kdiff4_protocol::{AlignmentMark, Document, InsetChoice, InsetOption, MarkStatus};
 
 use crate::rows::Rows;
 use crate::text_view;
@@ -9,14 +9,22 @@ use crate::theme::{DocumentColors, Palette};
 
 /// How much of a row the chip of an anchor covers.
 const CHIP_HEIGHT_SHARE: f32 = 0.8;
+/// How far the line of the first arrow is from the right edge of the alignment column, and how far each further arrow is from the one before.
+const ARROW_LANE_INSET: f32 = 3.0;
+const ARROW_LANE_STEP: f32 = 3.0;
+const ARROW_WIDTH: f32 = 1.5;
+const ARROW_HEAD_LENGTH: f32 = 4.5;
+const ARROW_HEAD_WIDTH: f32 = 5.0;
+const ARROW_DOT_RADIUS: f32 = 2.5;
 /// The border of a mark nothing in the other documents pairs with, as a share of the color's strength.
 const UNMATCHED_BORDER_SHARE: f32 = 0.45;
 
-/// The alignment marks of one source pane, and the highest number any document uses, so a mark can be renumbered to pair with a mark of another document.
+/// The alignment marks of one source pane, and the highest number any document uses, so a mark can be renumbered to pair with a mark of another document. `insets` are the places the alignments that are lifted somewhere could be shown at instead.
 #[derive(Debug, Clone, Copy)]
 pub struct PaneMarks<'a> {
     pub marks: &'a [AlignmentMark],
     pub highest: u32,
+    pub insets: &'a [InsetChoice],
 }
 
 /// Where a mark sits in a pane's rows.
@@ -40,6 +48,32 @@ pub fn place(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Place {
     let first = rows.row_of_line(mark.lines.start);
     let last = rows.row_of_line(mark.lines.end - 1);
     Place::Rows(first..last.max(first) + 1)
+}
+
+/// A hunk shown away from its place: the arrow runs from where it was in the document to the rows it is shown on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrow {
+    /// The edge above this row is where the hunk was taken from; one past the last row is the end of the text.
+    pub from: usize,
+    /// The first row of the hunk.
+    pub to: usize,
+}
+
+/// The arrow of a mark whose hunk the applied comparison shows elsewhere. Anchors have no lines to move, and a hunk that was not lifted in the comparison yet has no new place to point at.
+pub fn arrow(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Option<Arrow> {
+    if !mark.lifted || mark.status != MarkStatus::Applied || mark.is_anchor() {
+        return None;
+    }
+    let from = if mark.lines.start > 0 {
+        rows.row_of_line(mark.lines.start - 1) + 1
+    } else if mark.lines.end < line_count {
+        rows.row_of_line(mark.lines.end)
+    } else {
+        0
+    };
+    let to = rows.row_of_line(mark.lines.start);
+    let below_hunk = rows.row_of_line(mark.lines.end - 1) + 1;
+    (from != to && from != below_hunk).then_some(Arrow { from, to })
 }
 
 /// The marks under a point of the alignment column, given in pixels from the top of the content: the ranges that cover its row and the anchors whose chip it touches.
@@ -72,7 +106,25 @@ pub fn describe(mark: &AlignmentMark) -> String {
         MarkStatus::Pending => "waits for Apply Alignments",
         MarkStatus::Unmatched => "has no effect: not every document has a mark with this number",
     };
-    format!("Alignment {}, {what}: {state}", mark.number)
+    let moved = if mark.lifted { ". It is moved: shown with the other documents' parts of this alignment, away from its place here." } else { "" };
+    format!("Alignment {}, {what}: {state}{moved}", mark.number)
+}
+
+/// Where an option shows its alignment among the others, and the documents whose hunk it moves there.
+pub fn option_label(option: &InsetOption) -> String {
+    let place = match (option.above, option.below) {
+        (None, Some(below)) => format!("Above alignment {below}"),
+        (Some(above), None) => format!("Below alignment {above}"),
+        (Some(above), Some(below)) => format!("Between alignments {above} and {below}"),
+        (None, None) => "Here".to_string(),
+    };
+    let letters: Vec<&str> = option.lifted.iter().map(Document::letter).collect();
+    let moves = match letters.as_slice() {
+        [] => return place,
+        [only] => only.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("{place} (moves {moves})")
 }
 
 /// The numbers a mark of a pane can be renumbered to: every number up to one past the highest, except its own. The bool is whether another mark of the pane has the number, so the two swap.
@@ -113,6 +165,7 @@ pub fn paint_row(
     color: Color32,
     palette: &Palette,
     font_id: &FontId,
+    arrows: &[Arrow],
 ) {
     for (mark, place) in marks.iter().zip(places) {
         let Place::Rows(rows) = place else { continue };
@@ -158,6 +211,31 @@ pub fn paint_row(
             font_id,
             Place::Edge(row_count),
         );
+    }
+    paint_arrows(painter, arrows, row, row_count, rect, column_left, column_width, palette);
+}
+
+/// The part of every arrow on `row`: its line down the right of the column, a dot where the hunk was taken from, and the tip pointing at the first row of the hunk.
+fn paint_arrows(painter: &Painter, arrows: &[Arrow], row: usize, row_count: usize, rect: Rect, column_left: f32, column_width: f32, palette: &Palette) {
+    let screen_y = |position: f32| rect.top() + (position - row as f32) * rect.height();
+    let on_row = |y: f32| y >= rect.top() && (y < rect.bottom() || (row + 1 == row_count && y <= rect.bottom()));
+    let stroke = Stroke::new(ARROW_WIDTH, palette.text);
+    for (index, arrow) in arrows.iter().enumerate() {
+        let x = (column_left + column_width - ARROW_LANE_INSET - index as f32 * ARROW_LANE_STEP).max(column_left + 1.0);
+        let (from_y, to_y) = (screen_y(arrow.from as f32), screen_y(arrow.to as f32 + 0.5));
+        let (top, bottom) = (from_y.min(to_y).max(rect.top()), from_y.max(to_y).min(rect.bottom()));
+        if top < bottom {
+            painter.line_segment([pos2(x, top), pos2(x, bottom)], stroke);
+        }
+        if on_row(from_y) {
+            painter.circle_filled(pos2(x, from_y), ARROW_DOT_RADIUS, palette.text);
+        }
+        if on_row(to_y) {
+            let tip = pos2(column_left + 1.0, to_y);
+            painter.line_segment([pos2(x, to_y), tip], stroke);
+            let head = vec![tip, pos2(tip.x + ARROW_HEAD_LENGTH, to_y - ARROW_HEAD_WIDTH / 2.0), pos2(tip.x + ARROW_HEAD_LENGTH, to_y + ARROW_HEAD_WIDTH / 2.0)];
+            painter.add(Shape::convex_polygon(head, palette.text, Stroke::NONE));
+        }
     }
 }
 
@@ -206,6 +284,7 @@ mod tests {
             number,
             lines,
             status,
+            lifted: false,
         }
     }
 
@@ -282,5 +361,61 @@ mod tests {
             "Alignment 1, anchor before line 4: waits for Apply Alignments"
         );
         assert!(describe(&mark(1, 0..1, MarkStatus::Unmatched)).contains("has no effect"));
+        let lifted = AlignmentMark {
+            lifted: true,
+            ..mark(2, 4..7, MarkStatus::Applied)
+        };
+        assert!(describe(&lifted).starts_with("Alignment 2, lines 5 to 7: applied. It is moved"));
+    }
+
+    fn lifted(number: u32, lines: Range<usize>, status: MarkStatus) -> AlignmentMark {
+        AlignmentMark {
+            lifted: true,
+            ..mark(number, lines, status)
+        }
+    }
+
+    /// Lines 0 to 4 shown as 3, 4, 0, 1, 2: the hunk of lines 3 and 4 came from the end of the text to the top.
+    fn rows_with_a_hunk_from_the_end() -> RowMap {
+        RowMap::from_rows([3, 4, 0, 1, 2].into_iter().map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect())
+    }
+
+    #[test]
+    fn the_arrow_runs_from_the_edge_the_hunk_left_to_its_first_row() {
+        let map = rows_with_a_hunk_from_the_end();
+        let rows = Rows::Mapped(&map);
+        assert_eq!(arrow(&lifted(1, 3..5, MarkStatus::Applied), rows, 5), Some(Arrow { from: 5, to: 0 }));
+    }
+
+    #[test]
+    fn a_hunk_taken_from_the_start_points_from_the_line_after_it() {
+        let rows = Rows::PerLine(5);
+        assert_eq!(arrow(&lifted(1, 0..2, MarkStatus::Applied), rows, 5), None);
+        let map = RowMap::from_rows([2, 3, 4, 0, 1].into_iter().map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect());
+        let rows = Rows::Mapped(&map);
+        assert_eq!(arrow(&lifted(1, 0..2, MarkStatus::Applied), rows, 5), Some(Arrow { from: 0, to: 3 }));
+    }
+
+    #[test]
+    fn only_applied_ranges_that_moved_get_an_arrow() {
+        let map = rows_with_a_hunk_from_the_end();
+        let rows = Rows::Mapped(&map);
+        assert_eq!(arrow(&lifted(1, 3..5, MarkStatus::Pending), rows, 5), None);
+        assert_eq!(arrow(&lifted(1, 3..3, MarkStatus::Applied), rows, 5), None);
+        assert_eq!(arrow(&mark(1, 3..5, MarkStatus::Applied), rows, 5), None);
+    }
+
+    #[test]
+    fn options_say_where_they_show_the_alignment_and_who_moves() {
+        let option = |above, below, lifted: &[Document]| InsetOption {
+            slot: 0,
+            above,
+            below,
+            lifted: lifted.to_vec(),
+        };
+        assert_eq!(option_label(&option(None, Some(1), &[Document::A, Document::C])), "Above alignment 1 (moves A and C)");
+        assert_eq!(option_label(&option(Some(1), None, &[Document::B])), "Below alignment 1 (moves B)");
+        assert_eq!(option_label(&option(Some(1), Some(3), &[Document::A, Document::B, Document::C])), "Between alignments 1 and 3 (moves A, B and C)");
+        assert_eq!(option_label(&option(Some(2), None, &[])), "Below alignment 2");
     }
 }

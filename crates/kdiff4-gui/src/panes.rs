@@ -54,6 +54,8 @@ pub enum PaneAction {
     RemoveAlignmentMark(Document, u32),
     /// Give the mark `number` of a document the number `to`.
     RenumberAlignmentMark(Document, u32, u32),
+    /// Show the alignment `number` at the place with the index `slot` among the other alignments.
+    PlaceAlignment(u32, usize),
     /// Enter in a header path field, with the field's text.
     CommitPath(Document, String),
     Browse(Document),
@@ -420,7 +422,11 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
                 lines,
                 rows,
                 char_runs,
-                PaneMarks { marks: &marks, highest },
+                PaneMarks {
+                    marks: &marks,
+                    highest,
+                    insets: &mirror.alignments().insets,
+                },
                 ScrollGroup::Sources,
                 given.clone(),
                 state,
@@ -449,7 +455,11 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
             lines,
             rows,
             None,
-            PaneMarks { marks: &[], highest: 0 },
+            PaneMarks {
+                marks: &[],
+                highest: 0,
+                insets: &[],
+            },
             group,
             given,
             state,
@@ -525,6 +535,7 @@ fn pane(
                         Some(MenuAction::MarkAnchor(position)) => actions.push(PaneAction::MarkAnchor(document.clone(), position)),
                         Some(MenuAction::RemoveMark(number)) => actions.push(PaneAction::RemoveAlignmentMark(document.clone(), number)),
                         Some(MenuAction::RenumberMark(number, to)) => actions.push(PaneAction::RenumberAlignmentMark(document.clone(), number, to)),
+                        Some(MenuAction::PlaceMark(number, slot)) => actions.push(PaneAction::PlaceAlignment(number, slot)),
                         None => {}
                     }
                     PaneScroll {

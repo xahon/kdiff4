@@ -100,6 +100,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
         Command::MarkAlignment { document, lines } => active(session)?.mark_alignment(document, lines)?,
         Command::RemoveAlignmentMark { document, number } => active(session)?.remove_alignment_mark(document, number)?,
         Command::RenumberAlignmentMark { document, number, to } => active(session)?.renumber_alignment_mark(document, number, to)?,
+        Command::PlaceAlignment { number, slot } => active(session)?.place_alignment(number, slot)?,
         Command::ClearAlignmentMarks => match active(session)?.clear_alignment_marks() {
             Some(change) => change,
             None => return Ok(()),
