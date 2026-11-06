@@ -31,9 +31,9 @@ jobs:
           - os: macos-latest
             asset: kdiff4-macos-aarch64
             binary: target/release/kdiff4
-          - os: macos-13
-            asset: kdiff4-macos-x86_64
-            binary: target/release/kdiff4
+          # - os: macos-13
+          #  asset: kdiff4-macos-x86_64
+          #  binary: target/release/kdiff4
     steps:
       - uses: actions/checkout@v4
 
