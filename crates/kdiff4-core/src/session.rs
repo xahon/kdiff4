@@ -203,7 +203,7 @@ impl Session {
             Vec::new()
         };
         let wanted = |index: &usize| match to {
-            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states[*index].merge.edited || stops.contains(index),
+            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states.get(*index).is_some_and(|state| state.merge.edited) || stops.contains(index),
             Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
         };
         let found = match to {
@@ -1312,6 +1312,21 @@ mod tests {
         assert_eq!(session.navigate(&base, Some(3), Navigation::PreviousConflict, false).unwrap(), None);
         assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict, false).unwrap(), None);
         assert_eq!(session.revision(), base);
+    }
+
+    #[test]
+    fn navigation_works_without_output() {
+        let dir = temp_dir("navigate-no-output");
+        let a = write(&dir, "a.txt", "x
+y
+");
+        let b = write(&dir, "b.txt", "x
+z
+");
+        let mut session = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap();
+        let base = session.revision();
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), None);
     }
 
     #[test]
