@@ -1,11 +1,9 @@
 use egui::emath;
 
-
 /// Below this distance, in pixels, a scroll is where it is going.
 const ARRIVED: f32 = 0.5;
 /// Share of the way a smooth scroll covers within its duration.
 const SMOOTH_REACH: f32 = 0.99;
-
 
 /// How scrolling moves the panes: at once, or smoothly over `duration` seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,13 +12,11 @@ pub struct ScrollMotion {
     pub duration: f32,
 }
 
-
 impl ScrollMotion {
     fn is_instant(&self) -> bool {
         !self.smooth || !(self.duration > 0.0)
     }
 }
-
 
 /// A vertical scroll offset that moves toward its target, in pixels: smoothly over a few frames, or at once.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -28,7 +24,6 @@ pub struct SmoothScroll {
     pub offset: f32,
     pub target: f32,
 }
-
 
 impl SmoothScroll {
     /// Starts scrolling to `target`, kept between 0 and `max`.
@@ -40,12 +35,10 @@ impl SmoothScroll {
         }
     }
 
-
     /// Scrolls `delta` pixels further than the current target, so quick wheel notches add up.
     pub fn scroll_by(&mut self, delta: f32, max: f32, motion: ScrollMotion) {
         self.scroll_to(self.target.clone() + delta, max, motion);
     }
-
 
     /// Moves the offset and the target by `delta` at once, kept between 0 and `max`, so a scroll under way goes on from there. Trackpads scroll this way.
     pub fn shift(&mut self, delta: f32, max: f32) {
@@ -56,7 +49,6 @@ impl SmoothScroll {
         }
     }
 
-
     /// Puts the offset at `offset` at once, as when the user drags a scroll bar.
     pub fn set(&mut self, offset: f32) {
         if offset.is_finite() {
@@ -64,7 +56,6 @@ impl SmoothScroll {
             self.target = offset;
         }
     }
-
 
     /// Moves the offset toward the target for a frame of `dt` seconds. Returns whether it is still moving.
     pub fn step(&mut self, dt: f32, motion: ScrollMotion) -> bool {
@@ -82,15 +73,12 @@ impl SmoothScroll {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     const SMOOTH: ScrollMotion = ScrollMotion { smooth: true, duration: 0.2 };
     const INSTANT: ScrollMotion = ScrollMotion { smooth: false, duration: 0.2 };
-
 
     #[test]
     fn instant_scrolls_arrive_at_once() {
@@ -102,14 +90,12 @@ mod tests {
         assert!(!scroll.step(0.016, INSTANT));
     }
 
-
     #[test]
     fn zero_duration_is_instant() {
         let mut scroll = SmoothScroll::default();
         scroll.scroll_to(50.0, 1000.0, ScrollMotion { smooth: true, duration: 0.0 });
         assert_eq!(scroll.offset, 50.0);
     }
-
 
     #[test]
     fn smooth_scrolls_approach_and_arrive() {
@@ -129,7 +115,6 @@ mod tests {
         assert_eq!(scroll.offset, 100.0);
     }
 
-
     #[test]
     fn targets_stay_in_range() {
         let mut scroll = SmoothScroll::default();
@@ -143,7 +128,6 @@ mod tests {
         assert_eq!(scroll.offset, 0.0);
     }
 
-
     #[test]
     fn wheel_notches_add_up_while_moving() {
         let mut scroll = SmoothScroll::default();
@@ -152,7 +136,6 @@ mod tests {
         scroll.scroll_by(60.0, 1000.0, SMOOTH);
         assert_eq!(scroll.target, 120.0);
     }
-
 
     #[test]
     fn shift_moves_a_scroll_under_way() {
@@ -165,10 +148,8 @@ mod tests {
         assert_eq!(scroll.target, 55.0);
     }
 
-
     #[test]
     fn set_stops_a_scroll_where_the_user_put_it() {
-
         let mut scroll = SmoothScroll::default();
         scroll.scroll_to(300.0, 1000.0, SMOOTH);
         scroll.set(42.0);

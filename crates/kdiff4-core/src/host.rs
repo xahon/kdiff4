@@ -7,13 +7,9 @@ use crate::engine_registry::EngineRegistry;
 use crate::error::CoreError;
 use crate::session::Session;
 
-
 pub fn spawn_host(endpoint: HostEndpoint) -> io::Result<JoinHandle<()>> {
-    thread::Builder::new()
-        .name("kdiff4-host".to_string())
-        .spawn(move || run_host(endpoint))
+    thread::Builder::new().name("kdiff4-host".to_string()).spawn(move || run_host(endpoint))
 }
-
 
 /// Handles requests in arrival order until the client disconnects.
 pub fn run_host(endpoint: HostEndpoint) {
@@ -32,7 +28,6 @@ pub fn run_host(endpoint: HostEndpoint) {
     log::debug!("host: client disconnected");
 }
 
-
 /// Events are sent before the response, so a client sees the new state when its request completes. A disconnected client is noticed when the response is sent.
 fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Option<Session>, id: RequestId, command: Command) -> Result<(), ProtocolError> {
     let change = match command {
@@ -46,7 +41,13 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
         },
         Command::Open(files) => {
             let opened = Session::open(&files, registry.default_engine())?;
-            log::info!("host: opened A {}, B {}, C {}, output {}", files.a.display(), files.b.display(), describe(files.c.as_deref()), describe(files.output.as_deref()));
+            log::info!(
+                "host: opened A {}, B {}, C {}, output {}",
+                files.a.display(),
+                files.b.display(),
+                describe(files.c.as_deref()),
+                describe(files.output.as_deref())
+            );
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(opened.snapshot())));
             *session = Some(opened);
             return Ok(());
@@ -69,7 +70,12 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
             return Ok(());
         }
-        Command::Navigate { base, from, to, include_alignments } => {
+        Command::Navigate {
+            base,
+            from,
+            to,
+            include_alignments,
+        } => {
             let active = active(session)?;
             if let Some(region) = active.navigate(&base, from, to, include_alignments)? {
                 log::debug!("host: navigated {to:?} to region {region}");
@@ -113,23 +119,35 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
         Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
         Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
         Change::AlignmentsChanged(alignments) => log::debug!("host: {} alignment marks, changed {}, revision {}", alignments.marks.len(), alignments.changed, revision.0),
-        Change::OutputEdited { range, text, merge, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, regions {}..{} by {}, revision {}", text.len(), merge.at, merge.at + merge.removed, merge.regions.len(), revision.0),
+        Change::OutputEdited { range, text, merge, .. } => log::debug!(
+            "host: output bytes {range:?} replaced by {} bytes, regions {}..{} by {}, revision {}",
+            text.len(),
+            merge.at,
+            merge.at + merge.removed,
+            merge.regions.len(),
+            revision.0
+        ),
     }
-    let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta { revision, cause: Some(id), change })));
+    let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta {
+        revision,
+        cause: Some(id),
+        change,
+    })));
     Ok(())
 }
 
-
 fn send_current(endpoint: &HostEndpoint, session: &Session, id: RequestId) {
-    let current = CurrentRegion { revision: session.revision(), region: session.current_region(), cause: Some(id) };
+    let current = CurrentRegion {
+        revision: session.revision(),
+        region: session.current_region(),
+        cause: Some(id),
+    };
     let _ = endpoint.send(HostMessage::Event(Event::CurrentRegion(current)));
 }
-
 
 fn describe(path: Option<&std::path::Path>) -> String {
     path.map(|path| path.display().to_string()).unwrap_or_else(|| "none".to_string())
 }
-
 
 fn active(session: &mut Option<Session>) -> Result<&mut Session, CoreError> {
     session.as_mut().ok_or(CoreError::NoSession)

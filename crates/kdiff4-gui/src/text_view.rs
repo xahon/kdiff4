@@ -13,7 +13,6 @@ use crate::editing::{self, Cursor, Lines, Position};
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
 
-
 /// Extra height of a row above the font's line height, so carets and text don't touch the next row.
 const ROW_PADDING: f32 = 2.0;
 const CARET_WIDTH: f32 = 1.5;
@@ -34,7 +33,6 @@ const REGION_BORDER_WIDTH: f32 = 1.0;
 /// Whitespace markers are drawn in the weak text color at this opacity, so they stay behind the text.
 const WHITESPACE_OPACITY: f32 = 0.6;
 
-
 /// What a pane shows left of its text, after the line numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarginKind {
@@ -44,7 +42,6 @@ pub enum MarginKind {
     /// D's gutter: a block per run of lines from one origin, colored and labeled with it: A, B, C, or M for a hand edit.
     Marks,
 }
-
 
 /// How a view draws: colors, its margin, the region boxes and the current region.
 #[derive(Debug, Clone, Copy)]
@@ -64,7 +61,6 @@ pub struct ViewStyle<'a> {
     pub alignment_color: Option<Color32>,
 }
 
-
 /// The character-level diff of a source pane's lines; `sources` is how many source documents the rows have.
 #[derive(Debug, Clone, Copy)]
 pub struct CharRuns<'a> {
@@ -72,7 +68,6 @@ pub struct CharRuns<'a> {
     pub lines: &'a LineCharRuns,
     pub sources: usize,
 }
-
 
 /// A whitespace character the panes can mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +79,6 @@ pub enum Whitespace {
     /// Non-breaking and other Unicode spaces.
     Other,
 }
-
 
 impl Whitespace {
     pub fn of(character: char) -> Option<Whitespace> {
@@ -98,7 +92,6 @@ impl Whitespace {
         }
     }
 
-
     pub fn is_shown(&self, config: &WhitespaceConfig) -> bool {
         config.render
             && match self {
@@ -111,14 +104,12 @@ impl Whitespace {
     }
 }
 
-
 /// The caret and selection, in lines, and the void row the caret sits on, if it is in a void.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caret {
     pub cursor: Cursor,
     pub void_row: Option<usize>,
 }
-
 
 /// What the mouse did in the view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +126,6 @@ pub enum PointerAction {
     SelectRegion(usize),
 }
 
-
 /// What the user picked from the context menu of a source pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
@@ -148,7 +138,6 @@ pub enum MenuAction {
     RenumberMark(u32, u32),
 }
 
-
 /// Where the context menu was opened: the positions an anchor can go to, whether that is on a void row, and the marks of the alignment column under the pointer, as indices into the pane marks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuTarget {
@@ -157,7 +146,6 @@ struct MenuTarget {
     on_void: bool,
     marks: Vec<usize>,
 }
-
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ViewResponse {
@@ -170,14 +158,12 @@ pub struct ViewResponse {
     pub wheel: Wheel,
 }
 
-
 /// Pixels the wheel asked to scroll down in a frame, negative for up: `stepped` by mouse wheel notches, which may scroll smoothly, and `direct` by a trackpad, which follows the fingers at once.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Wheel {
     pub stepped: f32,
     pub direct: f32,
 }
-
 
 /// The rows a view shows after a frame: its vertical scroll offset and height, the height of a row and of all rows, in pixels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -188,7 +174,6 @@ pub struct Viewport {
     pub content_height: f32,
 }
 
-
 impl Viewport {
     /// Whether every row of `rows` is fully visible. Rows that are empty count as visible when the place they would be is.
     pub fn shows(&self, rows: Range<usize>) -> bool {
@@ -198,19 +183,20 @@ impl Viewport {
         top + TOLERANCE >= self.offset && bottom <= self.offset + self.height + TOLERANCE
     }
 
-
     /// The largest vertical scroll offset.
     pub fn max_offset(&self) -> f32 {
         (self.content_height - self.height).max(0.0)
     }
 
-
     /// How many whole rows fit in the view, at least one.
     pub fn page_rows(&self) -> usize {
-        if self.row_height > 0.0 { ((self.height / self.row_height).floor() as usize).max(1) } else { 1 }
+        if self.row_height > 0.0 {
+            ((self.height / self.row_height).floor() as usize).max(1)
+        } else {
+            1
+        }
     }
 }
-
 
 /// Widths of the left margin's parts. The margin stays in place when the text scrolls sideways.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,28 +207,37 @@ struct Margin {
     column: f32,
 }
 
-
 impl Margin {
     fn total(&self) -> f32 {
         self.numbers + self.alignment + self.column + TEXT_GAP
     }
 }
 
-
 /// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset, so several views can scroll together. Vertical wheel scrolling is not applied but reported, for the caller to scroll with.
-pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, caret: Option<Caret>, reveal_caret: bool, offset: Option<f32>, style: &ViewStyle<'_>, marks: PaneMarks<'_>) -> ViewResponse {
+pub fn show(
+    ui: &mut Ui,
+    id_salt: &str,
+    lines: Lines<'_>,
+    rows: Rows<'_>,
+    char_runs: Option<CharRuns<'_>>,
+    caret: Option<Caret>,
+    reveal_caret: bool,
+    offset: Option<f32>,
+    style: &ViewStyle<'_>,
+    marks: PaneMarks<'_>,
+) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
     let row_height = row_height(ui);
     let viewport_height = ui.available_height();
     let page_rows = ((viewport_height / row_height).floor() as usize).max(1);
-    let caret = caret.map(|caret| Caret { cursor: editing::clamp_cursor(lines, caret.cursor), void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())) });
+    let caret = caret.map(|caret| Caret {
+        cursor: editing::clamp_cursor(lines, caret.cursor),
+        void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())),
+    });
     let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.pane_text).size().x;
     let margin = margin_widths(style, lines.count(), char_width, row_height);
-    let places: Vec<Place> = marks.marks
-        .iter()
-        .map(|mark| alignment_gutter::place(mark, rows, lines.count()))
-        .collect();
+    let places: Vec<Place> = marks.marks.iter().map(|mark| alignment_gutter::place(mark, rows, lines.count())).collect();
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -268,7 +263,8 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
             let mut previous_region = None;
             for row in visible {
                 let pane_row = rows.row(row).unwrap_or_default();
-                let segments = pane_row.line
+                let segments = pane_row
+                    .line
                     .zip(char_runs)
                     .map(|(line, runs)| char_diff::segments(runs.document.clone(), runs.lines.line(line), runs.sources.clone()))
                     .unwrap_or_default();
@@ -280,7 +276,9 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 let text_rect = Rect::from_min_max(pos2(rect.left() + margin.total(), rect.top()), pos2(rect.right().max(viewport.right()), rect.bottom()));
                 if let Some(region) = pane_row.region
                     && pane_row.region != previous_region
-                    && let Some(region_rect) = rows.region_rows(region).and_then(|range| region_box(range, row, rect.top(), row_height, viewport.x_range()))
+                    && let Some(region_rect) = rows
+                        .region_rows(region)
+                        .and_then(|range| region_box(range, row, rect.top(), row_height, viewport.x_range()))
                 {
                     if pane_row.region == style.current_region {
                         ui.painter().rect_filled(region_rect, style.region_corner_radius, style.current_region_color);
@@ -292,12 +290,30 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 previous_region = pane_row.region;
                 paint_margin(ui, rows, row, &pane_row, viewport.left(), rect, margin, style, &font_id);
                 if let Some(color) = style.alignment_color {
-                    alignment_gutter::paint_row(ui.painter(), marks.marks, &places, row, rows.len(), rect, viewport.left() + margin.numbers, margin.alignment, color, palette, &font_id);
+                    alignment_gutter::paint_row(
+                        ui.painter(),
+                        marks.marks,
+                        &places,
+                        row,
+                        rows.len(),
+                        rect,
+                        viewport.left() + margin.numbers,
+                        margin.alignment,
+                        color,
+                        palette,
+                        &font_id,
+                    );
                 }
                 let caret_on_void = caret.and_then(|caret| caret.void_row) == Some(row);
                 let (Some(line), Some(galley)) = (pane_row.line, galley) else {
                     if pane_row.conflict_marker {
-                        text_painter.text(pos2(text_rect.left(), text_rect.center().y), Align2::LEFT_CENTER, CONFLICT_MARKER, font_id.clone(), palette.red());
+                        text_painter.text(
+                            pos2(text_rect.left(), text_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            CONFLICT_MARKER,
+                            font_id.clone(),
+                            palette.red(),
+                        );
                     } else {
                         paint_void(&text_painter, text_rect, palette);
                     }
@@ -321,8 +337,13 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 }
             }
             for (region_rect, current) in boxes {
-                let color = if current { palette.region_border } else { palette.region_border.gamma_multiply(style.other_region_border_opacity) };
-                ui.painter().rect_stroke(region_rect, style.region_corner_radius, Stroke::new(REGION_BORDER_WIDTH, color), StrokeKind::Inside);
+                let color = if current {
+                    palette.region_border
+                } else {
+                    palette.region_border.gamma_multiply(style.other_region_border_opacity)
+                };
+                ui.painter()
+                    .rect_stroke(region_rect, style.region_corner_radius, Stroke::new(REGION_BORDER_WIDTH, color), StrokeKind::Inside);
             }
         })
     });
@@ -332,7 +353,16 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
     let response = ui.interact(output.inner_rect, ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
     let held = response.is_pointer_button_down_on();
     let scroll = output.state.clamped_offset();
-    let gutter_at = |pointer: Pos2| gutter_region(rows, margin, style.margin, pointer.x - output.inner_rect.min.x, pointer.y - output.inner_rect.min.y + scroll.y, row_height);
+    let gutter_at = |pointer: Pos2| {
+        gutter_region(
+            rows,
+            margin,
+            style.margin,
+            pointer.x - output.inner_rect.min.x,
+            pointer.y - output.inner_rect.min.y + scroll.y,
+            row_height,
+        )
+    };
     let hover_position = ui.input(|input| input.pointer.hover_pos());
     let alignment_hits = |pointer: Pos2| -> Vec<usize> {
         let x = pointer.x - output.inner_rect.min.x;
@@ -341,10 +371,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
         }
         alignment_gutter::hits(&places, row_height, pointer.y - output.inner_rect.min.y + scroll.y)
     };
-    let hovered_marks = hover_position
-        .filter(|_| response.hovered())
-        .map(alignment_hits)
-        .unwrap_or_default();
+    let hovered_marks = hover_position.filter(|_| response.hovered()).map(alignment_hits).unwrap_or_default();
     if !hovered_marks.is_empty() {
         let text = hovered_marks
             .iter()
@@ -370,7 +397,17 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 }
                 None => (count, count, false),
             };
-            ui.data_mut(|data| data.insert_temp(target_id, MenuTarget { before, after, on_void, marks: alignment_hits(pointer) }));
+            ui.data_mut(|data| {
+                data.insert_temp(
+                    target_id,
+                    MenuTarget {
+                        before,
+                        after,
+                        on_void,
+                        marks: alignment_hits(pointer),
+                    },
+                )
+            });
         }
         let can_mark_selection = caret.is_some_and(|caret| caret.void_row.is_none());
         response.context_menu(|ui| {
@@ -405,7 +442,11 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
         Some(pointer) if response.double_clicked() => Some(PointerAction::SelectWord(hit(pointer).0)),
         Some(pointer) if pressed => {
             let (position, void_row) = hit(pointer);
-            Some(PointerAction::Press { position, void_row, extend: ui.input(|input| input.modifiers.shift) })
+            Some(PointerAction::Press {
+                position,
+                void_row,
+                extend: ui.input(|input| input.modifiers.shift),
+            })
         }
         Some(pointer) if held => {
             let (position, void_row) = hit(pointer);
@@ -413,16 +454,30 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
         }
         _ => None,
     };
-    let viewport = Viewport { offset: scroll.y, height: output.inner_rect.height(), row_height, content_height: output.content_size.y };
-    ViewResponse { pointer, menu, page_rows, viewport, wheel }
+    let viewport = Viewport {
+        offset: scroll.y,
+        height: output.inner_rect.height(),
+        row_height,
+        content_height: output.content_size.y,
+    };
+    ViewResponse {
+        pointer,
+        menu,
+        page_rows,
+        viewport,
+        wheel,
+    }
 }
-
 
 /// The context menu of a source pane: for each mark under the pointer its number and removal, then marking the selection and anchors.
 fn show_menu(ui: &mut Ui, target: &MenuTarget, marks: PaneMarks<'_>, can_mark_selection: bool) -> Option<MenuAction> {
     let mut action = None;
     for mark in target.marks.iter().filter_map(|index| marks.marks.get(*index)) {
-        let title = if mark.is_anchor() { format!("Anchor {}", mark.number) } else { format!("Alignment {}", mark.number) };
+        let title = if mark.is_anchor() {
+            format!("Anchor {}", mark.number)
+        } else {
+            format!("Alignment {}", mark.number)
+        };
         ui.menu_button(title, |ui| {
             ui.menu_button("Change Number", |ui| {
                 for (to, swaps) in alignment_gutter::renumber_choices(marks.marks, marks.highest, mark.number) {
@@ -440,10 +495,18 @@ fn show_menu(ui: &mut Ui, target: &MenuTarget, marks: PaneMarks<'_>, can_mark_se
     if !target.marks.is_empty() {
         ui.separator();
     }
-    if ui.add_enabled(can_mark_selection, egui::Button::new("Mark Selected Lines for Alignment")).on_disabled_hover_text("Select lines in this pane first").clicked() {
+    if ui
+        .add_enabled(can_mark_selection, egui::Button::new("Mark Selected Lines for Alignment"))
+        .on_disabled_hover_text("Select lines in this pane first")
+        .clicked()
+    {
         action = Some(MenuAction::MarkSelection);
     }
-    let before_label = if target.on_void { "Mark Alignment Anchor Here" } else { "Mark Alignment Anchor Before This Line" };
+    let before_label = if target.on_void {
+        "Mark Alignment Anchor Here"
+    } else {
+        "Mark Alignment Anchor Before This Line"
+    };
     if ui.button(before_label).clicked() {
         action = Some(MenuAction::MarkAnchor(target.before));
     }
@@ -453,13 +516,11 @@ fn show_menu(ui: &mut Ui, target: &MenuTarget, marks: PaneMarks<'_>, can_mark_se
     action
 }
 
-
 /// The height of a row of text in the panes: the monospace font's line height plus padding.
 pub fn row_height(ui: &Ui) -> f32 {
     let font_id = TextStyle::Monospace.resolve(ui.style());
     ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ROW_PADDING
 }
-
 
 /// The vertical wheel scrolling over the view this frame, taken from egui so its scroll area doesn't apply it too. A line of a mouse wheel scrolls `step_rows` rows; trackpads scroll by their pixels. With Ctrl (zoom) or Shift (sideways) held, egui keeps the wheel.
 fn take_vertical_wheel(ui: &mut Ui, row_height: f32, page_height: f32, step_rows: usize) -> Wheel {
@@ -487,7 +548,6 @@ fn take_vertical_wheel(ui: &mut Ui, row_height: f32, page_height: f32, step_rows
     })
 }
 
-
 /// Pixels to scroll down for `lines` wheel units down.
 pub fn wheel_pixels(unit: egui::MouseWheelUnit, lines: f32, row_height: f32, page_height: f32, step_rows: usize) -> f32 {
     match unit {
@@ -497,9 +557,12 @@ pub fn wheel_pixels(unit: egui::MouseWheelUnit, lines: f32, row_height: f32, pag
     }
 }
 
-
 fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_height: f32) -> Margin {
-    let numbers = if style.line_numbers { digits(line_count) as f32 * char_width + MARGIN_PADDING * 2.0 } else { 0.0 };
+    let numbers = if style.line_numbers {
+        digits(line_count) as f32 * char_width + MARGIN_PADDING * 2.0
+    } else {
+        0.0
+    };
     let column = match style.margin {
         MarginKind::Nothing => 0.0,
         MarginKind::Gutters => row_height,
@@ -508,7 +571,6 @@ fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_
     let alignment = style.alignment_color.map_or(0.0, |_| row_height.max(char_width * 2.0 + MARGIN_PADDING));
     Margin { numbers, alignment, column }
 }
-
 
 /// The region of the gutter block under a point, given in pixels from the view's left edge and from the top of its content.
 fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, content_y: f32, row_height: f32) -> Option<usize> {
@@ -522,12 +584,10 @@ fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, conte
     pane_row.region
 }
 
-
 /// Decimal digits of the largest line number, at least one.
 pub fn digits(line_count: usize) -> usize {
     line_count.max(1).to_string().len()
 }
-
 
 /// The line number, then the gutter block, labeled with its origin in D, drawn at the left edge of the view whatever the sideways scroll.
 fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f32, rect: Rect, margin: Margin, style: &ViewStyle<'_>, font_id: &FontId) {
@@ -536,7 +596,13 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
     if margin.numbers > 0.0
         && let Some(line) = pane_row.line
     {
-        painter.text(pos2(left + margin.numbers - MARGIN_PADDING, rect.center().y), Align2::RIGHT_CENTER, (line + 1).to_string(), font_id.clone(), palette.weak_text);
+        painter.text(
+            pos2(left + margin.numbers - MARGIN_PADDING, rect.center().y),
+            Align2::RIGHT_CENTER,
+            (line + 1).to_string(),
+            font_id.clone(),
+            palette.weak_text,
+        );
     }
     let column_left = left + margin.numbers + margin.alignment;
     if style.margin != MarginKind::Nothing
@@ -549,7 +615,13 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
         if style.margin == MarginKind::Marks
             && let Some(origin) = pane_row.origin
         {
-            painter.text(pos2(column_left + margin.column / 2.0, rect.center().y), Align2::CENTER_CENTER, mark_letter(origin), font_id.clone(), palette.text);
+            painter.text(
+                pos2(column_left + margin.column / 2.0, rect.center().y),
+                Align2::CENTER_CENTER,
+                mark_letter(origin),
+                font_id.clone(),
+                palette.text,
+            );
         }
     }
     if margin.numbers + margin.alignment + margin.column > 0.0 {
@@ -557,7 +629,6 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
         painter.vline(x, rect.y_range(), Stroke::new(1.0, palette.void_hatch));
     }
 }
-
 
 /// The fill and border colors of `block`: a block marked by the char-diff rules, in a source pane, takes the colors of its style; otherwise the border is its origin's, and the fill the row's `line_origin` in D, or the block's origin.
 fn gutter_colors<'a>(palette: &'a Palette, block: Block, line_origin: Option<Mark>) -> (&'a DocumentColors, &'a DocumentColors) {
@@ -567,7 +638,6 @@ fn gutter_colors<'a>(palette: &'a Palette, block: Block, line_origin: Option<Mar
     }
 }
 
-
 /// The colors of a source document; hand-edited lines of D, and blocks or lines with no known origin, take D's.
 fn origin_colors(palette: &Palette, origin: Option<Mark>) -> &DocumentColors {
     match origin {
@@ -576,9 +646,18 @@ fn origin_colors(palette: &Palette, origin: Option<Mark>) -> &DocumentColors {
     }
 }
 
-
 /// One row's slice of a gutter block: the sides on every row, the top on its first row and the bottom on its last, so the block reads as one bordered whole. The row is filled with `fill`'s colors, the border drawn with `border`'s. Blocks of the current region are filled stronger, with a thicker border.
-pub(crate) fn paint_gutter_block(painter: &Painter, column_left: f32, column_width: f32, rect: Rect, first: bool, last: bool, fill: &DocumentColors, border: &DocumentColors, active: bool) {
+pub(crate) fn paint_gutter_block(
+    painter: &Painter,
+    column_left: f32,
+    column_width: f32,
+    rect: Rect,
+    first: bool,
+    last: bool,
+    fill: &DocumentColors,
+    border: &DocumentColors,
+    active: bool,
+) {
     let left = column_left + GUTTER_INSET;
     let right = column_left + column_width - GUTTER_INSET;
     let top = if first { rect.top() + GUTTER_INSET } else { rect.top() };
@@ -596,7 +675,6 @@ pub(crate) fn paint_gutter_block(painter: &Painter, column_left: f32, column_wid
     }
 }
 
-
 pub fn mark_letter(mark: Mark) -> &'static str {
     match mark {
         Mark::Source(document) => document.letter(),
@@ -604,11 +682,9 @@ pub fn mark_letter(mark: Mark) -> &'static str {
     }
 }
 
-
 pub fn paint_caret(painter: &Painter, x: f32, rect: Rect, palette: &Palette) {
     painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(CARET_WIDTH, palette.caret));
 }
-
 
 /// The box of a region spanning `rows`, as wide as `x_range`, given that its row `row` starts at `row_top`. `None` when the region has no rows.
 fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_range: Rangef) -> Option<Rect> {
@@ -619,7 +695,6 @@ fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_r
     let bottom = row_top + (rows.end - row) as f32 * row_height;
     Some(Rect::from_x_y_ranges(x_range, Rangef::new(top, bottom)))
 }
-
 
 /// Diagonal stripes anchored to the screen, so the stripes of consecutive void rows join up.
 pub fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
@@ -633,11 +708,9 @@ pub fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
     }
 }
 
-
 fn layout(ui: &Ui, lines: Lines<'_>, row: usize, font_id: &FontId, palette: &Palette) -> std::sync::Arc<Galley> {
     ui.painter().layout_no_wrap(lines.line(row).to_string(), font_id.clone(), palette.pane_text)
 }
-
 
 /// The characters ending `line` that the whitespace settings mark: none, a line feed, a carriage return, or both.
 pub fn shown_terminator(lines: Lines<'_>, line: usize, config: &WhitespaceConfig) -> Vec<Whitespace> {
@@ -648,7 +721,6 @@ pub fn shown_terminator(lines: Lines<'_>, line: usize, config: &WhitespaceConfig
         .filter(|whitespace| whitespace.is_shown(config))
         .collect()
 }
-
 
 /// Marks the shown whitespace inside `text`, laid out as `galley` from `left`, and then `terminator` in cells of `char_width` after the text.
 pub fn paint_whitespace(painter: &Painter, text: &str, terminator: &[Whitespace], galley: &Galley, left: f32, rect: Rect, char_width: f32, style: &ViewStyle<'_>) {
@@ -673,7 +745,6 @@ pub fn paint_whitespace(painter: &Painter, text: &str, terminator: &[Whitespace]
     }
 }
 
-
 /// Drawn as shapes, not glyphs, so every font shows them: a dot for a space, arrows for tabs and line ends, a ring for other spaces.
 fn paint_whitespace_mark(painter: &Painter, whitespace: Whitespace, cell: Rect, color: Color32) {
     let stroke = Stroke::new(1.0, color);
@@ -695,7 +766,6 @@ fn paint_whitespace_mark(painter: &Painter, whitespace: Whitespace, cell: Rect, 
     }
 }
 
-
 /// Lays out `text` with the colors of its char-diff `segments`, given in columns.
 pub fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette) -> std::sync::Arc<Galley> {
     let mut job = LayoutJob::default();
@@ -705,14 +775,9 @@ pub fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)]
     ui.painter().layout_job(job)
 }
 
-
 /// `text` cut into byte ranges at the edges of `segments`, each with its color: `red` for a red segment, otherwise `plain`, as between segments. Columns past the text's end are ignored.
 fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain: Color32, red: Color32) -> Vec<(Range<usize>, Color32)> {
-    let offsets: Vec<usize> = text
-        .char_indices()
-        .map(|(offset, _)| offset)
-        .chain(std::iter::once(text.len()))
-        .collect();
+    let offsets: Vec<usize> = text.char_indices().map(|(offset, _)| offset).chain(std::iter::once(text.len())).collect();
     let byte = |column: usize| offsets.get(column).cloned().unwrap_or(text.len());
     let mut ranges = Vec::new();
     let mut at = 0;
@@ -733,7 +798,6 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
     ranges
 }
 
-
 /// The background of a char-diff segment: red at partial alpha, or the stronger fill of the document the characters differ from.
 fn char_background(style: &CharStyle, palette: &Palette) -> Color32 {
     match style {
@@ -741,7 +805,6 @@ fn char_background(style: &CharStyle, palette: &Palette) -> Color32 {
         CharStyle::Document(_) => palette.style_colors(style.clone()).gutter_active.clone(),
     }
 }
-
 
 /// Fills the background of each char-diff segment, over the full height of the row `rect`; the text starts at `text_left`.
 pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, palette: &Palette) {
@@ -754,21 +817,26 @@ pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, Char
         if right <= left {
             continue;
         }
-        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, char_background(char_style, palette));
+        painter.rect_filled(
+            Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())),
+            0.0,
+            char_background(char_style, palette),
+        );
     }
 }
-
 
 /// The row the caret is drawn on.
 pub fn caret_row(rows: Rows<'_>, caret: Caret) -> usize {
     caret.void_row.unwrap_or_else(|| rows.row_of_line(caret.cursor.head.line))
 }
 
-
 /// The text position at `x`, `y` pixels from the top left of the text, and the row if it is a void. Below the last row it is the end of the text; right of a line's text, the end of that line; on a void, the start of the next line.
 fn position_at(ui: &Ui, lines: Lines<'_>, rows: Rows<'_>, font_id: &FontId, palette: &Palette, row_height: f32, x: f32, y: f32) -> (Position, Option<usize>) {
     let last_line = lines.count().saturating_sub(1);
-    let end = Position { line: last_line, column: lines.line_chars(last_line) };
+    let end = Position {
+        line: last_line,
+        column: lines.line_chars(last_line),
+    };
     let Some(row) = row_at(y, row_height, rows.len()) else {
         return (end, None);
     };
@@ -781,7 +849,6 @@ fn position_at(ui: &Ui, lines: Lines<'_>, rows: Rows<'_>, font_id: &FontId, pale
         None => rows.caret_at_row(row, 0, end),
     }
 }
-
 
 /// Highlights the selected part of `line`, drawn in `rect`. A selection that continues past the line also covers a little space for the line break.
 pub fn paint_selection(painter: &Painter, lines: Lines<'_>, line: usize, rect: Rect, galley: &Galley, cursor: Cursor, row_height: f32, palette: &Palette) {
@@ -802,7 +869,6 @@ pub fn paint_selection(painter: &Painter, lines: Lines<'_>, line: usize, rect: R
     painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, palette.selection);
 }
 
-
 /// The row at `content_y` pixels from the top of the text, or `None` below the last row.
 pub fn row_at(content_y: f32, row_height: f32, line_count: usize) -> Option<usize> {
     if row_height <= 0.0 || content_y < 0.0 {
@@ -811,7 +877,6 @@ pub fn row_at(content_y: f32, row_height: f32, line_count: usize) -> Option<usiz
     let row = (content_y / row_height).floor() as usize;
     (row < line_count).then_some(row)
 }
-
 
 /// The scroll offset that brings `line` fully into a viewport scrolled to `current`, or `None` if it is already visible.
 pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current: f32) -> Option<f32> {
@@ -826,7 +891,6 @@ pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,10 +901,8 @@ mod tests {
     use crate::rows::{Block, RowMap};
     use crate::theme::{DARK, LIGHT};
 
-
     const PLAIN: Color32 = Color32::BLACK;
     const FROM_B: CharStyle = CharStyle::Document(kdiff4_protocol::Document::B);
-
 
     #[test]
     fn unmarked_text_is_one_plain_range() {
@@ -848,36 +910,45 @@ mod tests {
         assert_eq!(colored_byte_ranges("", &[], PLAIN, Color32::RED), [(0..0, PLAIN)]);
     }
 
-
     #[test]
     fn red_segments_color_their_bytes_and_document_segments_keep_the_plain_color() {
         let segments = [(1..2, CharStyle::Red), (2..4, FROM_B)];
-        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, Color32::RED), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, PLAIN), (4..5, PLAIN)]);
+        assert_eq!(
+            colored_byte_ranges("abcde", &segments, PLAIN, Color32::RED),
+            [(0..1, PLAIN), (1..2, Color32::RED), (2..4, PLAIN), (4..5, PLAIN)]
+        );
     }
-
 
     #[test]
     fn segment_columns_are_characters() {
-        assert_eq!(colored_byte_ranges("äöü", &[(1..2, CharStyle::Red)], PLAIN, Color32::RED), [(0..2, PLAIN), (2..4, Color32::RED), (4..6, PLAIN)]);
+        assert_eq!(
+            colored_byte_ranges("äöü", &[(1..2, CharStyle::Red)], PLAIN, Color32::RED),
+            [(0..2, PLAIN), (2..4, Color32::RED), (4..6, PLAIN)]
+        );
     }
-
 
     #[test]
     fn segments_past_the_end_are_cut_off() {
-        assert_eq!(colored_byte_ranges("ab", &[(1..9, CharStyle::Red), (9..12, FROM_B)], PLAIN, Color32::RED), [(0..1, PLAIN), (1..2, Color32::RED)]);
+        assert_eq!(
+            colored_byte_ranges("ab", &[(1..9, CharStyle::Red), (9..12, FROM_B)], PLAIN, Color32::RED),
+            [(0..1, PLAIN), (1..2, Color32::RED)]
+        );
     }
-
 
     #[test]
     fn red_backgrounds_are_translucent_and_document_backgrounds_are_the_stronger_document_fill() {
         for palette in [&LIGHT, &DARK] {
             assert_eq!(char_background(&CharStyle::Red, palette), palette.red().gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
         }
-        for (palette, document) in [(&LIGHT, kdiff4_protocol::Document::A), (&LIGHT, kdiff4_protocol::Document::B), (&LIGHT, kdiff4_protocol::Document::C), (&DARK, kdiff4_protocol::Document::B)] {
+        for (palette, document) in [
+            (&LIGHT, kdiff4_protocol::Document::A),
+            (&LIGHT, kdiff4_protocol::Document::B),
+            (&LIGHT, kdiff4_protocol::Document::C),
+            (&DARK, kdiff4_protocol::Document::B),
+        ] {
             assert_eq!(char_background(&CharStyle::Document(document), palette), palette.colors(document).gutter_active);
         }
     }
-
 
     #[test]
     fn click_height_maps_to_row() {
@@ -887,7 +958,6 @@ mod tests {
         assert_eq!(row_at(29.0, 10.0, 3), Some(2));
     }
 
-
     #[test]
     fn click_below_last_row_has_no_row() {
         assert_eq!(row_at(30.0, 10.0, 3), None);
@@ -895,13 +965,11 @@ mod tests {
         assert_eq!(row_at(0.0, 10.0, 0), None);
     }
 
-
     #[test]
     fn click_above_text_is_first_row() {
         assert_eq!(row_at(-3.0, 10.0, 3), Some(0));
         assert_eq!(row_at(-3.0, 10.0, 0), None);
     }
-
 
     #[test]
     fn visible_line_needs_no_scrolling() {
@@ -909,19 +977,16 @@ mod tests {
         assert_eq!(reveal_offset(9, 10.0, 100.0, 0.0), None);
     }
 
-
     #[test]
     fn line_above_view_scrolls_up_to_it() {
         assert_eq!(reveal_offset(2, 10.0, 100.0, 50.0), Some(20.0));
     }
-
 
     #[test]
     fn line_below_view_scrolls_down_until_it_fits() {
         assert_eq!(reveal_offset(10, 10.0, 100.0, 0.0), Some(10.0));
         assert_eq!(reveal_offset(0, 10.0, 5.0, 0.0), Some(5.0));
     }
-
 
     #[test]
     fn wheel_lines_scroll_by_the_step() {
@@ -932,20 +997,28 @@ mod tests {
         assert_eq!(wheel_pixels(egui::MouseWheelUnit::Page, -1.0, 10.0, 200.0, 3), -200.0);
     }
 
-
     #[test]
     fn viewport_knows_its_pages_and_scroll_range() {
-        let viewport = Viewport { offset: 0.0, height: 55.0, row_height: 10.0, content_height: 300.0 };
+        let viewport = Viewport {
+            offset: 0.0,
+            height: 55.0,
+            row_height: 10.0,
+            content_height: 300.0,
+        };
         assert_eq!(viewport.page_rows(), 5);
         assert_eq!(viewport.max_offset(), 245.0);
         assert_eq!(Viewport { content_height: 20.0, ..viewport }.max_offset(), 0.0);
         assert_eq!(Viewport { row_height: 0.0, ..viewport }.page_rows(), 1);
     }
 
-
     #[test]
     fn viewport_shows_rows_that_fit_entirely() {
-        let viewport = Viewport { offset: 100.0, height: 50.0, row_height: 10.0, content_height: 1000.0 };
+        let viewport = Viewport {
+            offset: 100.0,
+            height: 50.0,
+            row_height: 10.0,
+            content_height: 1000.0,
+        };
         assert!(viewport.shows(10..15));
         assert!(viewport.shows(12..13));
         assert!(!viewport.shows(9..12));
@@ -955,7 +1028,6 @@ mod tests {
         assert!(!viewport.shows(16..16));
         assert!(Viewport { offset: 100.2, ..viewport }.shows(10..15));
     }
-
 
     #[test]
     fn region_boxes_span_all_rows_of_the_region() {
@@ -967,11 +1039,20 @@ mod tests {
         assert_eq!(region_box(3..5, 7, 0.0, 10.0, x_range), None);
     }
 
-
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, whitespace: WhitespaceConfig::default(), alignment_color: None }
+        ViewStyle {
+            palette: &LIGHT,
+            line_numbers,
+            margin,
+            current_region: None,
+            current_region_color: Color32::TRANSPARENT,
+            scroll_step_rows: 3,
+            region_corner_radius: 0,
+            other_region_border_opacity: 1.0,
+            whitespace: WhitespaceConfig::default(),
+            alignment_color: None,
+        }
     }
-
 
     #[test]
     fn margin_fits_the_largest_line_number() {
@@ -980,34 +1061,76 @@ mod tests {
         assert_eq!(digits(10), 2);
         assert_eq!(digits(12345), 5);
         let numbers = margin_widths(&style(true, MarginKind::Nothing), 120, 7.0, 16.0);
-        assert_eq!(numbers, Margin { numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0, alignment: 0.0, column: 0.0 });
+        assert_eq!(
+            numbers,
+            Margin {
+                numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
+                alignment: 0.0,
+                column: 0.0
+            }
+        );
         assert_eq!(margin_widths(&style(false, MarginKind::Nothing), 1, 7.0, 16.0).total(), TEXT_GAP);
     }
 
-
     #[test]
     fn gutter_columns_are_one_row_wide() {
-        assert_eq!(margin_widths(&style(false, MarginKind::Gutters), 120, 7.0, 16.0), Margin { numbers: 0.0, alignment: 0.0, column: 16.0 });
+        assert_eq!(
+            margin_widths(&style(false, MarginKind::Gutters), 120, 7.0, 16.0),
+            Margin {
+                numbers: 0.0,
+                alignment: 0.0,
+                column: 16.0
+            }
+        );
         assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 7.0, 16.0).column, 16.0);
         assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 20.0, 16.0).column, 20.0 + MARGIN_PADDING * 2.0);
     }
 
-
     #[test]
     fn the_alignment_column_sits_between_the_numbers_and_the_gutter() {
-        let aligned = ViewStyle { alignment_color: Some(Color32::BLUE), ..style(true, MarginKind::Gutters) };
+        let aligned = ViewStyle {
+            alignment_color: Some(Color32::BLUE),
+            ..style(true, MarginKind::Gutters)
+        };
         let margin = margin_widths(&aligned, 120, 7.0, 16.0);
-        assert_eq!(margin, Margin { numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0, alignment: 18.0, column: 16.0 });
-        assert_eq!(margin_widths(&ViewStyle { alignment_color: Some(Color32::BLUE), ..style(false, MarginKind::Nothing) }, 1, 12.0, 16.0).alignment, 12.0 * 2.0 + MARGIN_PADDING);
+        assert_eq!(
+            margin,
+            Margin {
+                numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
+                alignment: 18.0,
+                column: 16.0
+            }
+        );
+        assert_eq!(
+            margin_widths(
+                &ViewStyle {
+                    alignment_color: Some(Color32::BLUE),
+                    ..style(false, MarginKind::Nothing)
+                },
+                1,
+                12.0,
+                16.0
+            )
+            .alignment,
+            12.0 * 2.0 + MARGIN_PADDING
+        );
         assert_eq!(margin.total(), margin.numbers + 18.0 + 16.0 + TEXT_GAP);
-        let block = Some(Block { index: 0, origin: None, style: None });
-        let map = RowMap::from_rows(vec![PaneRow { line: Some(0), region: Some(0), block, ..PaneRow::default() }]);
+        let block = Some(Block {
+            index: 0,
+            origin: None,
+            style: None,
+        });
+        let map = RowMap::from_rows(vec![PaneRow {
+            line: Some(0),
+            region: Some(0),
+            block,
+            ..PaneRow::default()
+        }]);
         let rows = Rows::Mapped(&map);
         let gutter_left = margin.numbers + margin.alignment;
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, gutter_left + 1.0, 5.0, 16.0), Some(0));
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, gutter_left - 1.0, 5.0, 16.0), None, "the alignment column");
     }
-
 
     /// A source pane in a test harness with one mark of B over lines 1 and 2, and what its frames did: the menu action it returned and where its first row and the columns are.
     struct MenuTest {
@@ -1021,61 +1144,92 @@ mod tests {
         margin: Margin,
     }
 
-
     fn menu_harness(alignment_color: Option<Color32>, caret: Option<Caret>) -> egui_kittest::Harness<'static, MenuTest> {
-        let marks = vec![AlignmentMark { document: Document::B, number: 1, lines: 1..3, status: kdiff4_protocol::MarkStatus::Pending }];
-        let test = MenuTest { marks, highest: 1, alignment_color, caret, menu: None, origin: Pos2::ZERO, row_height: 0.0, margin: Margin { numbers: 0.0, alignment: 0.0, column: 0.0 } };
-        let mut harness = egui_kittest::Harness::builder()
-            .with_size(vec2(400.0, 200.0))
-            .with_step_dt(0.01)
-            .build_ui_state(
-                |ui, test: &mut MenuTest| {
-                    let text = "a\nb\nc\nd\n";
-                    let ranges = editing::editor_lines(text);
-                    let lines = Lines { text, ranges: &ranges };
-                    let style = ViewStyle { alignment_color: test.alignment_color, ..style(true, MarginKind::Gutters) };
-                    test.origin = ui.max_rect().min;
-                    test.row_height = row_height(ui);
-                    let font_id = TextStyle::Monospace.resolve(ui.style());
-                    let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
-                    test.margin = margin_widths(&style, lines.count(), char_width, test.row_height);
-                    let marks = PaneMarks { marks: &test.marks, highest: test.highest };
-                    let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks);
-                    if response.menu.is_some() {
-                        test.menu = response.menu;
-                    }
-                },
-                test,
-            );
+        let marks = vec![AlignmentMark {
+            document: Document::B,
+            number: 1,
+            lines: 1..3,
+            status: kdiff4_protocol::MarkStatus::Pending,
+        }];
+        let test = MenuTest {
+            marks,
+            highest: 1,
+            alignment_color,
+            caret,
+            menu: None,
+            origin: Pos2::ZERO,
+            row_height: 0.0,
+            margin: Margin {
+                numbers: 0.0,
+                alignment: 0.0,
+                column: 0.0,
+            },
+        };
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(400.0, 200.0)).with_step_dt(0.01).build_ui_state(
+            |ui, test: &mut MenuTest| {
+                let text = "a\nb\nc\nd\n";
+                let ranges = editing::editor_lines(text);
+                let lines = Lines { text, ranges: &ranges };
+                let style = ViewStyle {
+                    alignment_color: test.alignment_color,
+                    ..style(true, MarginKind::Gutters)
+                };
+                test.origin = ui.max_rect().min;
+                test.row_height = row_height(ui);
+                let font_id = TextStyle::Monospace.resolve(ui.style());
+                let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
+                test.margin = margin_widths(&style, lines.count(), char_width, test.row_height);
+                let marks = PaneMarks {
+                    marks: &test.marks,
+                    highest: test.highest,
+                };
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks);
+                if response.menu.is_some() {
+                    test.menu = response.menu;
+                }
+            },
+            test,
+        );
         harness.run_steps(4);
         harness
     }
 
-
     fn right_click(harness: &mut egui_kittest::Harness<'_, MenuTest>, pos: Pos2) {
         harness.hover_at(pos);
-        harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
-        harness.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
         harness.run_steps(4);
     }
-
 
     /// A point on the text of the row `row`.
     fn on_text(test: &MenuTest, row: usize) -> Pos2 {
         pos2(test.origin.x + test.margin.total() + 20.0, test.origin.y + (row as f32 + 0.5) * test.row_height)
     }
 
-
     /// A point in the alignment column on the row `row`.
     fn on_alignment_column(test: &MenuTest, row: usize) -> Pos2 {
-        pos2(test.origin.x + test.margin.numbers + test.margin.alignment / 2.0, test.origin.y + (row as f32 + 0.5) * test.row_height)
+        pos2(
+            test.origin.x + test.margin.numbers + test.margin.alignment / 2.0,
+            test.origin.y + (row as f32 + 0.5) * test.row_height,
+        )
     }
-
 
     fn caret_on(line: usize) -> Option<Caret> {
-        Some(Caret { cursor: Cursor::at(Position { line, column: 0 }), void_row: None })
+        Some(Caret {
+            cursor: Cursor::at(Position { line, column: 0 }),
+            void_row: None,
+        })
     }
-
 
     #[test]
     fn the_text_menu_marks_the_selection_and_anchors_around_the_line() {
@@ -1099,17 +1253,18 @@ mod tests {
         assert_eq!(harness.state().menu, Some(MenuAction::MarkSelection));
     }
 
-
     #[test]
     fn anchors_below_the_text_go_to_the_end() {
         let mut harness = menu_harness(Some(Color32::BLUE), caret_on(0));
-        let pos = pos2(harness.state().origin.x + harness.state().margin.total() + 20.0, harness.state().origin.y + 4.5 * harness.state().row_height);
+        let pos = pos2(
+            harness.state().origin.x + harness.state().margin.total() + 20.0,
+            harness.state().origin.y + 4.5 * harness.state().row_height,
+        );
         right_click(&mut harness, pos);
         harness.get_by_label("Mark Alignment Anchor Before This Line").click();
         harness.run_steps(4);
         assert_eq!(harness.state().menu, Some(MenuAction::MarkAnchor(4)));
     }
-
 
     #[test]
     fn a_mark_of_the_alignment_column_can_be_removed_or_renumbered() {
@@ -1133,7 +1288,6 @@ mod tests {
         assert_eq!(harness.state().menu, Some(MenuAction::RenumberMark(1, 2)));
     }
 
-
     #[test]
     fn marking_the_selection_needs_the_caret_in_the_pane() {
         let mut harness = menu_harness(Some(Color32::BLUE), None);
@@ -1142,7 +1296,6 @@ mod tests {
         assert!(harness.get_by_label("Mark Selected Lines for Alignment").accesskit_node().is_disabled());
         assert!(!harness.get_by_label("Mark Alignment Anchor Before This Line").accesskit_node().is_disabled());
     }
-
 
     #[test]
     fn panes_without_an_alignment_column_have_no_alignment_menu() {
@@ -1154,13 +1307,37 @@ mod tests {
         assert_eq!(harness.state().menu, None);
     }
 
-
     #[test]
     fn clicks_on_gutter_blocks_select_their_region() {
-        let block = Some(Block { index: 0, origin: None, style: None });
-        let map = RowMap::from_rows(vec![PaneRow { line: Some(0), region: Some(0), ..PaneRow::default() }, PaneRow { line: Some(1), region: Some(1), block, ..PaneRow::default() }, PaneRow { region: Some(1), block, ..PaneRow::default() }]);
+        let block = Some(Block {
+            index: 0,
+            origin: None,
+            style: None,
+        });
+        let map = RowMap::from_rows(vec![
+            PaneRow {
+                line: Some(0),
+                region: Some(0),
+                ..PaneRow::default()
+            },
+            PaneRow {
+                line: Some(1),
+                region: Some(1),
+                block,
+                ..PaneRow::default()
+            },
+            PaneRow {
+                region: Some(1),
+                block,
+                ..PaneRow::default()
+            },
+        ]);
         let rows = Rows::Mapped(&map);
-        let margin = Margin { numbers: 20.0, alignment: 0.0, column: 16.0 };
+        let margin = Margin {
+            numbers: 20.0,
+            alignment: 0.0,
+            column: 16.0,
+        };
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 20.0, 16.0), Some(1));
         assert_eq!(gutter_region(rows, margin, MarginKind::Marks, 20.0, 40.0, 16.0), Some(1));
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 5.0, 16.0), None, "a row without a block");
@@ -1170,7 +1347,6 @@ mod tests {
         assert_eq!(gutter_region(rows, margin, MarginKind::Nothing, 25.0, 20.0, 16.0), None);
     }
 
-
     #[test]
     fn origins_take_their_document_colors() {
         let colors = |origin| origin_colors(&LIGHT, origin);
@@ -1179,11 +1355,14 @@ mod tests {
         assert_eq!(colors(None), &LIGHT.output);
     }
 
-
     #[test]
     fn marked_gutter_blocks_take_the_colors_of_their_style() {
         use kdiff4_protocol::Document;
-        let block = |origin: Document, style| Block { index: 0, origin: Some(Mark::Source(origin)), style };
+        let block = |origin: Document, style| Block {
+            index: 0,
+            origin: Some(Mark::Source(origin)),
+            style,
+        };
         let (fill, border) = gutter_colors(&LIGHT, block(Document::A, Some(FROM_B)), None);
         assert_eq!((fill, border), (&LIGHT.sources[1], &LIGHT.sources[1]));
         let (fill, border) = gutter_colors(&LIGHT, block(Document::B, Some(CharStyle::Red)), None);
@@ -1192,24 +1371,25 @@ mod tests {
         assert_eq!((fill, border), (&DARK.sources[2], &DARK.sources[2]));
     }
 
-
     #[test]
     fn output_gutter_blocks_keep_the_origin_colors_of_their_lines() {
         use kdiff4_protocol::Document;
-        let block = Block { index: 0, origin: None, style: None };
+        let block = Block {
+            index: 0,
+            origin: None,
+            style: None,
+        };
         let (fill, border) = gutter_colors(&LIGHT, block, Some(Mark::Source(Document::B)));
         assert_eq!((fill, border), (&LIGHT.sources[1], &LIGHT.output));
         let (fill, border) = gutter_colors(&LIGHT, block, None);
         assert_eq!((fill, border), (&LIGHT.output, &LIGHT.output));
     }
 
-
     #[test]
     fn marks_read_as_letters() {
         assert_eq!(mark_letter(Mark::Source(kdiff4_protocol::Document::B)), "B");
         assert_eq!(mark_letter(Mark::Modified), "M");
     }
-
 
     #[test]
     fn caret_row_prefers_the_void_row() {
@@ -1218,7 +1398,6 @@ mod tests {
         assert_eq!(caret_row(rows, Caret { cursor, void_row: None }), 3);
         assert_eq!(caret_row(rows, Caret { cursor, void_row: Some(1) }), 1);
     }
-
 
     #[test]
     fn whitespace_characters_are_classified() {
@@ -1231,7 +1410,6 @@ mod tests {
         assert_eq!(Whitespace::of('x'), None);
     }
 
-
     #[test]
     fn each_kind_follows_its_toggle_and_the_master_switch() {
         let all = WhitespaceConfig::default();
@@ -1243,7 +1421,6 @@ mod tests {
         assert!(!Whitespace::Tab.is_shown(&no_tabs));
         assert!(Whitespace::Space.is_shown(&no_tabs));
     }
-
 
     #[test]
     fn terminators_are_marked_per_line() {

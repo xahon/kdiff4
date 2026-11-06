@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-
 pub const CONFIG_VERSION: u32 = 1;
 pub const MIN_FONT_SIZE: f32 = 6.0;
 pub const MAX_FONT_SIZE: f32 = 48.0;
@@ -28,7 +27,6 @@ pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
 /// Cyan, a color none of the documents, the red or the jumped-to region uses.
 pub const DEFAULT_ALIGNMENT_COLOR: [u8; 4] = [0, 188, 212, 255];
 
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot read {}: {source}", path.display())]
@@ -43,7 +41,6 @@ pub enum ConfigError {
     Backup { path: PathBuf, source: io::Error },
 }
 
-
 /// Contents of `gui.toml`. Missing keys take their defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,13 +50,15 @@ pub struct GuiConfig {
     pub recent: RecentConfig,
 }
 
-
 impl Default for GuiConfig {
     fn default() -> Self {
-        GuiConfig { version: CONFIG_VERSION, view: ViewConfig::default(), recent: RecentConfig::default() }
+        GuiConfig {
+            version: CONFIG_VERSION,
+            view: ViewConfig::default(),
+            recent: RecentConfig::default(),
+        }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -103,18 +102,43 @@ pub struct ViewConfig {
     pub whitespace: WhitespaceConfig,
 }
 
-
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, alignment_color: DEFAULT_ALIGNMENT_COLOR, alignment_stops: true, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig {
+            font_family: None,
+            font_size: DEFAULT_FONT_SIZE,
+            font_hinting: true,
+            subpixel_positioning: true,
+            corner_radius: DEFAULT_CORNER_RADIUS,
+            show_line_numbers: true,
+            show_gutters: true,
+            align_output: false,
+            show_overview_strip: true,
+            jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES,
+            smooth_scrolling: true,
+            smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS,
+            scroll_step_lines: DEFAULT_SCROLL_STEP_LINES,
+            current_region_color: DEFAULT_CURRENT_REGION_COLOR,
+            region_corner_radius: DEFAULT_REGION_CORNER_RADIUS,
+            other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT,
+            alignment_color: DEFAULT_ALIGNMENT_COLOR,
+            alignment_stops: true,
+            theme: ThemeChoice::Light,
+            light_colors: ThemeColors::default(),
+            dark_colors: ThemeColors::default(),
+            whitespace: WhitespaceConfig::default(),
+        }
     }
 }
-
 
 impl ViewConfig {
     /// Brings out-of-range values from a hand-edited file back into range.
     pub fn sanitized(mut self) -> ViewConfig {
-        self.font_size = if self.font_size.is_finite() { self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) } else { DEFAULT_FONT_SIZE };
+        self.font_size = if self.font_size.is_finite() {
+            self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+        } else {
+            DEFAULT_FONT_SIZE
+        };
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.smooth_scroll_ms = self.smooth_scroll_ms.clamp(MIN_SMOOTH_SCROLL_MS, MAX_SMOOTH_SCROLL_MS);
@@ -127,18 +151,15 @@ impl ViewConfig {
         self
     }
 
-
     /// The color overrides of the light or the dark theme.
     pub fn colors(&self, dark: bool) -> &ThemeColors {
         if dark { &self.dark_colors } else { &self.light_colors }
     }
 
-
     pub fn colors_mut(&mut self, dark: bool) -> &mut ThemeColors {
         if dark { &mut self.dark_colors } else { &mut self.light_colors }
     }
 }
-
 
 /// The theme the GUI uses; `System` follows the operating system.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,7 +170,6 @@ pub enum ThemeChoice {
     Dark,
     System,
 }
-
 
 /// Colors the user picked for one theme, as sRGB; `None` keeps the theme's own color.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,7 +193,6 @@ pub struct ThemeColors {
     pub red: Option<[u8; 3]>,
 }
 
-
 /// Which whitespace the panes mark. Each kind shows only while `render` is on too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -189,13 +208,18 @@ pub struct WhitespaceConfig {
     pub other: bool,
 }
 
-
 impl Default for WhitespaceConfig {
     fn default() -> Self {
-        WhitespaceConfig { render: true, spaces: true, tabs: true, line_feeds: true, carriage_returns: true, other: true }
+        WhitespaceConfig {
+            render: true,
+            spaces: true,
+            tabs: true,
+            line_feeds: true,
+            carriage_returns: true,
+            other: true,
+        }
     }
 }
-
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -205,11 +229,9 @@ pub struct RecentConfig {
     pub last_dir: Option<PathBuf>,
 }
 
-
 pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("kdiff4").join("gui.toml"))
 }
-
 
 /// A missing file gives the defaults.
 pub fn load(path: &Path) -> Result<GuiConfig, ConfigError> {
@@ -223,7 +245,6 @@ pub fn load(path: &Path) -> Result<GuiConfig, ConfigError> {
     Ok(config)
 }
 
-
 /// Renames a file that failed to parse to `<name>.bak`, so saving settings doesn't destroy it.
 pub fn back_up_broken(path: &Path) -> Result<(), ConfigError> {
     if !path.exists() {
@@ -233,7 +254,6 @@ pub fn back_up_broken(path: &Path) -> Result<(), ConfigError> {
     backup_name.push(".bak");
     std::fs::rename(path, path.with_file_name(backup_name)).map_err(|source| ConfigError::Backup { path: path.to_path_buf(), source })
 }
-
 
 /// Command that opens `path` with the system's default handler for its file type.
 pub fn open_command(path: &Path) -> std::process::Command {
@@ -248,7 +268,6 @@ pub fn open_command(path: &Path) -> std::process::Command {
     command.arg(path);
     command
 }
-
 
 /// Writes atomically: a temp file next to `path`, then a rename over it.
 pub fn save(path: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
@@ -268,13 +287,11 @@ pub fn save(path: &Path, config: &GuiConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
-
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kdiff4-gui-config-{name}-{}", std::process::id()));
@@ -283,16 +300,20 @@ mod tests {
         dir
     }
 
-
     #[test]
     fn open_command_passes_path_as_single_argument() {
         let path = PathBuf::from("C:/some dir/gui.toml");
         let command = open_command(&path);
-        let expected = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let expected = if cfg!(windows) {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         assert_eq!(command.get_program(), expected);
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec![path.as_os_str()]);
     }
-
 
     #[test]
     fn missing_file_gives_defaults() {
@@ -300,19 +321,61 @@ mod tests {
         assert_eq!(load(&dir.join("gui.toml")).unwrap(), GuiConfig::default());
     }
 
-
     #[test]
     fn save_then_load_round_trips() {
         let dir = temp_dir("round-trip");
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, alignment_color: [9, 8, 7, 6], alignment_stops: false, theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None, document_a: Some([4, 5, 6]), document_b: None, document_c: Some([7, 8, 9]), red: Some([10, 11, 12]) }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]), document_a: None, document_b: Some([13, 14, 15]), document_c: None, red: None }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig {
+            font_family: Some("Consolas".to_string()),
+            font_size: 15.5,
+            font_hinting: false,
+            subpixel_positioning: false,
+            corner_radius: 0,
+            show_line_numbers: false,
+            show_gutters: false,
+            align_output: true,
+            show_overview_strip: false,
+            jump_context_lines: 7,
+            smooth_scrolling: false,
+            smooth_scroll_ms: 400,
+            scroll_step_lines: 5,
+            current_region_color: [1, 2, 3, 4],
+            region_corner_radius: 4,
+            other_region_border_percent: 30,
+            alignment_color: [9, 8, 7, 6],
+            alignment_stops: false,
+            theme: ThemeChoice::System,
+            light_colors: ThemeColors {
+                ui_text: Some([1, 2, 3]),
+                pane_text: None,
+                document_a: Some([4, 5, 6]),
+                document_b: None,
+                document_c: Some([7, 8, 9]),
+                red: Some([10, 11, 12]),
+            },
+            dark_colors: ThemeColors {
+                ui_text: None,
+                pane_text: Some([250, 251, 252]),
+                document_a: None,
+                document_b: Some([13, 14, 15]),
+                document_c: None,
+                red: None,
+            },
+            whitespace: WhitespaceConfig {
+                render: true,
+                spaces: false,
+                tabs: true,
+                line_feeds: false,
+                carriage_returns: true,
+                other: false,
+            },
+        };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
     }
-
 
     #[test]
     fn save_replaces_existing_file() {
@@ -325,21 +388,27 @@ mod tests {
         assert_eq!(load(&path).unwrap().recent.last_dir, Some(PathBuf::from("new")));
     }
 
-
     #[test]
     fn overview_strip_is_shown_unless_turned_off() {
         let dir = temp_dir("overview-strip");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]
+        fs::write(
+            &path,
+            "[view]
 font_size = 14.0
-").unwrap();
+",
+        )
+        .unwrap();
         assert!(load(&path).unwrap().view.show_overview_strip);
-        fs::write(&path, "[view]
+        fs::write(
+            &path,
+            "[view]
 show_overview_strip = false
-").unwrap();
+",
+        )
+        .unwrap();
         assert!(!load(&path).unwrap().view.show_overview_strip);
     }
-
 
     #[test]
     fn missing_keys_take_defaults_and_unknown_keys_are_ignored() {
@@ -348,7 +417,6 @@ show_overview_strip = false
         fs::write(&path, "future_key = 3\n[recent]\n").unwrap();
         assert_eq!(load(&path).unwrap(), GuiConfig::default());
     }
-
 
     #[test]
     fn alignment_keys_default_to_cyan_with_stops_and_load_from_toml() {
@@ -361,7 +429,6 @@ show_overview_strip = false
         let view = load(&path).unwrap().view;
         assert_eq!((view.alignment_color, view.alignment_stops), ([1, 2, 3, 4], false));
     }
-
 
     #[test]
     fn view_values_out_of_range_are_sanitized() {
@@ -377,32 +444,53 @@ show_overview_strip = false
         assert_eq!((view.smooth_scroll_ms, view.scroll_step_lines), (MAX_SMOOTH_SCROLL_MS, MIN_SCROLL_STEP_LINES));
 
         assert_eq!(view.font_size, MAX_FONT_SIZE);
-        let tiny = ViewConfig { font_size: 1.0, ..ViewConfig::default() }.sanitized();
+        let tiny = ViewConfig {
+            font_size: 1.0,
+            ..ViewConfig::default()
+        }
+        .sanitized();
         assert_eq!(tiny.font_size, MIN_FONT_SIZE);
-        let nan = ViewConfig { font_size: f32::NAN, ..ViewConfig::default() }.sanitized();
+        let nan = ViewConfig {
+            font_size: f32::NAN,
+            ..ViewConfig::default()
+        }
+        .sanitized();
         assert_eq!(nan.font_size, DEFAULT_FONT_SIZE);
     }
-
 
     #[test]
     fn appearance_and_whitespace_keys_load_from_toml() {
         let dir = temp_dir("appearance");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\ntheme = \"dark\"\n[view.dark_colors]\npane_text = [10, 20, 30]\n[view.whitespace]\ntabs = false\n").unwrap();
+        fs::write(
+            &path,
+            "[view]\ntheme = \"dark\"\n[view.dark_colors]\npane_text = [10, 20, 30]\n[view.whitespace]\ntabs = false\n",
+        )
+        .unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.theme, ThemeChoice::Dark);
-        assert_eq!(view.dark_colors, ThemeColors { pane_text: Some([10, 20, 30]), ..ThemeColors::default() });
+        assert_eq!(
+            view.dark_colors,
+            ThemeColors {
+                pane_text: Some([10, 20, 30]),
+                ..ThemeColors::default()
+            }
+        );
         assert_eq!(view.light_colors, ThemeColors::default());
-        assert_eq!(view.whitespace, WhitespaceConfig { tabs: false, ..WhitespaceConfig::default() });
+        assert_eq!(
+            view.whitespace,
+            WhitespaceConfig {
+                tabs: false,
+                ..WhitespaceConfig::default()
+            }
+        );
     }
-
 
     #[test]
     fn whitespace_is_rendered_by_default() {
         let whitespace = ViewConfig::default().whitespace;
         assert!(whitespace.render && whitespace.spaces && whitespace.tabs && whitespace.line_feeds && whitespace.carriage_returns && whitespace.other);
     }
-
 
     #[test]
     fn colors_pick_the_theme() {
@@ -412,17 +500,32 @@ show_overview_strip = false
         assert_eq!(view.colors(false).ui_text, None);
     }
 
-
     #[test]
     fn document_and_red_colors_are_read_per_theme_and_the_old_char_diff_red_is_ignored() {
         let dir = temp_dir("document-colors");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nchar_diff_red = [1, 2, 3]\n[view.light_colors]\ndocument_a = [10, 20, 30]\nred = [200, 0, 0]\n[view.dark_colors]\ndocument_c = [40, 50, 60]\n").unwrap();
+        fs::write(
+            &path,
+            "[view]\nchar_diff_red = [1, 2, 3]\n[view.light_colors]\ndocument_a = [10, 20, 30]\nred = [200, 0, 0]\n[view.dark_colors]\ndocument_c = [40, 50, 60]\n",
+        )
+        .unwrap();
         let view = load(&path).unwrap().view;
-        assert_eq!(view.light_colors, ThemeColors { document_a: Some([10, 20, 30]), red: Some([200, 0, 0]), ..ThemeColors::default() });
-        assert_eq!(view.dark_colors, ThemeColors { document_c: Some([40, 50, 60]), ..ThemeColors::default() });
+        assert_eq!(
+            view.light_colors,
+            ThemeColors {
+                document_a: Some([10, 20, 30]),
+                red: Some([200, 0, 0]),
+                ..ThemeColors::default()
+            }
+        );
+        assert_eq!(
+            view.dark_colors,
+            ThemeColors {
+                document_c: Some([40, 50, 60]),
+                ..ThemeColors::default()
+            }
+        );
     }
-
 
     #[test]
     fn back_up_broken_renames_file() {
@@ -434,7 +537,6 @@ show_overview_strip = false
         assert!(!path.exists());
         assert_eq!(fs::read_to_string(dir.join("gui.toml.bak")).unwrap(), "[recent\n");
     }
-
 
     #[test]
     fn broken_file_is_a_parse_error() {

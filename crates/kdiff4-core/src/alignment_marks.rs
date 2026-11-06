@@ -5,7 +5,6 @@ use kdiff4_protocol::{AlignmentMark, Alignments, Document, MarkStatus};
 
 use crate::error::CoreError;
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Mark {
     /// Index into the session's source documents.
@@ -15,7 +14,6 @@ struct Mark {
     lines: Range<usize>,
 }
 
-
 /// The marks the user made, and the alignments the comparison was last computed with. A number marked in every source document is an alignment; the others wait. Marking never touches the comparison: only applying does.
 #[derive(Debug, Clone, Default)]
 pub struct AlignmentMarks {
@@ -24,14 +22,18 @@ pub struct AlignmentMarks {
     applied: Vec<ManualAlignment>,
 }
 
-
 impl AlignmentMarks {
     /// Marks `lines` of `document` under the lowest number that document has not used, and returns it. `line_counts` has one entry per source document.
     pub fn mark(&mut self, document: Document, lines: Range<usize>, line_counts: &[usize]) -> Result<u32, CoreError> {
         let index = document_index(&document, line_counts.len())?;
         let count = line_counts[index];
         if lines.start > lines.end || lines.end > count {
-            return Err(invalid(format!("lines {}..{} do not fit the {count} lines of {}", lines.start, lines.end, document.letter())));
+            return Err(invalid(format!(
+                "lines {}..{} do not fit the {count} lines of {}",
+                lines.start,
+                lines.end,
+                document.letter()
+            )));
         }
         if let Some(other) = self.of(index).find(|mark| collide(&mark.lines, &lines)) {
             return Err(invalid(format!("alignment {} of {} is in the way of {}", other.number, document.letter(), subject(&lines))));
@@ -44,13 +46,11 @@ impl AlignmentMarks {
         Ok(number)
     }
 
-
     pub fn remove(&mut self, document: Document, number: u32) -> Result<(), CoreError> {
         let index = self.index_of(&document, number)?;
         self.marks.remove(index);
         Ok(())
     }
-
 
     /// Gives the mark `number` of `document` the number `to`; a mark that has `to` already takes `number`.
     pub fn renumber(&mut self, document: Document, number: u32, to: u32) -> Result<(), CoreError> {
@@ -73,12 +73,10 @@ impl AlignmentMarks {
         Ok(())
     }
 
-
     /// Removes every mark. The applied alignments stay, since the comparison still has them.
     pub fn clear(&mut self) {
         self.marks.clear();
     }
-
 
     /// Removes the marks and the applied alignments, for a session whose source lines changed.
     pub fn reset(&mut self) {
@@ -86,24 +84,18 @@ impl AlignmentMarks {
         self.applied.clear();
     }
 
-
     pub fn applied(&self) -> &[ManualAlignment] {
         &self.applied
     }
-
 
     pub fn set_applied(&mut self, alignments: Vec<ManualAlignment>) {
         self.applied = alignments;
     }
 
-
     /// The alignments the marks give: every number marked in all source documents, in the order of their positions. Checked like the engine checks them, but errors name the user's numbers instead of list positions.
     pub fn to_apply(&self, line_counts: &[usize]) -> Result<Vec<ManualAlignment>, EngineError> {
         let numbered = self.complete(line_counts.len());
-        let alignments: Vec<ManualAlignment> = numbered
-            .iter()
-            .map(|(_, alignment)| alignment.clone())
-            .collect();
+        let alignments: Vec<ManualAlignment> = numbered.iter().map(|(_, alignment)| alignment.clone()).collect();
         let error = match validate_alignments(&alignments, line_counts) {
             Ok(()) => return Ok(alignments),
             Err(error) => error,
@@ -116,17 +108,21 @@ impl AlignmentMarks {
         for pair in numbered.windows(2) {
             let (previous, next) = (&pair[0], &pair[1]);
             if let Err(EngineError::InvalidAlignment(message)) = validate_alignments(&[previous.1.clone(), next.1.clone()], line_counts) {
-                return Err(EngineError::InvalidAlignment(message.replacen("alignments 1 and 2", &format!("alignments {} and {}", previous.0, next.0), 1)));
+                return Err(EngineError::InvalidAlignment(message.replacen(
+                    "alignments 1 and 2",
+                    &format!("alignments {} and {}", previous.0, next.0),
+                    1,
+                )));
             }
         }
         Err(error)
     }
 
-
     /// Every mark with its status, and whether applying would change the comparison.
     pub fn summary(&self, source_count: usize) -> Alignments {
         let complete = self.complete(source_count);
-        let marks = self.marks
+        let marks = self
+            .marks
             .iter()
             .filter_map(|mark| {
                 let document = Document::ALL.get(mark.document)?.clone();
@@ -135,28 +131,28 @@ impl AlignmentMarks {
                     Some((_, alignment)) if self.applied.contains(alignment) => MarkStatus::Applied,
                     Some(_) => MarkStatus::Pending,
                 };
-                Some(AlignmentMark { document, number: mark.number, lines: mark.lines.clone(), status })
+                Some(AlignmentMark {
+                    document,
+                    number: mark.number,
+                    lines: mark.lines.clone(),
+                    status,
+                })
             })
             .collect();
-        let wanted: Vec<ManualAlignment> = complete
-            .into_iter()
-            .map(|(_, alignment)| alignment)
-            .collect();
-        Alignments { marks, changed: wanted != self.applied }
+        let wanted: Vec<ManualAlignment> = complete.into_iter().map(|(_, alignment)| alignment).collect();
+        Alignments {
+            marks,
+            changed: wanted != self.applied,
+        }
     }
-
 
     fn of(&self, document: usize) -> impl Iterator<Item = &Mark> {
-        self.marks
-            .iter()
-            .filter(move |mark| mark.document == document)
+        self.marks.iter().filter(move |mark| mark.document == document)
     }
-
 
     fn get(&self, document: usize, number: u32) -> Option<&Mark> {
         self.of(document).find(|mark| mark.number == number)
     }
-
 
     fn index_of(&self, document: &Document, number: u32) -> Result<usize, CoreError> {
         let index = document_index(document, usize::MAX)?;
@@ -166,18 +162,13 @@ impl AlignmentMarks {
             .ok_or_else(|| invalid(format!("{} has no alignment {number}", document.letter())))
     }
 
-
     fn sort(&mut self) {
         self.marks.sort_by_key(|mark| (mark.document, mark.number));
     }
 
-
     /// The numbers marked in every one of `source_count` documents, with their alignments, in the order of their positions: compared document by document, each by where its part starts and ends. Alignments at the same positions everywhere keep the order of their numbers.
     fn complete(&self, source_count: usize) -> Vec<(u32, ManualAlignment)> {
-        let mut numbers: Vec<u32> = self.marks
-            .iter()
-            .map(|mark| mark.number.clone())
-            .collect();
+        let mut numbers: Vec<u32> = self.marks.iter().map(|mark| mark.number.clone()).collect();
         numbers.sort_unstable();
         numbers.dedup();
         let mut complete: Vec<(u32, ManualAlignment)> = numbers
@@ -189,17 +180,10 @@ impl AlignmentMarks {
                 Some((number, ManualAlignment { parts }))
             })
             .collect();
-        complete.sort_by_key(|(_, alignment)| {
-            alignment
-                .parts
-                .iter()
-                .map(|part| (part.start.clone(), part.end.clone()))
-                .collect::<Vec<_>>()
-        });
+        complete.sort_by_key(|(_, alignment)| alignment.parts.iter().map(|part| (part.start.clone(), part.end.clone())).collect::<Vec<_>>());
         complete
     }
 }
-
 
 /// The index of a source document among `source_count`; D has none.
 fn document_index(document: &Document, source_count: usize) -> Result<usize, CoreError> {
@@ -208,7 +192,6 @@ fn document_index(document: &Document, source_count: usize) -> Result<usize, Cor
         _ => Err(CoreError::NoSuchDocument { document: document.clone() }),
     }
 }
-
 
 /// Whether `new` can not be marked next to `existing`: marked ranges must not overlap and an anchor must not sit inside a range. Anchors may share a position, and ranges and anchors may touch.
 fn collide(existing: &Range<usize>, new: &Range<usize>) -> bool {
@@ -220,23 +203,23 @@ fn collide(existing: &Range<usize>, new: &Range<usize>) -> bool {
     }
 }
 
-
 fn subject(lines: &Range<usize>) -> String {
-    if lines.is_empty() { format!("an anchor before line {}", lines.start + 1) } else { format!("lines {} to {}", lines.start + 1, lines.end) }
+    if lines.is_empty() {
+        format!("an anchor before line {}", lines.start + 1)
+    } else {
+        format!("lines {} to {}", lines.start + 1, lines.end)
+    }
 }
-
 
 fn invalid(reason: String) -> CoreError {
     CoreError::InvalidMark { reason }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const COUNTS: [usize; 3] = [10, 10, 10];
-
 
     fn marks(entries: &[(Document, Range<usize>)]) -> AlignmentMarks {
         let mut marks = AlignmentMarks::default();
@@ -246,15 +229,9 @@ mod tests {
         marks
     }
 
-
     fn numbers(marks: &AlignmentMarks, document: Document) -> Vec<(u32, Range<usize>)> {
-        marks
-            .summary(3)
-            .of(document)
-            .map(|mark| (mark.number, mark.lines.clone()))
-            .collect()
+        marks.summary(3).of(document).map(|mark| (mark.number, mark.lines.clone())).collect()
     }
-
 
     fn reason(result: Result<impl std::fmt::Debug, CoreError>) -> String {
         match result {
@@ -262,7 +239,6 @@ mod tests {
             other => panic!("expected an invalid mark, got {other:?}"),
         }
     }
-
 
     #[test]
     fn numbers_are_the_lowest_free_one_of_each_document() {
@@ -274,7 +250,6 @@ mod tests {
         assert_eq!(numbers(&marks, Document::A), [(1, 4..5), (2, 2..3)]);
     }
 
-
     #[test]
     fn marks_must_fit_the_document() {
         let mut marks = AlignmentMarks::default();
@@ -284,14 +259,12 @@ mod tests {
         assert_eq!(reason(marks.mark(Document::B, 11..11, &COUNTS)), "lines 11..11 do not fit the 10 lines of B");
     }
 
-
     #[test]
     fn only_source_documents_of_the_session_take_marks() {
         let mut marks = AlignmentMarks::default();
         assert!(matches!(marks.mark(Document::D, 0..1, &COUNTS), Err(CoreError::NoSuchDocument { .. })));
         assert!(matches!(marks.mark(Document::C, 0..1, &[10, 10]), Err(CoreError::NoSuchDocument { .. })));
     }
-
 
     #[test]
     fn ranges_must_not_overlap_and_anchors_must_not_sit_inside_one() {
@@ -302,7 +275,6 @@ mod tests {
         assert_eq!(reason(marks.mark(Document::A, 0..8, &COUNTS)), "alignment 1 of A is in the way of lines 1 to 8");
         assert_eq!(numbers(&marks, Document::A).len(), 1);
     }
-
 
     #[test]
     fn ranges_and_anchors_may_touch_and_anchors_may_share_a_position() {
@@ -315,7 +287,6 @@ mod tests {
         assert_eq!(numbers(&marks, Document::A).len(), 6);
     }
 
-
     #[test]
     fn removing_an_unknown_mark_fails() {
         let mut marks = marks(&[(Document::A, 0..1)]);
@@ -324,7 +295,6 @@ mod tests {
         assert!(marks.remove(Document::A, 1).is_ok());
         assert!(numbers(&marks, Document::A).is_empty());
     }
-
 
     #[test]
     fn renumbering_moves_a_mark_or_swaps_it_with_the_one_that_has_the_number() {
@@ -337,14 +307,12 @@ mod tests {
         assert_eq!(numbers(&marks, Document::B), [(1, 6..7)]);
     }
 
-
     #[test]
     fn renumbering_rejects_zero_and_unknown_marks() {
         let mut marks = marks(&[(Document::A, 0..1)]);
         assert_eq!(reason(marks.renumber(Document::A, 1, 0)), "alignment numbers start at 1");
         assert_eq!(reason(marks.renumber(Document::A, 4, 2)), "A has no alignment 4");
     }
-
 
     #[test]
     fn only_numbers_marked_everywhere_give_alignments() {
@@ -353,7 +321,6 @@ mod tests {
         assert_eq!(alignments, [ManualAlignment { parts: vec![0..1, 2..3, 1..2] }]);
     }
 
-
     #[test]
     fn two_way_sessions_need_two_documents() {
         let marks = marks(&[(Document::A, 0..1), (Document::B, 2..3)]);
@@ -361,75 +328,105 @@ mod tests {
         assert_eq!(marks.to_apply(&COUNTS).unwrap(), []);
     }
 
-
     #[test]
     fn alignments_follow_the_positions_not_the_numbers() {
-        let mut marks = marks(&[(Document::A, 5..6), (Document::A, 1..2), (Document::B, 6..7), (Document::B, 2..3), (Document::C, 4..5), (Document::C, 0..1)]);
+        let mut marks = marks(&[
+            (Document::A, 5..6),
+            (Document::A, 1..2),
+            (Document::B, 6..7),
+            (Document::B, 2..3),
+            (Document::C, 4..5),
+            (Document::C, 0..1),
+        ]);
         let alignments = marks.to_apply(&COUNTS).unwrap();
-        assert_eq!(alignments, [ManualAlignment { parts: vec![1..2, 2..3, 0..1] }, ManualAlignment { parts: vec![5..6, 6..7, 4..5] }]);
+        assert_eq!(
+            alignments,
+            [ManualAlignment { parts: vec![1..2, 2..3, 0..1] }, ManualAlignment { parts: vec![5..6, 6..7, 4..5] }]
+        );
         marks.set_applied(alignments);
         assert!(!marks.summary(3).changed);
     }
 
-
     #[test]
     fn anchors_at_one_position_are_ordered_by_the_other_documents() {
-        let marks = marks(&[(Document::A, 1..1), (Document::A, 1..1), (Document::B, 2..3), (Document::B, 1..2), (Document::C, 2..3), (Document::C, 1..2)]);
+        let marks = marks(&[
+            (Document::A, 1..1),
+            (Document::A, 1..1),
+            (Document::B, 2..3),
+            (Document::B, 1..2),
+            (Document::C, 2..3),
+            (Document::C, 1..2),
+        ]);
         let alignments = marks.to_apply(&COUNTS).unwrap();
-        assert_eq!(alignments, [ManualAlignment { parts: vec![1..1, 1..2, 1..2] }, ManualAlignment { parts: vec![1..1, 2..3, 2..3] }]);
+        assert_eq!(
+            alignments,
+            [ManualAlignment { parts: vec![1..1, 1..2, 1..2] }, ManualAlignment { parts: vec![1..1, 2..3, 2..3] }]
+        );
     }
-
 
     #[test]
     fn anchors_at_one_position_keep_it() {
-        let marks = marks(&[(Document::A, 1..1), (Document::A, 1..1), (Document::B, 1..2), (Document::B, 2..2), (Document::C, 1..1), (Document::C, 1..2)]);
+        let marks = marks(&[
+            (Document::A, 1..1),
+            (Document::A, 1..1),
+            (Document::B, 1..2),
+            (Document::B, 2..2),
+            (Document::C, 1..1),
+            (Document::C, 1..2),
+        ]);
         let alignments = marks.to_apply(&COUNTS).unwrap();
-        assert_eq!(alignments, [ManualAlignment { parts: vec![1..1, 1..2, 1..1] }, ManualAlignment { parts: vec![1..1, 2..2, 1..2] }]);
+        assert_eq!(
+            alignments,
+            [ManualAlignment { parts: vec![1..1, 1..2, 1..1] }, ManualAlignment { parts: vec![1..1, 2..2, 1..2] }]
+        );
     }
-
 
     #[test]
     fn crossing_names_the_users_numbers() {
-        let mut marks = marks(&[(Document::A, 0..1), (Document::A, 9..10), (Document::A, 4..5), (Document::B, 4..5), (Document::B, 9..10), (Document::B, 0..1), (Document::C, 0..1), (Document::C, 1..2), (Document::C, 2..3)]);
+        let mut marks = marks(&[
+            (Document::A, 0..1),
+            (Document::A, 9..10),
+            (Document::A, 4..5),
+            (Document::B, 4..5),
+            (Document::B, 9..10),
+            (Document::B, 0..1),
+            (Document::C, 0..1),
+            (Document::C, 1..2),
+            (Document::C, 2..3),
+        ]);
         marks.remove(Document::A, 2).unwrap();
         marks.remove(Document::B, 2).unwrap();
         marks.remove(Document::C, 2).unwrap();
         marks.renumber(Document::A, 3, 5).unwrap();
         marks.renumber(Document::B, 3, 5).unwrap();
         marks.renumber(Document::C, 3, 5).unwrap();
-        let Err(EngineError::InvalidAlignment(message)) = marks.to_apply(&COUNTS) else { panic!("expected an invalid alignment") };
+        let Err(EngineError::InvalidAlignment(message)) = marks.to_apply(&COUNTS) else {
+            panic!("expected an invalid alignment")
+        };
         assert_eq!(message, "alignments 1 and 5 cross in B");
     }
-
 
     #[test]
     fn an_alignment_of_anchors_only_names_its_number() {
         let mut marks = marks(&[(Document::A, 0..1), (Document::B, 0..1), (Document::A, 3..3), (Document::B, 3..3)]);
         marks.mark(Document::C, 0..1, &COUNTS).unwrap();
         marks.mark(Document::C, 3..3, &COUNTS).unwrap();
-        let Err(EngineError::InvalidAlignment(message)) = marks.to_apply(&COUNTS) else { panic!("expected an invalid alignment") };
+        let Err(EngineError::InvalidAlignment(message)) = marks.to_apply(&COUNTS) else {
+            panic!("expected an invalid alignment")
+        };
         assert_eq!(message, "alignment 2 has only anchors");
     }
-
 
     #[test]
     fn statuses_follow_the_applied_alignments() {
         let mut marks = marks(&[(Document::A, 0..1), (Document::B, 2..3), (Document::C, 1..2), (Document::A, 5..6)]);
-        let statuses = |marks: &AlignmentMarks| -> Vec<MarkStatus> {
-            marks
-                .summary(3)
-                .marks
-                .iter()
-                .map(|mark| mark.status)
-                .collect()
-        };
+        let statuses = |marks: &AlignmentMarks| -> Vec<MarkStatus> { marks.summary(3).marks.iter().map(|mark| mark.status).collect() };
         assert_eq!(statuses(&marks), [MarkStatus::Pending, MarkStatus::Unmatched, MarkStatus::Pending, MarkStatus::Pending]);
         assert!(marks.summary(3).changed);
         marks.set_applied(marks.to_apply(&COUNTS).unwrap());
         assert_eq!(statuses(&marks), [MarkStatus::Applied, MarkStatus::Unmatched, MarkStatus::Applied, MarkStatus::Applied]);
         assert!(!marks.summary(3).changed);
     }
-
 
     #[test]
     fn changing_a_mark_after_applying_makes_it_pending() {
@@ -445,7 +442,6 @@ mod tests {
         assert!(summary.marks.iter().all(|mark| mark.status == MarkStatus::Pending));
     }
 
-
     #[test]
     fn clearing_the_marks_leaves_the_applied_alignments_and_counts_as_a_change() {
         let mut marks = marks(&[(Document::A, 0..1), (Document::B, 2..3), (Document::C, 1..2)]);
@@ -458,13 +454,11 @@ mod tests {
         assert!(!marks.summary(3).changed);
     }
 
-
     #[test]
     fn marks_that_give_no_alignment_change_nothing() {
         let marks = marks(&[(Document::A, 0..1), (Document::B, 2..3)]);
         assert!(!marks.summary(3).changed);
     }
-
 
     #[test]
     fn reset_forgets_marks_and_applied_alignments() {

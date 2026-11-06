@@ -2,8 +2,13 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, ManualAlignment, MergeStatus, Progress, Region, RegionStatus, SourceLines, run_comparison};
-use kdiff4_protocol::{Alignments, Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
+use kdiff4_protocol::engine::{
+    CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, ManualAlignment, MergeStatus, Progress, Region, RegionStatus, SourceLines,
+    run_comparison,
+};
+use kdiff4_protocol::{
+    Alignments, Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot,
+};
 
 use crate::alignment_marks::AlignmentMarks;
 use crate::error::CoreError;
@@ -11,7 +16,6 @@ use crate::merge::{self, Merge, MergeStep, RegionState};
 use crate::normalizer;
 use crate::text::{self, SourceText};
 use crate::undo::{History, Step};
-
 
 #[derive(Debug)]
 struct Source {
@@ -21,22 +25,22 @@ struct Source {
     text: SourceText,
 }
 
-
 impl Source {
     fn to_document_text(&self) -> DocumentText {
-        DocumentText { document: self.document.clone(), path: self.path.clone(), label: self.label.clone(), eol: self.text.eol.clone(), text: self.text.text.clone(), lines: self.text.lines.clone() }
+        DocumentText {
+            document: self.document.clone(),
+            path: self.path.clone(),
+            label: self.label.clone(),
+            eol: self.text.eol.clone(),
+            text: self.text.text.clone(),
+            lines: self.text.lines.clone(),
+        }
     }
-
 
     fn lines(&self) -> Vec<&str> {
-        self.text
-            .lines
-            .iter()
-            .map(|range| self.text.text.get(range.clone()).unwrap_or(""))
-            .collect()
+        self.text.lines.iter().map(|range| self.text.text.get(range.clone()).unwrap_or("")).collect()
     }
 }
-
 
 /// D. Its text uses `\n` line ends and is always the concatenation of the regions' texts.
 #[derive(Debug)]
@@ -45,7 +49,6 @@ struct Output {
     text: String,
     history: History<MergeStep>,
 }
-
 
 /// One open comparison: the source documents, their regions and rows, and, for a merge, the merge state and D.
 #[derive(Debug)]
@@ -64,7 +67,6 @@ pub struct Session {
     alignments: AlignmentMarks,
 }
 
-
 impl Session {
     /// For a merge, every region is auto-resolved and D is built from the result.
     pub fn open(files: &OpenFiles, engine: &dyn ComparisonEngine) -> Result<Session, CoreError> {
@@ -81,52 +83,82 @@ impl Session {
         for (document, path) in paths {
             let text = SourceText::load(path)?;
             let label = files.labels.get(document.clone()).map(str::to_string);
-            sources.push(Source { document, path: path.to_path_buf(), label, text });
+            sources.push(Source {
+                document,
+                path: path.to_path_buf(),
+                label,
+                text,
+            });
         }
         let options = ComparisonOptions::default();
         let comparison = compare(&sources, engine, &options, &[])?;
         let char_diffs = char_diffs(&sources, &comparison, engine, &options);
         let (merge, output) = if files.is_merge() {
             let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&sources));
-            (merge, Some(Output { path: files.output.clone(), text, history: History::new_saved() }))
+            (
+                merge,
+                Some(Output {
+                    path: files.output.clone(),
+                    text,
+                    history: History::new_saved(),
+                }),
+            )
         } else {
             (Merge::without_output(comparison.regions), None)
         };
-        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None, char_diffs, alignments: AlignmentMarks::default() })
+        Ok(Session {
+            revision: 1,
+            sources,
+            output,
+            options,
+            merge,
+            engine: engine.capabilities(),
+            current: None,
+            char_diffs,
+            alignments: AlignmentMarks::default(),
+        })
     }
-
 
     pub fn revision(&self) -> Revision {
         Revision(self.revision.clone())
     }
 
-
     pub fn unresolved_count(&self) -> usize {
         self.merge.unresolved_count()
     }
 
-
     pub fn snapshot(&self) -> Snapshot {
-        let documents = self.sources
-            .iter()
-            .map(Source::to_document_text)
-            .collect();
-        let output = self.output
-            .as_ref()
-            .map(|output| OutputDocument { path: output.path.clone(), text: output.text.clone(), modified: output.history.is_modified() });
-        let comparison = Comparison { regions: self.merge.regions().to_vec() };
-        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone(), char_diffs: self.char_diffs.clone(), alignments: self.alignment_summary() }
+        let documents = self.sources.iter().map(Source::to_document_text).collect();
+        let output = self.output.as_ref().map(|output| OutputDocument {
+            path: output.path.clone(),
+            text: output.text.clone(),
+            modified: output.history.is_modified(),
+        });
+        let comparison = Comparison {
+            regions: self.merge.regions().to_vec(),
+        };
+        Snapshot {
+            revision: self.revision(),
+            documents,
+            output,
+            comparison,
+            engine: self.engine.clone(),
+            merge: self.merge.region_merges(),
+            options: self.options.clone(),
+            current_region: self.current.clone(),
+            char_diffs: self.char_diffs.clone(),
+            alignments: self.alignment_summary(),
+        }
     }
-
 
     pub fn current_region(&self) -> Option<usize> {
         self.current.clone()
     }
 
-
     /// Replaces A, B or C with the file at `path` and recomputes the regions and rows. D is rebuilt from them, its choices and edits are dropped and its undo history starts over. The alignment marks and the applied alignments go too, since their lines moved. On failure the session is unchanged.
     pub fn load_source(&mut self, document: Document, path: &Path, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
-        let index = self.sources
+        let index = self
+            .sources
             .iter()
             .position(|source| source.document == document)
             .ok_or(CoreError::NoSuchDocument { document: document.clone() })?;
@@ -145,7 +177,6 @@ impl Session {
         Ok(())
     }
 
-
     /// Recomputes the regions and rows with `options` and the applied alignments, and rebuilds D from them, like a reload. On failure the session is unchanged.
     pub fn set_comparison_options(&mut self, options: ComparisonOptions, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
         let comparison = compare(&self.sources, engine, &options, self.alignments.applied())?;
@@ -153,7 +184,6 @@ impl Session {
         self.rebuild(comparison, engine);
         Ok(())
     }
-
 
     /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. Differences include hand-edited regions, so a line split out of a stable region by an edit can be reached, and, with `include_alignments`, the first region of every applied alignment. `Ok(None)` when there is none; the current region stays.
     pub fn navigate(&mut self, base: &Revision, from: Option<usize>, to: Navigation, include_alignments: bool) -> Result<Option<usize>, CoreError> {
@@ -167,7 +197,11 @@ impl Session {
             return Err(CoreError::NoSuchRegion { index, count });
         }
         let from = from.or(self.current.clone()).filter(|index| *index < count);
-        let stops = if include_alignments { alignment_stops(regions, self.alignments.applied()) } else { Vec::new() };
+        let stops = if include_alignments {
+            alignment_stops(regions, self.alignments.applied())
+        } else {
+            Vec::new()
+        };
         let wanted = |index: &usize| match to {
             Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states[*index].merge.edited || stops.contains(index),
             Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
@@ -182,7 +216,6 @@ impl Session {
         Ok(found)
     }
 
-
     pub fn set_current_region(&mut self, base: &Revision, region: Option<usize>) -> Result<(), CoreError> {
         self.check_base(base)?;
         let count = self.merge.regions().len();
@@ -195,7 +228,6 @@ impl Session {
         Ok(())
     }
 
-
     /// Marks `lines` of `document` for alignment under the lowest number the document has not used. An empty range is an anchor. The comparison does not change until the alignments are applied.
     pub fn mark_alignment(&mut self, document: Document, lines: Range<usize>) -> Result<Change, CoreError> {
         let number = self.alignments.mark(document.clone(), lines.clone(), &self.line_counts())?;
@@ -203,19 +235,16 @@ impl Session {
         Ok(self.marks_changed())
     }
 
-
     pub fn remove_alignment_mark(&mut self, document: Document, number: u32) -> Result<Change, CoreError> {
         self.alignments.remove(document, number)?;
         Ok(self.marks_changed())
     }
-
 
     /// Gives a mark another number; a mark of the same document that has it takes the old one.
     pub fn renumber_alignment_mark(&mut self, document: Document, number: u32, to: u32) -> Result<Change, CoreError> {
         self.alignments.renumber(document, number, to)?;
         Ok(self.marks_changed())
     }
-
 
     /// Removes every mark; `None` when there were none. The applied alignments stay until the next apply.
     pub fn clear_alignment_marks(&mut self) -> Option<Change> {
@@ -225,7 +254,6 @@ impl Session {
         self.alignments.clear();
         Some(self.marks_changed())
     }
-
 
     /// Compares again with the alignments the marks give (see `Command::ApplyAlignments`), rebuilding D like a reload. Returns whether anything changed: `false` when the marks give the alignments already applied. Without `confirmed`, a D that holds choices or edits is refused. On failure the session is unchanged.
     pub fn apply_alignments(&mut self, confirmed: bool, engine: &dyn ComparisonEngine) -> Result<bool, CoreError> {
@@ -243,25 +271,18 @@ impl Session {
         Ok(true)
     }
 
-
     fn alignment_summary(&self) -> Alignments {
         self.alignments.summary(self.sources.len())
     }
-
 
     fn marks_changed(&mut self) -> Change {
         self.revision += 1;
         Change::AlignmentsChanged(self.alignment_summary())
     }
 
-
     fn line_counts(&self) -> Vec<usize> {
-        self.sources
-            .iter()
-            .map(|source| source.text.lines.len())
-            .collect()
+        self.sources.iter().map(|source| source.text.lines.len()).collect()
     }
-
 
     /// Takes a new comparison: D is rebuilt from its regions, its choices and edits are dropped and its undo history starts over.
     fn rebuild(&mut self, comparison: Comparison, engine: &dyn ComparisonEngine) {
@@ -280,7 +301,6 @@ impl Session {
         self.revision += 1;
     }
 
-
     /// A hand edit of D. The regions it touches become one edited region; several are joined, and `engine` classifies the result.
     pub fn edit_output(&mut self, edit: &OutputEdit, engine: &dyn ComparisonEngine) -> Result<Change, CoreError> {
         self.check_base(&edit.base)?;
@@ -288,13 +308,31 @@ impl Session {
         let range = edit.range.clone();
         let fits = range.start <= range.end && output.text.is_char_boundary(range.start) && output.text.is_char_boundary(range.end) && range.end <= output.text.len();
         if !fits {
-            return Err(CoreError::InvalidRange { start: range.start, end: range.end });
+            return Err(CoreError::InvalidRange {
+                start: range.start,
+                end: range.end,
+            });
         }
         let inserted = text::normalize_to_lf(&edit.text);
         if self.merge.regions().is_empty() {
             let region = self.empty_region();
-            let state = RegionState { merge: RegionMerge { choice: Choice::Unresolved, edited: true, output_lines: merge::line_count(&inserted) }, text_len: inserted.len() };
-            return Ok(self.apply(range, inserted, MergeStep { at: 0, before: Vec::new(), after: vec![(region, state)] }));
+            let state = RegionState {
+                merge: RegionMerge {
+                    choice: Choice::Unresolved,
+                    edited: true,
+                    output_lines: merge::line_count(&inserted),
+                },
+                text_len: inserted.len(),
+            };
+            return Ok(self.apply(
+                range,
+                inserted,
+                MergeStep {
+                    at: 0,
+                    before: Vec::new(),
+                    after: vec![(region, state)],
+                },
+            ));
         }
         let touched = match edit.region {
             Some(region) => self.merge.empty_target(region, range.clone(), &inserted).ok_or(CoreError::InvalidEditTarget { region })?,
@@ -315,12 +353,29 @@ impl Session {
         }
         let (region, choice) = match before.as_slice() {
             [(region, state)] => (region.clone(), state.merge.choice.clone()),
-            _ => (merge::join(&self.merge.regions()[touched.clone()], &source_lines(&self.sources), engine)?, Choice::Unresolved),
+            _ => (
+                merge::join(&self.merge.regions()[touched.clone()], &source_lines(&self.sources), engine)?,
+                Choice::Unresolved,
+            ),
         };
-        let state = RegionState { merge: RegionMerge { choice, edited: true, output_lines: merge::line_count(&region_text) }, text_len: region_text.len() };
-        Ok(self.apply(range, inserted, MergeStep { at: touched.start, before, after: vec![(region, state)] }))
+        let state = RegionState {
+            merge: RegionMerge {
+                choice,
+                edited: true,
+                output_lines: merge::line_count(&region_text),
+            },
+            text_len: region_text.len(),
+        };
+        Ok(self.apply(
+            range,
+            inserted,
+            MergeStep {
+                at: touched.start,
+                before,
+                after: vec![(region, state)],
+            },
+        ))
     }
-
 
     /// Sets the choice of one region and drops its hand edits. A region whose hunks are equal is joined back with unedited neighbors like it, undoing the split of a hand edit.
     pub fn set_choice(&mut self, base: &Revision, index: usize, choice: Choice) -> Result<Change, CoreError> {
@@ -334,7 +389,14 @@ impl Session {
         let offsets = self.merge.offsets();
         let region = self.merge.regions()[index].clone();
         let text = merge::render(&region, &choice, &source_lines(&self.sources));
-        let state = RegionState { merge: RegionMerge { choice, edited: false, output_lines: merge::line_count(&text) }, text_len: text.len() };
+        let state = RegionState {
+            merge: RegionMerge {
+                choice,
+                edited: false,
+                output_lines: merge::line_count(&text),
+            },
+            text_len: text.len(),
+        };
         let mut entry = (region, state);
         let mut text = text;
         let mut first = index;
@@ -357,10 +419,13 @@ impl Session {
                 last = index + 1;
             }
         }
-        let step = MergeStep { at: first, before: self.merge.entries(first..last + 1), after: vec![entry] };
+        let step = MergeStep {
+            at: first,
+            before: self.merge.entries(first..last + 1),
+            after: vec![entry],
+        };
         Ok(self.apply(offsets[first]..offsets[last + 1], text, step))
     }
-
 
     /// Chooses the hunk of `document` for every unresolved region, as one undo step. `Ok(None)` when no region is unresolved.
     pub fn choose_for_unresolved(&mut self, base: &Revision, document: Document) -> Result<Option<Change>, CoreError> {
@@ -368,7 +433,8 @@ impl Session {
         let output = self.output.as_ref().ok_or(CoreError::NotAMerge)?;
         let choice = Choice::Hunks(vec![document]);
         merge::validate_choice(&choice, self.sources.len())?;
-        let unresolved: Vec<usize> = self.merge
+        let unresolved: Vec<usize> = self
+            .merge
             .states()
             .iter()
             .enumerate()
@@ -387,7 +453,17 @@ impl Session {
             let index = first + offset;
             if state.merge.is_unresolved() {
                 let rendered = merge::render(region, &choice, &lines);
-                after.push((region.clone(), RegionState { merge: RegionMerge { choice: choice.clone(), edited: false, output_lines: merge::line_count(&rendered) }, text_len: rendered.len() }));
+                after.push((
+                    region.clone(),
+                    RegionState {
+                        merge: RegionMerge {
+                            choice: choice.clone(),
+                            edited: false,
+                            output_lines: merge::line_count(&rendered),
+                        },
+                        text_len: rendered.len(),
+                    },
+                ));
                 text.push_str(&rendered);
             } else {
                 after.push((region.clone(), state.clone()));
@@ -396,7 +472,6 @@ impl Session {
         }
         Ok(Some(self.apply(offsets[first]..offsets[last + 1], text, MergeStep { at: first, before, after })))
     }
-
 
     /// `Ok(None)` when there is nothing to undo.
     pub fn undo(&mut self) -> Result<Option<Change>, CoreError> {
@@ -413,7 +488,6 @@ impl Session {
         Ok(Some(self.replace_output(range, text, data.at, removed, added)))
     }
 
-
     /// `Ok(None)` when there is nothing to redo.
     pub fn redo(&mut self) -> Result<Option<Change>, CoreError> {
         let output = self.output.as_mut().ok_or(CoreError::NotAMerge)?;
@@ -429,7 +503,6 @@ impl Session {
         Ok(Some(self.replace_output(range, text, data.at, removed, added)))
     }
 
-
     pub fn set_output_path(&mut self, path: Option<PathBuf>) -> Result<Change, CoreError> {
         if let Some(path) = path.as_deref()
             && path.is_dir()
@@ -442,23 +515,15 @@ impl Session {
         Ok(Change::OutputPathChanged(path))
     }
 
-
     pub fn save(&mut self) -> Result<Change, CoreError> {
-        let path = self.output
-            .as_ref()
-            .ok_or(CoreError::NotAMerge)?
-            .path
-            .clone()
-            .ok_or(CoreError::NoOutputPath)?;
+        let path = self.output.as_ref().ok_or(CoreError::NotAMerge)?.path.clone().ok_or(CoreError::NoOutputPath)?;
         self.write_output(&path)
     }
-
 
     /// The output keeps its old path if the write fails.
     pub fn save_as(&mut self, path: &Path) -> Result<Change, CoreError> {
         self.write_output(path)
     }
-
 
     /// Writes D with the EOL style and BOM of A, the output reference. Refused while unresolved conflicts remain.
     fn write_output(&mut self, path: &Path) -> Result<Change, CoreError> {
@@ -470,7 +535,8 @@ impl Session {
         if unresolved > 0 {
             return Err(CoreError::UnresolvedConflicts { count: unresolved });
         }
-        let (eol, bom) = self.sources
+        let (eol, bom) = self
+            .sources
             .first()
             .map(|source| (source.text.eol.clone(), source.text.bom.clone()))
             .unwrap_or((EolStyle::Lf, false));
@@ -483,7 +549,6 @@ impl Session {
         Ok(Change::OutputSaved(path.to_path_buf()))
     }
 
-
     fn check_base(&self, base: &Revision) -> Result<(), CoreError> {
         let current = self.revision();
         if *base != current {
@@ -492,16 +557,18 @@ impl Session {
         Ok(())
     }
 
-
     /// A region without lines, for typing into a merge of empty documents.
     fn empty_region(&self) -> Region {
         let status = match self.sources.len() {
             2 => RegionStatus::Diff(HunkChange::Unchanged),
             _ => RegionStatus::Merge(MergeStatus::Unchanged),
         };
-        Region { hunks: vec![0..0; self.sources.len()], status, rows: Vec::new() }
+        Region {
+            hunks: vec![0..0; self.sources.len()],
+            status,
+            rows: Vec::new(),
+        }
     }
-
 
     /// Makes a merge op: replaces `range` of D with `inserted` and the regions of `step.before` with `step.after`, and records it for undo.
     fn apply(&mut self, range: Range<usize>, inserted: String, step: MergeStep) -> Change {
@@ -511,11 +578,15 @@ impl Session {
         self.merge.splice(at.clone(), removed.clone(), step.after.clone());
         if let Some(output) = self.output.as_mut() {
             let removed_text = output.text[range.clone()].to_string();
-            output.history.record(Step { start: range.start, removed: removed_text, inserted: inserted.clone(), data: step });
+            output.history.record(Step {
+                start: range.start,
+                removed: removed_text,
+                inserted: inserted.clone(),
+                data: step,
+            });
         }
         self.replace_output(range, inserted, at, removed, added)
     }
-
 
     /// Replaces `range` of D, whose regions are already updated, and reports the change.
     fn replace_output(&mut self, range: Range<usize>, inserted: String, at: usize, removed: usize, added: usize) -> Change {
@@ -528,21 +599,21 @@ impl Session {
         };
         self.revision += 1;
         self.current = Some(at.clone());
-        Change::OutputEdited { range, text: inserted, modified, merge: self.merge.update(at, removed, added) }
+        Change::OutputEdited {
+            range,
+            text: inserted,
+            modified,
+            merge: self.merge.update(at, removed, added),
+        }
     }
 }
-
 
 /// For every alignment, the first region that has lines inside it. Regions joined across an alignment's edge still count.
 fn alignment_stops(regions: &[Region], alignments: &[ManualAlignment]) -> Vec<usize> {
     alignments
         .iter()
         .filter_map(|alignment| {
-            let (document, part) = alignment
-                .parts
-                .iter()
-                .enumerate()
-                .find(|(_, part)| !part.is_empty())?;
+            let (document, part) = alignment.parts.iter().enumerate().find(|(_, part)| !part.is_empty())?;
             regions
                 .iter()
                 .position(|region| region.hunks.get(document).is_some_and(|hunk| hunk.start < part.end && part.start < hunk.end))
@@ -550,14 +621,9 @@ fn alignment_stops(regions: &[Region], alignments: &[ManualAlignment]) -> Vec<us
         .collect()
 }
 
-
 fn source_lines(sources: &[Source]) -> Vec<Vec<&str>> {
-    sources
-        .iter()
-        .map(Source::lines)
-        .collect()
+    sources.iter().map(Source::lines).collect()
 }
-
 
 /// Compares the source documents with `engine`. Runs to completion: cancelable worker jobs come later.
 fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &ComparisonOptions, alignments: &[ManualAlignment]) -> Result<Comparison, CoreError> {
@@ -575,14 +641,15 @@ fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &Comparis
     Ok(comparison)
 }
 
-
 /// The character-level diff of every row whose lines differ, keyed by source line. An engine without character-level diffs, or one that fails, leaves every line unmarked.
 fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn ComparisonEngine, options: &ComparisonOptions) -> Vec<LineCharRuns> {
     let lines = source_lines(sources);
     let unmarked = || -> Vec<LineCharRuns> {
         lines
             .iter()
-            .map(|lines| LineCharRuns { lines: vec![Vec::new(); lines.len()] })
+            .map(|lines| LineCharRuns {
+                lines: vec![Vec::new(); lines.len()],
+            })
             .collect()
     };
     let mut diffs = unmarked();
@@ -590,7 +657,8 @@ fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn Comparis
         return diffs;
     }
     for row in comparison.regions.iter().flat_map(|region| region.rows.iter()) {
-        let texts: Vec<Option<&str>> = row.lines
+        let texts: Vec<Option<&str>> = row
+            .lines
             .iter()
             .enumerate()
             .map(|(document, line)| line.and_then(|line| lines.get(document)?.get(line).copied()))
@@ -611,9 +679,7 @@ fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn Comparis
             return unmarked();
         }
         for (document, runs) in diff.runs.into_iter().enumerate() {
-            let slot = row.lines[document]
-                .clone()
-                .and_then(|line| diffs.get_mut(document)?.lines.get_mut(line));
+            let slot = row.lines[document].clone().and_then(|line| diffs.get_mut(document)?.lines.get_mut(line));
             if let Some(slot) = slot {
                 *slot = runs;
             }
@@ -621,7 +687,6 @@ fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn Comparis
     }
     diffs
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -633,7 +698,6 @@ mod tests {
     use super::*;
     use crate::builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
 
-
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kdiff4-core-session-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -641,18 +705,21 @@ mod tests {
         dir
     }
 
-
     fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, text).unwrap();
         path
     }
 
-
     fn files(a: PathBuf, b: PathBuf, c: Option<PathBuf>, output: Option<PathBuf>) -> OpenFiles {
-        OpenFiles { a, b, c, output, labels: Labels::default() }
+        OpenFiles {
+            a,
+            b,
+            c,
+            output,
+            labels: Labels::default(),
+        }
     }
-
 
     /// A 3-way merge of three copies of `text` in `dir`, so D starts as `text` with no conflicts, with the output at `dir/out.txt` (not created).
     fn merge_session(dir: &Path, text: &str) -> Session {
@@ -661,7 +728,6 @@ mod tests {
         let c = write(dir, "c.txt", text);
         Session::open(&files(a, b, Some(c), Some(dir.join("out.txt"))), &BuiltinEngine).unwrap()
     }
-
 
     /// A 3-way merge of `a`, `b` and `c`, given as lines.
     fn merge_of(dir: &Path, a: &[&str], b: &[&str], c: &[&str]) -> Session {
@@ -672,11 +738,9 @@ mod tests {
         Session::open(&files(a, b, Some(c), Some(dir.join("out.txt"))), &BuiltinEngine).unwrap()
     }
 
-
     fn output_text(session: &Session) -> String {
         session.snapshot().output.unwrap().text
     }
-
 
     /// D's text is the regions' texts in order, and each region's line count matches its text.
     fn assert_consistent(session: &Session) {
@@ -685,11 +749,14 @@ mod tests {
         let offsets = session.merge.offsets();
         assert_eq!(offsets.last().cloned(), Some(text.len()), "regions cover D");
         for (index, state) in session.merge.states().iter().enumerate() {
-            assert_eq!(merge::line_count(&text[offsets[index]..offsets[index + 1]]), state.merge.output_lines, "line count of region {index}");
+            assert_eq!(
+                merge::line_count(&text[offsets[index]..offsets[index + 1]]),
+                state.merge.output_lines,
+                "line count of region {index}"
+            );
         }
         assert_eq!(snapshot.merge.len(), snapshot.comparison.regions.len());
     }
-
 
     fn text_part(change: &Change) -> (std::ops::Range<usize>, String, bool) {
         match change {
@@ -698,56 +765,46 @@ mod tests {
         }
     }
 
-
     fn choices(session: &Session) -> Vec<Choice> {
-        session
-            .snapshot()
-            .merge
-            .iter()
-            .map(|merge| merge.choice.clone())
-            .collect()
+        session.snapshot().merge.iter().map(|merge| merge.choice.clone()).collect()
     }
-
 
     fn edit(session: &Session, range: std::ops::Range<usize>, text: &str) -> OutputEdit {
-        OutputEdit { base: session.revision(), range, text: text.to_string(), region: None }
+        OutputEdit {
+            base: session.revision(),
+            range,
+            text: text.to_string(),
+            region: None,
+        }
     }
-
 
     /// Fails every comparison, so a reload with it must leave the session as it was.
     struct FailingEngine;
 
-
     impl ComparisonEngine for FailingEngine {
         fn capabilities(&self) -> EngineCapabilities {
-            EngineCapabilities { id: "failing".to_string(), ..BuiltinEngine.capabilities() }
+            EngineCapabilities {
+                id: "failing".to_string(),
+                ..BuiltinEngine.capabilities()
+            }
         }
-
 
         fn compare(&self, _input: &CompareInput<'_>, _job: &Job<'_>) -> Result<Comparison, EngineError> {
             Err(EngineError::Failed("broken on purpose".to_string()))
         }
 
-
         fn classify(&self, hunks: &[SourceLines<'_>]) -> Result<RegionStatus, EngineError> {
             BuiltinEngine.classify(hunks)
         }
-
 
         fn char_diff(&self, row: &[Option<&str>], options: &ComparisonOptions) -> Result<CharDiff, EngineError> {
             BuiltinEngine.char_diff(row, options)
         }
     }
 
-
     fn statuses(comparison: &Comparison) -> Vec<RegionStatus> {
-        comparison
-            .regions
-            .iter()
-            .map(|region| region.status.clone())
-            .collect()
+        comparison.regions.iter().map(|region| region.status.clone()).collect()
     }
-
 
     #[test]
     fn open_compares_sources() {
@@ -756,11 +813,18 @@ mod tests {
         let b = write(&dir, "b.txt", "same\nleft\n");
         let c = write(&dir, "c.txt", "same\nbase\n");
         let snapshot = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap().snapshot();
-        assert_eq!(statuses(&snapshot.comparison), [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB)]);
-        assert_eq!(snapshot.comparison.regions[1].rows, [Row { lines: vec![Some(1), Some(1), Some(1)] }]);
+        assert_eq!(
+            statuses(&snapshot.comparison),
+            [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB)]
+        );
+        assert_eq!(
+            snapshot.comparison.regions[1].rows,
+            [Row {
+                lines: vec![Some(1), Some(1), Some(1)]
+            }]
+        );
         assert_eq!(snapshot.engine.id, BUILTIN_ENGINE_ID);
     }
-
 
     #[test]
     fn snapshot_has_char_diffs_of_rows_that_differ() {
@@ -768,18 +832,11 @@ mod tests {
         let session = merge_of(&dir, &["same", "abcdefg"], &["same", "xbcdefg"], &["same", "xbcdefz"]);
         let snapshot = session.snapshot();
         assert_eq!(snapshot.char_diffs.len(), 3);
-        let same_in = |document: usize, line: usize| -> Vec<Vec<bool>> {
-            snapshot.char_diffs[document]
-                .line(line)
-                .iter()
-                .map(|run| run.same_in.clone())
-                .collect()
-        };
+        let same_in = |document: usize, line: usize| -> Vec<Vec<bool>> { snapshot.char_diffs[document].line(line).iter().map(|run| run.same_in.clone()).collect() };
         assert!(snapshot.char_diffs.iter().all(|diff| diff.line(0).is_empty()));
         assert_eq!(same_in(1, 1), [vec![false, true, true], vec![true, true, true], vec![true, true, false]]);
         assert_eq!(snapshot.char_diffs[2].line(1)[2].columns, 6..7);
     }
-
 
     #[test]
     fn char_diffs_survive_edits_of_d_and_follow_new_comparisons() {
@@ -795,7 +852,6 @@ mod tests {
         assert!(session.snapshot().char_diffs.iter().all(|diff| diff.line(0).is_empty()));
     }
 
-
     #[test]
     fn engines_without_char_diffs_leave_lines_unmarked() {
         let dir = temp_dir("char-diffs-unsupported");
@@ -804,7 +860,10 @@ mod tests {
         struct NoCharDiffs;
         impl ComparisonEngine for NoCharDiffs {
             fn capabilities(&self) -> EngineCapabilities {
-                EngineCapabilities { char_diff: false, ..BuiltinEngine.capabilities() }
+                EngineCapabilities {
+                    char_diff: false,
+                    ..BuiltinEngine.capabilities()
+                }
             }
             fn compare(&self, input: &CompareInput<'_>, job: &Job<'_>) -> Result<Comparison, EngineError> {
                 BuiltinEngine.compare(input, job)
@@ -821,16 +880,17 @@ mod tests {
         assert!(snapshot.char_diffs.iter().all(|diff| diff.line(0).is_empty()));
     }
 
-
     #[test]
     fn two_way_open_compares_a_and_b() {
         let dir = temp_dir("open-two-way");
         let a = write(&dir, "a.txt", "x\n");
         let b = write(&dir, "b.txt", "x\ny\n");
         let snapshot = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap().snapshot();
-        assert_eq!(statuses(&snapshot.comparison), [RegionStatus::Diff(HunkChange::Unchanged), RegionStatus::Diff(HunkChange::Added)]);
+        assert_eq!(
+            statuses(&snapshot.comparison),
+            [RegionStatus::Diff(HunkChange::Unchanged), RegionStatus::Diff(HunkChange::Added)]
+        );
     }
-
 
     #[test]
     fn open_fails_when_the_engine_fails() {
@@ -841,7 +901,6 @@ mod tests {
         assert!(matches!(error, CoreError::Engine(EngineError::Failed(_))));
         assert_eq!(ProtocolError::from(error).kind, ErrorKind::Engine);
     }
-
 
     #[test]
     fn load_source_recomputes_comparison_and_rebuilds_d() {
@@ -861,7 +920,6 @@ mod tests {
         assert_consistent(&session);
     }
 
-
     #[test]
     fn failed_recompute_keeps_the_session() {
         let dir = temp_dir("load-engine-fails");
@@ -873,12 +931,10 @@ mod tests {
         assert_eq!(session.snapshot(), before);
     }
 
-
     #[test]
     fn canceled_comparison_keeps_its_error_kind() {
         assert_eq!(ProtocolError::from(CoreError::Engine(EngineError::Canceled)).kind, ErrorKind::Canceled);
     }
-
 
     #[test]
     fn open_two_files_gives_a_and_b_without_output() {
@@ -897,19 +953,31 @@ mod tests {
         assert_eq!(snapshot.documents[1].path, b);
     }
 
-
     #[test]
     fn labels_reach_the_snapshot() {
         let dir = temp_dir("labels");
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
-        let labels = Labels { a: Some("Base".to_string()), b: Some("Local".to_string()), c: None };
-        let session = Session::open(&OpenFiles { a, b, c: None, output: None, labels }, &BuiltinEngine).unwrap();
+        let labels = Labels {
+            a: Some("Base".to_string()),
+            b: Some("Local".to_string()),
+            c: None,
+        };
+        let session = Session::open(
+            &OpenFiles {
+                a,
+                b,
+                c: None,
+                output: None,
+                labels,
+            },
+            &BuiltinEngine,
+        )
+        .unwrap();
         let snapshot = session.snapshot();
         assert_eq!(snapshot.documents[0].label.as_deref(), Some("Base"));
         assert_eq!(snapshot.documents[1].label.as_deref(), Some("Local"));
     }
-
 
     #[test]
     fn merge_without_output_has_unnamed_output() {
@@ -918,9 +986,15 @@ mod tests {
         let b = write(&dir, "b.txt", "a");
         let c = write(&dir, "c.txt", "a");
         let output = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap().snapshot().output.unwrap();
-        assert_eq!(output, OutputDocument { path: None, text: "a\n".to_string(), modified: false });
+        assert_eq!(
+            output,
+            OutputDocument {
+                path: None,
+                text: "a\n".to_string(),
+                modified: false
+            }
+        );
     }
-
 
     #[test]
     fn two_way_merge_has_output() {
@@ -931,7 +1005,6 @@ mod tests {
         assert_eq!(snapshot.documents.len(), 2);
         assert_eq!(snapshot.output.unwrap().path, Some(dir.join("out.txt")));
     }
-
 
     #[test]
     fn existing_output_file_is_ignored_and_d_is_the_merge() {
@@ -945,7 +1018,6 @@ mod tests {
         assert!(!output.modified);
     }
 
-
     #[test]
     fn missing_file_is_a_read_error() {
         let dir = temp_dir("missing");
@@ -954,7 +1026,6 @@ mod tests {
         assert!(matches!(error, CoreError::Read { ref path, .. } if path.ends_with("missing.txt")));
     }
 
-
     #[test]
     fn directory_as_source_is_rejected() {
         let dir = temp_dir("dir-source");
@@ -962,7 +1033,6 @@ mod tests {
         let error = Session::open(&files(a, dir.clone(), None, None), &BuiltinEngine).unwrap_err();
         assert!(matches!(error, CoreError::Directory { ref path } if *path == dir));
     }
-
 
     #[test]
     fn directory_as_output_is_rejected() {
@@ -973,7 +1043,6 @@ mod tests {
         let error = Session::open(&files(a, b, Some(c), Some(dir.clone())), &BuiltinEngine).unwrap_err();
         assert!(matches!(error, CoreError::Directory { ref path } if *path == dir));
     }
-
 
     #[test]
     fn load_source_replaces_document_and_bumps_revision() {
@@ -988,19 +1057,26 @@ mod tests {
         assert_eq!(text.line(0), "new b");
     }
 
-
     #[test]
     fn load_source_rejects_missing_documents() {
         let dir = temp_dir("load-missing-doc");
         let a = write(&dir, "a.txt", "a");
         let b = write(&dir, "b.txt", "b");
         let mut session = Session::open(&files(a.clone(), b, None, None), &BuiltinEngine).unwrap();
-        assert!(matches!(session.load_source(Document::C, &a, &BuiltinEngine), Err(CoreError::NoSuchDocument { document: Document::C })));
-        assert!(matches!(session.load_source(Document::D, &a, &BuiltinEngine), Err(CoreError::NoSuchDocument { document: Document::D })));
-        assert!(matches!(session.load_source(Document::B, &dir.join("gone.txt"), &BuiltinEngine), Err(CoreError::Read { .. })));
+        assert!(matches!(
+            session.load_source(Document::C, &a, &BuiltinEngine),
+            Err(CoreError::NoSuchDocument { document: Document::C })
+        ));
+        assert!(matches!(
+            session.load_source(Document::D, &a, &BuiltinEngine),
+            Err(CoreError::NoSuchDocument { document: Document::D })
+        ));
+        assert!(matches!(
+            session.load_source(Document::B, &dir.join("gone.txt"), &BuiltinEngine),
+            Err(CoreError::Read { .. })
+        ));
         assert_eq!(session.revision(), Revision(1));
     }
-
 
     #[test]
     fn edit_output_replaces_range_and_marks_modified() {
@@ -1016,21 +1092,30 @@ mod tests {
         assert_consistent(&session);
     }
 
-
     #[test]
     fn edit_output_rejects_stale_revision_and_bad_ranges() {
         let dir = temp_dir("edit-invalid");
         let mut session = merge_session(&dir, "");
         session.edit_output(&edit(&session, 0..0, "é"), &BuiltinEngine).unwrap();
-        let stale = OutputEdit { base: Revision(1), range: 0..0, text: "x".to_string(), region: None };
+        let stale = OutputEdit {
+            base: Revision(1),
+            range: 0..0,
+            text: "x".to_string(),
+            region: None,
+        };
         assert!(matches!(session.edit_output(&stale, &BuiltinEngine), Err(CoreError::StaleRevision { .. })));
-        assert!(matches!(session.edit_output(&edit(&session, 1..1, "x"), &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
-        assert!(matches!(session.edit_output(&edit(&session, 0..9, "x"), &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
+        assert!(matches!(
+            session.edit_output(&edit(&session, 1..1, "x"), &BuiltinEngine),
+            Err(CoreError::InvalidRange { .. })
+        ));
+        assert!(matches!(
+            session.edit_output(&edit(&session, 0..9, "x"), &BuiltinEngine),
+            Err(CoreError::InvalidRange { .. })
+        ));
         let reversed = edit(&session, 2..0, "x");
         assert!(matches!(session.edit_output(&reversed, &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
         assert_eq!(session.snapshot().output.unwrap().text, "é");
     }
-
 
     #[test]
     fn undo_and_redo_replay_edits_and_track_modified() {
@@ -1051,7 +1136,6 @@ mod tests {
         assert_eq!(session.revision(), Revision(7));
     }
 
-
     #[test]
     fn undo_back_to_saved_text_is_unmodified() {
         let dir = temp_dir("undo-saved");
@@ -1066,7 +1150,6 @@ mod tests {
         assert!(session.snapshot().output.unwrap().modified);
     }
 
-
     #[test]
     fn diff_session_rejects_output_commands() {
         let dir = temp_dir("diff-output");
@@ -1079,7 +1162,6 @@ mod tests {
         assert!(matches!(session.undo(), Err(CoreError::NotAMerge)));
     }
 
-
     #[test]
     fn save_writes_with_eol_and_bom_of_a() {
         let dir = temp_dir("save");
@@ -1090,7 +1172,6 @@ mod tests {
         assert!(!session.snapshot().output.unwrap().modified);
     }
 
-
     #[test]
     fn save_without_path_fails() {
         let dir = temp_dir("save-no-path");
@@ -1100,7 +1181,6 @@ mod tests {
         let mut session = Session::open(&files(a, b, Some(c), None), &BuiltinEngine).unwrap();
         assert!(matches!(session.save(), Err(CoreError::NoOutputPath)));
     }
-
 
     #[test]
     fn save_as_moves_the_output_path() {
@@ -1113,7 +1193,6 @@ mod tests {
         assert_eq!(session.snapshot().output.unwrap().path, Some(target));
         assert!(!dir.join("out.txt").exists());
     }
-
 
     #[test]
     fn failed_save_as_keeps_old_path_and_modified() {
@@ -1129,7 +1208,6 @@ mod tests {
         assert_eq!(session.revision(), revision);
     }
 
-
     #[test]
     fn set_output_path_changes_location_only() {
         let dir = temp_dir("set-path");
@@ -1143,18 +1221,37 @@ mod tests {
         assert!(matches!(session.set_output_path(Some(dir.clone())), Err(CoreError::Directory { .. })));
     }
 
-
     #[test]
     fn auto_resolve_builds_d_and_leaves_conflicts_unresolved() {
         let dir = temp_dir("auto-resolve");
-        let session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
-        assert_eq!(statuses(&session.snapshot().comparison), [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB), RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::Conflict)]);
-        assert_eq!(choices(&session), [Choice::Hunks(vec![Document::A]), Choice::Hunks(vec![Document::B]), Choice::Hunks(vec![Document::A]), Choice::Unresolved]);
+        let session = merge_of(
+            &dir,
+            &["same", "base", "x", "keep", "a"],
+            &["same", "left", "x", "keep", "b"],
+            &["same", "base", "x", "keep", "c"],
+        );
+        assert_eq!(
+            statuses(&session.snapshot().comparison),
+            [
+                RegionStatus::Merge(MergeStatus::Unchanged),
+                RegionStatus::Merge(MergeStatus::ChangedInB),
+                RegionStatus::Merge(MergeStatus::Unchanged),
+                RegionStatus::Merge(MergeStatus::Conflict)
+            ]
+        );
+        assert_eq!(
+            choices(&session),
+            [
+                Choice::Hunks(vec![Document::A]),
+                Choice::Hunks(vec![Document::B]),
+                Choice::Hunks(vec![Document::A]),
+                Choice::Unresolved
+            ]
+        );
         assert_eq!(output_text(&session), "same\nleft\nx\nkeep\n");
         assert_eq!(session.unresolved_count(), 1);
         assert_consistent(&session);
     }
-
 
     #[test]
     fn two_way_merge_leaves_differences_unresolved() {
@@ -1166,7 +1263,6 @@ mod tests {
         assert_eq!(output_text(&session), "x\n");
     }
 
-
     #[test]
     fn set_choice_rebuilds_the_region_and_undoes() {
         let dir = temp_dir("set-choice");
@@ -1177,7 +1273,14 @@ mod tests {
             panic!("expected an output change");
         };
         assert_eq!((update.at, update.removed, update.regions.len()), (1, 1, 1));
-        assert_eq!(update.merge[0], RegionMerge { choice: Choice::Hunks(vec![Document::C, Document::B]), edited: false, output_lines: 2 });
+        assert_eq!(
+            update.merge[0],
+            RegionMerge {
+                choice: Choice::Hunks(vec![Document::C, Document::B]),
+                edited: false,
+                output_lines: 2
+            }
+        );
         assert_eq!(output_text(&session), "s\nc\nb\nt\n");
         assert_eq!(session.unresolved_count(), 0);
         assert_consistent(&session);
@@ -1189,11 +1292,15 @@ mod tests {
         assert_consistent(&session);
     }
 
-
     #[test]
     fn navigation_finds_differences_and_conflicts() {
         let dir = temp_dir("navigate");
-        let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
+        let mut session = merge_of(
+            &dir,
+            &["same", "base", "x", "keep", "a"],
+            &["same", "left", "x", "keep", "b"],
+            &["same", "base", "x", "keep", "c"],
+        );
         let base = session.revision();
         assert_eq!(session.current_region(), None);
         assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(1));
@@ -1207,14 +1314,16 @@ mod tests {
         assert_eq!(session.revision(), base);
     }
 
-
     #[test]
     fn navigation_finds_hand_edited_stable_lines() {
         let dir = temp_dir("navigate-split");
-        let mut session = merge_session(&dir, "aa
+        let mut session = merge_session(
+            &dir,
+            "aa
 bb
 cc
-");
+",
+        );
         session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
         let base = session.revision();
         assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference, false).unwrap(), Some(1));
@@ -1223,17 +1332,20 @@ cc
         assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict, false).unwrap(), None);
     }
 
-
     #[test]
     fn navigation_without_a_current_region_starts_at_the_ends() {
         let dir = temp_dir("navigate-ends");
-        let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
+        let mut session = merge_of(
+            &dir,
+            &["same", "base", "x", "keep", "a"],
+            &["same", "left", "x", "keep", "b"],
+            &["same", "base", "x", "keep", "c"],
+        );
         let base = session.revision();
         assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), Some(3));
         session.set_current_region(&base, None).unwrap();
         assert_eq!(session.navigate(&base, None, Navigation::PreviousConflict, false).unwrap(), Some(3));
     }
-
 
     #[test]
     fn navigation_counts_resolved_conflicts() {
@@ -1243,44 +1355,56 @@ cc
         assert_eq!(session.navigate(&session.revision(), Some(0), Navigation::NextConflict, false).unwrap(), Some(1));
     }
 
-
     #[test]
     fn navigation_rejects_bad_requests() {
         let dir = temp_dir("navigate-bad");
         let mut session = merge_of(&dir, &["a"], &["b"], &["c"]);
         let base = session.revision();
-        assert!(matches!(session.navigate(&Revision(9), None, Navigation::NextConflict, false), Err(CoreError::StaleRevision { .. })));
-        assert!(matches!(session.navigate(&base, Some(4), Navigation::NextConflict, false), Err(CoreError::NoSuchRegion { index: 4, count: 1 })));
+        assert!(matches!(
+            session.navigate(&Revision(9), None, Navigation::NextConflict, false),
+            Err(CoreError::StaleRevision { .. })
+        ));
+        assert!(matches!(
+            session.navigate(&base, Some(4), Navigation::NextConflict, false),
+            Err(CoreError::NoSuchRegion { index: 4, count: 1 })
+        ));
         assert!(matches!(session.set_current_region(&base, Some(1)), Err(CoreError::NoSuchRegion { index: 1, count: 1 })));
         session.set_current_region(&base, Some(0)).unwrap();
         assert_eq!(session.current_region(), Some(0));
     }
-
 
     /// The Foo and Qux example of Manual alignment in ARCHITECTURE.md: B adds Foo and C adds Qux between Bar and Baz.
     fn foo_and_qux(dir: &Path) -> Session {
         merge_of(dir, &["Bar", "Baz"], &["Bar", "Foo", "Baz"], &["Bar", "Qux", "Baz"])
     }
 
-
     /// A gets two anchors before Baz; B gets Foo and an anchor after it; C gets an anchor before Qux, and Qux.
     fn mark_foo_and_qux(session: &mut Session) {
-        for (document, lines) in [(Document::A, 1..1), (Document::A, 1..1), (Document::B, 1..2), (Document::B, 2..2), (Document::C, 1..1), (Document::C, 1..2)] {
+        for (document, lines) in [
+            (Document::A, 1..1),
+            (Document::A, 1..1),
+            (Document::B, 1..2),
+            (Document::B, 2..2),
+            (Document::C, 1..1),
+            (Document::C, 1..2),
+        ] {
             session.mark_alignment(document, lines).unwrap();
         }
     }
-
 
     fn alignment_of(session: &Session) -> Alignments {
         session.snapshot().alignments
     }
 
-
     #[test]
     fn marks_wait_for_apply_and_apply_separates_unrelated_insertions() {
         let dir = temp_dir("alignment-apply");
         let mut session = foo_and_qux(&dir);
-        let unaligned = [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::Conflict), RegionStatus::Merge(MergeStatus::Unchanged)];
+        let unaligned = [
+            RegionStatus::Merge(MergeStatus::Unchanged),
+            RegionStatus::Merge(MergeStatus::Conflict),
+            RegionStatus::Merge(MergeStatus::Unchanged),
+        ];
         assert_eq!(statuses(&session.snapshot().comparison), unaligned);
         let revision = session.revision();
         mark_foo_and_qux(&mut session);
@@ -1292,14 +1416,18 @@ cc
         assert!(summary.marks.iter().all(|mark| mark.status == MarkStatus::Pending));
         assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), true);
         let snapshot = session.snapshot();
-        let aligned = [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB), RegionStatus::Merge(MergeStatus::ChangedInC), RegionStatus::Merge(MergeStatus::Unchanged)];
+        let aligned = [
+            RegionStatus::Merge(MergeStatus::Unchanged),
+            RegionStatus::Merge(MergeStatus::ChangedInB),
+            RegionStatus::Merge(MergeStatus::ChangedInC),
+            RegionStatus::Merge(MergeStatus::Unchanged),
+        ];
         assert_eq!(statuses(&snapshot.comparison), aligned);
         assert_eq!(snapshot.output.unwrap().text, "Bar\nFoo\nQux\nBaz\n");
         assert!(!snapshot.alignments.changed);
         assert!(snapshot.alignments.marks.iter().all(|mark| mark.status == MarkStatus::Applied));
         assert_consistent(&session);
     }
-
 
     #[test]
     fn applying_nothing_new_changes_nothing() {
@@ -1313,7 +1441,6 @@ cc
         assert_eq!(session.snapshot(), before);
     }
 
-
     #[test]
     fn marks_of_an_incomplete_number_are_kept_and_ignored() {
         let dir = temp_dir("alignment-incomplete");
@@ -1325,7 +1452,6 @@ cc
         assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), false);
         assert_eq!(alignment_of(&session).marks.len(), 2);
     }
-
 
     #[test]
     fn bad_marks_are_rejected_without_a_change() {
@@ -1344,7 +1470,6 @@ cc
         assert_eq!(session.snapshot().comparison, before.comparison);
     }
 
-
     #[test]
     fn marks_can_be_removed_renumbered_and_cleared() {
         let dir = temp_dir("alignment-edit-marks");
@@ -1352,13 +1477,7 @@ cc
         session.mark_alignment(Document::A, 0..1).unwrap();
         session.mark_alignment(Document::A, 1..2).unwrap();
         session.renumber_alignment_mark(Document::A, 1, 2).unwrap();
-        let numbers = |session: &Session| -> Vec<(u32, Range<usize>)> {
-            alignment_of(session)
-                .marks
-                .iter()
-                .map(|mark| (mark.number, mark.lines.clone()))
-                .collect()
-        };
+        let numbers = |session: &Session| -> Vec<(u32, Range<usize>)> { alignment_of(session).marks.iter().map(|mark| (mark.number, mark.lines.clone())).collect() };
         assert_eq!(numbers(&session), [(1, 1..2), (2, 0..1)]);
         session.remove_alignment_mark(Document::A, 1).unwrap();
         assert_eq!(numbers(&session), [(2, 0..1)]);
@@ -1367,12 +1486,18 @@ cc
         assert!(session.clear_alignment_marks().is_none());
     }
 
-
     #[test]
     fn crossing_alignments_are_refused_and_keep_the_session() {
         let dir = temp_dir("alignment-crossing");
         let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
-        for (document, lines) in [(Document::A, 0..1), (Document::A, 1..2), (Document::B, 1..2), (Document::B, 0..1), (Document::C, 0..1), (Document::C, 1..2)] {
+        for (document, lines) in [
+            (Document::A, 0..1),
+            (Document::A, 1..2),
+            (Document::B, 1..2),
+            (Document::B, 0..1),
+            (Document::C, 0..1),
+            (Document::C, 1..2),
+        ] {
             session.mark_alignment(document, lines).unwrap();
         }
         let before = session.snapshot();
@@ -1381,7 +1506,6 @@ cc
         assert_eq!(ProtocolError::from(error).kind, ErrorKind::InvalidRequest);
         assert_eq!(session.snapshot(), before);
     }
-
 
     #[test]
     fn numbers_may_run_against_the_positions() {
@@ -1394,7 +1518,6 @@ cc
         assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
         assert!(alignment_of(&session).marks.iter().all(|mark| mark.status == MarkStatus::Applied));
     }
-
 
     #[test]
     fn apply_asks_before_discarding_work() {
@@ -1413,7 +1536,6 @@ cc
         assert_eq!(session.undo().unwrap(), None);
     }
 
-
     #[test]
     fn hand_edits_count_as_work_but_auto_resolved_regions_do_not() {
         let dir = temp_dir("alignment-work");
@@ -1430,7 +1552,6 @@ cc
         assert_eq!(untouched.apply_alignments(false, &BuiltinEngine).unwrap(), true);
     }
 
-
     #[test]
     fn a_diff_without_d_applies_without_asking() {
         let dir = temp_dir("alignment-diff");
@@ -1442,7 +1563,6 @@ cc
         assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), true);
         assert_eq!(session.snapshot().comparison.regions.len(), 3);
     }
-
 
     #[test]
     fn reloading_a_source_drops_marks_and_applied_alignments() {
@@ -1456,7 +1576,6 @@ cc
         assert_eq!(statuses(&session.snapshot().comparison).len(), 3);
     }
 
-
     #[test]
     fn a_failed_reload_keeps_the_marks() {
         let dir = temp_dir("alignment-reload-fails");
@@ -1466,20 +1585,26 @@ cc
         assert_eq!(alignment_of(&session).marks.len(), 6);
     }
 
-
     #[test]
     fn comparison_options_keep_marks_and_applied_alignments() {
         let dir = temp_dir("alignment-options");
         let mut session = foo_and_qux(&dir);
         mark_foo_and_qux(&mut session);
         session.apply_alignments(false, &BuiltinEngine).unwrap();
-        session.set_comparison_options(ComparisonOptions { try_hard: true, ..ComparisonOptions::default() }, &BuiltinEngine).unwrap();
+        session
+            .set_comparison_options(
+                ComparisonOptions {
+                    try_hard: true,
+                    ..ComparisonOptions::default()
+                },
+                &BuiltinEngine,
+            )
+            .unwrap();
         assert_eq!(statuses(&session.snapshot().comparison).len(), 4);
         let summary = alignment_of(&session);
         assert_eq!(summary.marks.len(), 6);
         assert!(!summary.changed);
     }
-
 
     #[test]
     fn clearing_the_marks_keeps_the_layout_until_apply() {
@@ -1494,7 +1619,6 @@ cc
         assert_eq!(statuses(&session.snapshot().comparison).len(), 3);
         assert!(!alignment_of(&session).changed);
     }
-
 
     #[test]
     fn navigation_stops_at_alignments_only_when_asked() {
@@ -1513,7 +1637,6 @@ cc
         assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict, true).unwrap(), None);
     }
 
-
     #[test]
     fn navigation_stops_at_the_first_region_of_an_alignment() {
         let dir = temp_dir("alignment-navigate-first");
@@ -1528,7 +1651,6 @@ cc
         assert_eq!(session.navigate(&base, Some(1), Navigation::NextDifference, true).unwrap(), Some(2));
         assert_eq!(session.navigate(&base, Some(2), Navigation::NextDifference, true).unwrap(), None);
     }
-
 
     #[test]
     fn changes_of_d_and_their_undo_make_their_region_current() {
@@ -1545,14 +1667,16 @@ cc
         assert_eq!(session.snapshot().current_region, Some(2));
     }
 
-
     #[test]
     fn comparison_options_recompute_and_rebuild_d() {
         let dir = temp_dir("options");
         let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
         session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
         let revision = session.revision();
-        let options = ComparisonOptions { try_hard: true, ..ComparisonOptions::default() };
+        let options = ComparisonOptions {
+            try_hard: true,
+            ..ComparisonOptions::default()
+        };
         session.set_comparison_options(options.clone(), &BuiltinEngine).unwrap();
         let snapshot = session.snapshot();
         assert_eq!(snapshot.options, options);
@@ -1563,16 +1687,24 @@ cc
         assert_consistent(&session);
     }
 
-
     #[test]
     fn failed_comparison_options_keep_the_session() {
         let dir = temp_dir("options-fail");
         let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
         let before = session.snapshot();
-        assert!(session.set_comparison_options(ComparisonOptions { try_hard: true, ..ComparisonOptions::default() }, &FailingEngine).is_err());
+        assert!(
+            session
+                .set_comparison_options(
+                    ComparisonOptions {
+                        try_hard: true,
+                        ..ComparisonOptions::default()
+                    },
+                    &FailingEngine
+                )
+                .is_err()
+        );
         assert_eq!(session.snapshot(), before);
     }
-
 
     #[test]
     fn set_choice_can_choose_nothing_and_unresolve() {
@@ -1585,19 +1717,26 @@ cc
         assert_eq!(session.unresolved_count(), 1);
     }
 
-
     #[test]
     fn set_choice_rejects_bad_requests() {
         let dir = temp_dir("set-choice-bad");
         let mut session = merge_of(&dir, &["a"], &["b"], &["c"]);
         let base = session.revision();
         assert!(matches!(session.set_choice(&Revision(9), 0, Choice::Unresolved), Err(CoreError::StaleRevision { .. })));
-        assert!(matches!(session.set_choice(&base, 5, Choice::Unresolved), Err(CoreError::NoSuchRegion { index: 5, count: 1 })));
-        assert!(matches!(session.set_choice(&base, 0, Choice::Hunks(vec![Document::D])), Err(CoreError::NoSuchDocument { .. })));
-        assert!(matches!(session.set_choice(&base, 0, Choice::Hunks(vec![Document::A, Document::A])), Err(CoreError::InvalidChoice { .. })));
+        assert!(matches!(
+            session.set_choice(&base, 5, Choice::Unresolved),
+            Err(CoreError::NoSuchRegion { index: 5, count: 1 })
+        ));
+        assert!(matches!(
+            session.set_choice(&base, 0, Choice::Hunks(vec![Document::D])),
+            Err(CoreError::NoSuchDocument { .. })
+        ));
+        assert!(matches!(
+            session.set_choice(&base, 0, Choice::Hunks(vec![Document::A, Document::A])),
+            Err(CoreError::InvalidChoice { .. })
+        ));
         assert_eq!(session.revision(), base);
     }
-
 
     #[test]
     fn choose_for_unresolved_is_one_undo_step() {
@@ -1616,90 +1755,122 @@ cc
         assert_consistent(&session);
     }
 
-
     #[test]
     fn choosing_a_hunk_of_a_split_stable_line_joins_it_back() {
         for document in [Document::A, Document::B, Document::C] {
             let dir = temp_dir("rejoin-stable");
-            let mut session = merge_session(&dir, "aa
+            let mut session = merge_session(
+                &dir,
+                "aa
 bb
 cc
-");
+",
+            );
             let original = session.merge.entries(0..1);
             session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
             assert_eq!(session.merge.regions().len(), 3);
-            assert_eq!(output_text(&session), "aa
+            assert_eq!(
+                output_text(&session),
+                "aa
 bxb
 cc
-");
+"
+            );
             let change = session.set_choice(&session.revision(), 1, Choice::Hunks(vec![document])).unwrap();
             let Change::OutputEdited { merge: update, .. } = &change else {
                 panic!("expected an output change");
             };
             assert_eq!((update.at, update.removed, update.merge.len()), (0, 3, 1));
-            assert_eq!(output_text(&session), "aa
+            assert_eq!(
+                output_text(&session),
+                "aa
 bb
 cc
-");
+"
+            );
             assert_eq!(session.merge.entries(0..1), original);
             assert_eq!(session.current_region(), Some(0));
             assert_consistent(&session);
             session.undo().unwrap();
             assert_eq!(session.merge.regions().len(), 3);
-            assert_eq!(output_text(&session), "aa
+            assert_eq!(
+                output_text(&session),
+                "aa
 bxb
 cc
-");
+"
+            );
             assert_consistent(&session);
         }
     }
 
-
     #[test]
     fn split_lines_join_back_one_at_a_time() {
         let dir = temp_dir("rejoin-stable-lines");
-        let mut session = merge_session(&dir, "aa
+        let mut session = merge_session(
+            &dir,
+            "aa
 bb
 cc
-");
-        session.edit_output(&edit(&session, 0..8, "1
+",
+        );
+        session
+            .edit_output(
+                &edit(
+                    &session,
+                    0..8,
+                    "1
 2
-3"), &BuiltinEngine).unwrap();
+3",
+                ),
+                &BuiltinEngine,
+            )
+            .unwrap();
         assert_eq!(session.merge.regions().len(), 3);
         session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
         assert_eq!(session.merge.regions().len(), 3);
-        assert_eq!(output_text(&session), "1
+        assert_eq!(
+            output_text(&session),
+            "1
 bb
 3
-");
+"
+        );
         session.set_choice(&session.revision(), 0, Choice::Hunks(vec![Document::C])).unwrap();
         assert_eq!(session.merge.regions().len(), 2);
         session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::A])).unwrap();
         assert_eq!(session.merge.regions().len(), 1);
-        assert_eq!(output_text(&session), "aa
+        assert_eq!(
+            output_text(&session),
+            "aa
 bb
 cc
-");
+"
+        );
         assert_consistent(&session);
     }
-
 
     #[test]
     fn choosing_nothing_for_a_split_line_keeps_it_apart() {
         let dir = temp_dir("rejoin-stable-nothing");
-        let mut session = merge_session(&dir, "aa
+        let mut session = merge_session(
+            &dir,
+            "aa
 bb
 cc
-");
+",
+        );
         session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
         session.set_choice(&session.revision(), 1, Choice::Hunks(Vec::new())).unwrap();
         assert_eq!(session.merge.regions().len(), 3);
-        assert_eq!(output_text(&session), "aa
+        assert_eq!(
+            output_text(&session),
+            "aa
 cc
-");
+"
+        );
         assert_consistent(&session);
     }
-
 
     #[test]
     fn edit_inside_a_region_marks_it_edited() {
@@ -1711,11 +1882,17 @@ cc
             panic!("expected an output change");
         };
         assert_eq!((update.at, update.removed), (1, 1));
-        assert_eq!(update.merge[0], RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: true, output_lines: 1 });
+        assert_eq!(
+            update.merge[0],
+            RegionMerge {
+                choice: Choice::Hunks(vec![Document::B]),
+                edited: true,
+                output_lines: 1
+            }
+        );
         assert_eq!(output_text(&session), "s\nb!\nt\n");
         assert_consistent(&session);
     }
-
 
     #[test]
     fn editing_a_chosen_hunk_and_choosing_again_drops_the_edit() {
@@ -1731,7 +1908,6 @@ cc
         assert_consistent(&session);
     }
 
-
     #[test]
     fn typing_next_to_an_empty_conflict_stays_out_of_it() {
         let dir = temp_dir("edit-next-to-conflict");
@@ -1742,37 +1918,68 @@ cc
         assert_consistent(&session);
     }
 
-
     #[test]
     fn typing_on_an_empty_region_goes_to_it() {
         let dir = temp_dir("edit-empty-region");
         let mut session = merge_of(&dir, &["s", "x", "t"], &["s", "t"], &["s", "x", "t"]);
         assert_eq!(output_text(&session), "s\nt\n");
-        assert_eq!(session.snapshot().merge[1], RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 0 });
-        let change = session.edit_output(&OutputEdit { region: Some(1), ..edit(&session, 2..2, "new\n") }, &BuiltinEngine).unwrap();
+        assert_eq!(
+            session.snapshot().merge[1],
+            RegionMerge {
+                choice: Choice::Hunks(vec![Document::B]),
+                edited: false,
+                output_lines: 0
+            }
+        );
+        let change = session
+            .edit_output(
+                &OutputEdit {
+                    region: Some(1),
+                    ..edit(&session, 2..2, "new\n")
+                },
+                &BuiltinEngine,
+            )
+            .unwrap();
         let Change::OutputEdited { merge: update, .. } = &change else {
             panic!("expected an output change");
         };
         assert_eq!((update.at, update.removed), (1, 1));
-        assert_eq!(update.merge[0], RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: true, output_lines: 1 });
+        assert_eq!(
+            update.merge[0],
+            RegionMerge {
+                choice: Choice::Hunks(vec![Document::B]),
+                edited: true,
+                output_lines: 1
+            }
+        );
         assert_eq!(output_text(&session), "s\nnew\nt\n");
         assert_eq!(session.snapshot().comparison.regions.len(), 3);
         assert_consistent(&session);
     }
 
-
     #[test]
     fn edits_that_do_not_fit_their_target_region_are_rejected() {
         let dir = temp_dir("edit-bad-target");
         let mut session = merge_of(&dir, &["s", "x", "t"], &["s", "t"], &["s", "x", "t"]);
-        let cases = [(Some(1), 2..2, "new"), (Some(1), 0..0, "new\n"), (Some(1), 2..3, "new\n"), (Some(0), 0..0, "new\n"), (Some(9), 2..2, "new\n")];
+        let cases = [
+            (Some(1), 2..2, "new"),
+            (Some(1), 0..0, "new\n"),
+            (Some(1), 2..3, "new\n"),
+            (Some(0), 0..0, "new\n"),
+            (Some(9), 2..2, "new\n"),
+        ];
         for (region, range, text) in cases {
-            let result = session.edit_output(&OutputEdit { region, ..edit(&session, range.clone(), text) }, &BuiltinEngine);
+            let result = session.edit_output(
+                &OutputEdit {
+                    region,
+                    ..edit(&session, range.clone(), text)
+                },
+                &BuiltinEngine,
+            );
             assert!(matches!(result, Err(CoreError::InvalidEditTarget { .. })), "{region:?} {range:?} {text:?}");
         }
         assert_eq!(output_text(&session), "s\nt\n");
     }
-
 
     #[test]
     fn edit_across_regions_joins_them() {
@@ -1785,14 +1992,20 @@ cc
         assert_eq!(snapshot.comparison.regions.len(), 2);
         assert_eq!(snapshot.comparison.regions[0].hunks, [0..2, 0..2, 0..2]);
         assert_eq!(snapshot.comparison.regions[0].status, RegionStatus::Merge(MergeStatus::ChangedInB));
-        assert_eq!(snapshot.merge[0], RegionMerge { choice: Choice::Unresolved, edited: true, output_lines: 1 });
+        assert_eq!(
+            snapshot.merge[0],
+            RegionMerge {
+                choice: Choice::Unresolved,
+                edited: true,
+                output_lines: 1
+            }
+        );
         assert_consistent(&session);
         session.undo().unwrap();
         assert_eq!(session.snapshot().comparison.regions.len(), 3);
         assert_eq!(output_text(&session), "s\nb\nt\n");
         assert_consistent(&session);
     }
-
 
     #[test]
     fn typing_in_one_region_is_one_undo_step() {
@@ -1807,7 +2020,6 @@ cc
         assert!(!session.snapshot().merge[0].edited);
     }
 
-
     #[test]
     fn save_is_refused_while_conflicts_remain() {
         let dir = temp_dir("save-unresolved");
@@ -1820,17 +2032,22 @@ cc
         assert_eq!(fs::read_to_string(dir.join("out.txt")).unwrap(), "b\n");
     }
 
-
     #[derive(Debug, Clone)]
     enum Op {
         /// Replaces `len` bytes at `at` (both scaled into D) with `text`.
-        Edit { at: usize, len: usize, text: &'static str },
-        Choose { region: usize, documents: Vec<Document> },
+        Edit {
+            at: usize,
+            len: usize,
+            text: &'static str,
+        },
+        Choose {
+            region: usize,
+            documents: Vec<Document>,
+        },
         ChooseAll(Document),
         Undo,
         Redo,
     }
-
 
     fn op() -> impl proptest::strategy::Strategy<Value = Op> {
         use proptest::prelude::*;
@@ -1843,7 +2060,6 @@ cc
             Just(Op::Redo),
         ]
     }
-
 
     fn apply_op(session: &mut Session, op: &Op) {
         let base = session.revision();
@@ -1877,7 +2093,6 @@ cc
             }
         }
     }
-
 
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]

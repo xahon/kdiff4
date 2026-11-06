@@ -6,10 +6,8 @@ use fontique::{Collection, CollectionOptions};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, MetadataProvider};
 
-
 /// Key of the user's chosen font in the egui font definitions.
 const CHOSEN_FONT_KEY: &str = "kdiff4-monospace";
-
 
 /// An installed monospace font family, already loaded (system fonts are memory-mapped, so this is cheap).
 #[derive(Clone)]
@@ -17,7 +15,6 @@ pub struct MonospaceFamily {
     pub name: String,
     pub data: FontData,
 }
-
 
 /// The built-in fonts, with `chosen` put first for monospace text. Proportional text keeps the built-in font.
 pub fn font_definitions(chosen: Option<FontData>) -> FontDefinitions {
@@ -28,7 +25,6 @@ pub fn font_definitions(chosen: Option<FontData>) -> FontDefinitions {
     }
     definitions
 }
-
 
 /// Trusts the font's fixed-pitch flag, and otherwise compares the advances of narrow and wide characters, since some monospace fonts don't set the flag.
 pub fn is_monospace(bytes: &[u8], index: u32) -> bool {
@@ -51,15 +47,13 @@ pub fn is_monospace(bytes: &[u8], index: u32) -> bool {
     }
 }
 
-
 /// Every installed monospace family, sorted by name. Slow: reads every installed font, so run it off the UI thread.
 pub fn find_monospace_families() -> Vec<MonospaceFamily> {
-    let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
-    let names: Vec<String> = collection
-        .family_names()
-        .filter(|name| !name.starts_with('@'))
-        .map(str::to_string)
-        .collect();
+    let mut collection = Collection::new(CollectionOptions {
+        shared: false,
+        system_fonts: true,
+    });
+    let names: Vec<String> = collection.family_names().filter(|name| !name.starts_with('@')).map(str::to_string).collect();
     let mut families: Vec<MonospaceFamily> = names
         .into_iter()
         .filter_map(|name| load_from(&mut collection, &name).map(|data| MonospaceFamily { name, data }))
@@ -70,13 +64,14 @@ pub fn find_monospace_families() -> Vec<MonospaceFamily> {
     families
 }
 
-
 /// The regular face of an installed family, or `None` if it isn't installed.
 pub fn load_family(name: &str) -> Option<FontData> {
-    let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: true });
+    let mut collection = Collection::new(CollectionOptions {
+        shared: false,
+        system_fonts: true,
+    });
     load_from(&mut collection, name)
 }
-
 
 fn load_from(collection: &mut Collection, name: &str) -> Option<FontData> {
     let family = collection.family_by_name(name)?;
@@ -85,14 +80,12 @@ fn load_from(collection: &mut Collection, name: &str) -> Option<FontData> {
     Some(FontData::from_blob(Arc::new(blob), font.index()))
 }
 
-
 /// Runs `find_monospace_families` on a background thread, once.
 #[derive(Default)]
 pub struct FontScan {
     running: Option<JoinHandle<Vec<MonospaceFamily>>>,
     families: Option<Vec<MonospaceFamily>>,
 }
-
 
 impl FontScan {
     /// Starts the scan unless it has started already; `ctx` is repainted when it finishes.
@@ -101,13 +94,11 @@ impl FontScan {
             return;
         }
         let repaint_ctx = ctx.clone();
-        let spawned = std::thread::Builder::new()
-            .name("kdiff4-font-scan".to_string())
-            .spawn(move || {
-                let families = find_monospace_families();
-                repaint_ctx.request_repaint();
-                families
-            });
+        let spawned = std::thread::Builder::new().name("kdiff4-font-scan".to_string()).spawn(move || {
+            let families = find_monospace_families();
+            repaint_ctx.request_repaint();
+            families
+        });
         match spawned {
             Ok(handle) => self.running = Some(handle),
             Err(error) => {
@@ -116,7 +107,6 @@ impl FontScan {
             }
         }
     }
-
 
     /// The families once the scan has finished; `None` while it runs or before it starts.
     pub fn families(&mut self) -> Option<&[MonospaceFamily]> {
@@ -134,16 +124,13 @@ impl FontScan {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     fn builtin_font(name: &str) -> Arc<FontData> {
         FontDefinitions::default().font_data[name].clone()
     }
-
 
     #[test]
     fn builtin_monospace_font_is_detected() {
@@ -151,20 +138,17 @@ mod tests {
         assert!(is_monospace(hack.bytes(), hack.index));
     }
 
-
     #[test]
     fn builtin_proportional_font_is_rejected() {
         let ubuntu = builtin_font("Ubuntu-Light");
         assert!(!is_monospace(ubuntu.bytes(), ubuntu.index));
     }
 
-
     #[test]
     fn garbage_is_not_monospace() {
         assert!(!is_monospace(b"not a font", 0));
         assert!(!is_monospace(&[], 0));
     }
-
 
     #[test]
     fn chosen_font_goes_first_for_monospace_only() {
@@ -175,25 +159,19 @@ mod tests {
         assert!(definitions.font_data.contains_key(CHOSEN_FONT_KEY));
     }
 
-
     #[test]
     fn no_chosen_font_keeps_builtin_definitions() {
         assert_eq!(font_definitions(None), FontDefinitions::default());
     }
 
-
     #[test]
     fn installed_families_are_monospace_and_sorted() {
         let families = find_monospace_families();
-        let names: Vec<String> = families
-            .iter()
-            .map(|family| family.name.to_lowercase())
-            .collect();
+        let names: Vec<String> = families.iter().map(|family| family.name.to_lowercase()).collect();
         assert!(names.is_sorted());
         assert!(families.iter().all(|family| is_monospace(family.data.bytes(), family.data.index)));
         assert!(families.iter().all(|family| !family.name.starts_with('@')));
     }
-
 
     #[test]
     fn unknown_family_is_not_loaded() {

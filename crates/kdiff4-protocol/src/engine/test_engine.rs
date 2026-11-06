@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicBool;
 
 use super::*;
 
-
 /// Common leading and trailing lines become unchanged regions; everything between them is one region with lines paired by position.
 pub struct SimpleEngine {
     pub three_way: bool,
@@ -16,13 +15,16 @@ pub struct SimpleEngine {
     pub seen_alignments: Mutex<Vec<usize>>,
 }
 
-
 impl Default for SimpleEngine {
     fn default() -> SimpleEngine {
-        SimpleEngine { three_way: true, manual_alignment: false, drop_last_region: false, seen_alignments: Mutex::new(Vec::new()) }
+        SimpleEngine {
+            three_way: true,
+            manual_alignment: false,
+            drop_last_region: false,
+            seen_alignments: Mutex::new(Vec::new()),
+        }
     }
 }
-
 
 impl ComparisonEngine for SimpleEngine {
     fn capabilities(&self) -> EngineCapabilities {
@@ -39,7 +41,6 @@ impl ComparisonEngine for SimpleEngine {
         }
     }
 
-
     fn compare(&self, input: &CompareInput<'_>, job: &Job<'_>) -> Result<Comparison, EngineError> {
         job.check_canceled()?;
         self.seen_alignments.lock().expect("Test: poisoned").push(input.alignments.len());
@@ -48,12 +49,8 @@ impl ComparisonEngine for SimpleEngine {
         }
         let counts = input.line_counts();
         let shortest = counts.iter().min().cloned().unwrap_or(0);
-        let prefix = (0..shortest)
-            .take_while(|&line| same_token(input, |_| line))
-            .count();
-        let suffix = (0..shortest - prefix)
-            .take_while(|&offset| same_token(input, |count| count - 1 - offset))
-            .count();
+        let prefix = (0..shortest).take_while(|&line| same_token(input, |_| line)).count();
+        let suffix = (0..shortest - prefix).take_while(|&offset| same_token(input, |count| count - 1 - offset)).count();
         let spans: [Vec<Range<usize>>; 3] = [
             counts.iter().map(|_| 0..prefix).collect(),
             counts.iter().map(|count| prefix..count - suffix).collect(),
@@ -70,7 +67,6 @@ impl ComparisonEngine for SimpleEngine {
         }
         Ok(Comparison { regions })
     }
-
 
     fn classify(&self, hunks: &[SourceLines<'_>]) -> Result<RegionStatus, EngineError> {
         match hunks {
@@ -90,39 +86,29 @@ impl ComparisonEngine for SimpleEngine {
         }
     }
 
-
     fn char_diff(&self, _row: &[Option<&str>], _options: &ComparisonOptions) -> Result<CharDiff, EngineError> {
         Err(EngineError::Unsupported("character-level diffs".to_string()))
     }
 }
 
-
 impl SimpleEngine {
     fn region(&self, input: &CompareInput<'_>, hunks: Vec<Range<usize>>) -> Result<Region, EngineError> {
-        let lines: Vec<SourceLines<'_>> = input
-            .sources
-            .iter()
-            .zip(&hunks)
-            .map(|(source, hunk)| source.slice(hunk.clone()))
-            .collect();
+        let lines: Vec<SourceLines<'_>> = input.sources.iter().zip(&hunks).map(|(source, hunk)| source.slice(hunk.clone())).collect();
         let status = self.classify(&lines)?;
         let height = hunks.iter().map(|hunk| hunk.len()).max().unwrap_or(0);
         let rows = (0..height)
-            .map(|offset| Row { lines: hunks.iter().map(|hunk| (offset < hunk.len()).then(|| hunk.start + offset)).collect() })
+            .map(|offset| Row {
+                lines: hunks.iter().map(|hunk| (offset < hunk.len()).then(|| hunk.start + offset)).collect(),
+            })
             .collect();
         Ok(Region { hunks, status, rows })
     }
 }
 
-
 fn same_token(input: &CompareInput<'_>, line_of: impl Fn(usize) -> usize) -> bool {
     let base = input.sources[0].tokens[line_of(input.sources[0].len())];
-    input
-        .sources
-        .iter()
-        .all(|source| source.tokens[line_of(source.len())] == base)
+    input.sources.iter().all(|source| source.tokens[line_of(source.len())] == base)
 }
-
 
 fn hunk_change(a: &SourceLines<'_>, b: &SourceLines<'_>) -> HunkChange {
     if a.tokens == b.tokens {
@@ -136,14 +122,9 @@ fn hunk_change(a: &SourceLines<'_>, b: &SourceLines<'_>) -> HunkChange {
     }
 }
 
-
 fn without_whitespace(hunk: &SourceLines<'_>) -> Vec<String> {
-    hunk.lines
-        .iter()
-        .map(|line| line.split_whitespace().collect())
-        .collect()
+    hunk.lines.iter().map(|line| line.split_whitespace().collect()).collect()
 }
-
 
 /// Source documents with tokens interned across all of them.
 pub struct Fixture {
@@ -151,7 +132,6 @@ pub struct Fixture {
     pub tokens: Vec<Vec<Token>>,
     pub options: ComparisonOptions,
 }
-
 
 impl Fixture {
     pub fn new(documents: &[&[&'static str]]) -> Fixture {
@@ -165,25 +145,23 @@ impl Fixture {
             }
             tokens.push(document_tokens);
         }
-        let lines = documents
-            .iter()
-            .map(|document| document.to_vec())
-            .collect();
-        Fixture { lines, tokens, options: ComparisonOptions::default() }
+        let lines = documents.iter().map(|document| document.to_vec()).collect();
+        Fixture {
+            lines,
+            tokens,
+            options: ComparisonOptions::default(),
+        }
     }
-
 
     pub fn input<'a>(&'a self, alignments: &'a [ManualAlignment]) -> CompareInput<'a> {
-        let sources = self
-            .lines
-            .iter()
-            .zip(&self.tokens)
-            .map(|(lines, tokens)| SourceLines { lines, tokens })
-            .collect();
-        CompareInput { sources, alignments, options: &self.options }
+        let sources = self.lines.iter().zip(&self.tokens).map(|(lines, tokens)| SourceLines { lines, tokens }).collect();
+        CompareInput {
+            sources,
+            alignments,
+            options: &self.options,
+        }
     }
 }
-
 
 pub fn with_job<R>(run: impl FnOnce(&Job<'_>) -> R) -> R {
     let cancel = AtomicBool::new(false);

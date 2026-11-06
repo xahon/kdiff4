@@ -1,6 +1,5 @@
 use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
 
-
 /// How Windows 11 rounds the corners of the native window frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CornerPreference {
@@ -8,7 +7,6 @@ pub enum CornerPreference {
     Small,
     Round,
 }
-
 
 /// Windows offers only three roundings, so the configured radius picks the closest.
 pub fn corner_preference(radius: u8) -> CornerPreference {
@@ -18,7 +16,6 @@ pub fn corner_preference(radius: u8) -> CornerPreference {
         _ => CornerPreference::Round,
     }
 }
-
 
 /// Applies `preference` to the native frame of `window`. A no-op outside Windows; on Windows 10, which can't round frames, the call fails and is only logged.
 pub fn apply(window: &impl HasWindowHandle, preference: CornerPreference) {
@@ -32,7 +29,6 @@ pub fn apply(window: &impl HasWindowHandle, preference: CornerPreference) {
     platform::set_corner_preference(handle.as_raw(), preference);
 }
 
-
 #[cfg(windows)]
 mod platform {
     use std::ffi::c_void;
@@ -41,18 +37,15 @@ mod platform {
 
     use super::CornerPreference;
 
-
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWCP_DONOTROUND: u32 = 1;
     const DWMWCP_ROUND: u32 = 2;
     const DWMWCP_ROUNDSMALL: u32 = 3;
 
-
     #[link(name = "dwmapi")]
     unsafe extern "system" {
         fn DwmSetWindowAttribute(hwnd: *mut c_void, attribute: u32, value: *const c_void, size: u32) -> i32;
     }
-
 
     pub fn set_corner_preference(handle: RawWindowHandle, preference: CornerPreference) {
         let RawWindowHandle::Win32(handle) = handle else {
@@ -72,22 +65,18 @@ mod platform {
     }
 }
 
-
 #[cfg(not(windows))]
 mod platform {
     use eframe::egui_wgpu::wgpu::rwh::RawWindowHandle;
 
     use super::CornerPreference;
 
-
     pub fn set_corner_preference(_handle: RawWindowHandle, _preference: CornerPreference) {}
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn radius_maps_to_closest_windows_rounding() {

@@ -5,7 +5,6 @@ use kdiff4_protocol::engine::EngineError;
 use kdiff4_protocol::{Document, ErrorKind, ProtocolError, Revision};
 use thiserror::Error;
 
-
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("cannot read {}: {source}", path.display())]
@@ -42,7 +41,6 @@ pub enum CoreError {
     NeedsConfirmation,
 }
 
-
 impl From<CoreError> for ProtocolError {
     fn from(error: CoreError) -> Self {
         if let CoreError::Engine(engine_error) = &error {
@@ -50,7 +48,18 @@ impl From<CoreError> for ProtocolError {
         }
         let kind = match &error {
             CoreError::Read { .. } | CoreError::Write { .. } => ErrorKind::Io,
-            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::InvalidEditTarget { .. } | CoreError::UnresolvedConflicts { .. } | CoreError::InvalidMark { .. } => ErrorKind::InvalidRequest,
+            CoreError::Directory { .. }
+            | CoreError::NoSession
+            | CoreError::NoSuchDocument { .. }
+            | CoreError::NotAMerge
+            | CoreError::NoOutputPath
+            | CoreError::StaleRevision { .. }
+            | CoreError::InvalidRange { .. }
+            | CoreError::NoSuchRegion { .. }
+            | CoreError::InvalidChoice { .. }
+            | CoreError::InvalidEditTarget { .. }
+            | CoreError::UnresolvedConflicts { .. }
+            | CoreError::InvalidMark { .. } => ErrorKind::InvalidRequest,
             CoreError::NeedsConfirmation => ErrorKind::NeedsConfirmation,
             CoreError::Engine(_) => ErrorKind::Engine,
         };

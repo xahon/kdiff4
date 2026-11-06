@@ -14,7 +14,6 @@ use crate::scroll::{ScrollMotion, SmoothScroll};
 use crate::text_view::{self, Caret, CharRuns, MarginKind, MenuAction, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
-
 const SPLITTER_HEIGHT: f32 = 0.0;
 const MIN_MERGE_FRACTION: f32 = 0.1;
 const MAX_MERGE_FRACTION: f32 = 0.9;
@@ -24,14 +23,22 @@ const MOVED_BY_PANE: f32 = 0.5;
 /// Longest frame a scroll animation steps by, so a stall doesn't skip it.
 const MAX_SCROLL_STEP: f32 = 0.1;
 
-
 /// What the user did in the panes; the app turns these into caret moves and commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneAction {
     /// The mouse button went down in a pane; `void_row` is the row when it went down on a void. `extend` (Shift) extends the selection there.
-    Press { document: Document, position: Position, void_row: Option<usize>, extend: bool },
+    Press {
+        document: Document,
+        position: Position,
+        void_row: Option<usize>,
+        extend: bool,
+    },
     /// The button pressed in a pane is still held, over `position`.
-    Drag { document: Document, position: Position, void_row: Option<usize> },
+    Drag {
+        document: Document,
+        position: Position,
+        void_row: Option<usize>,
+    },
     SelectWord(Document, Position),
     SelectLine(Document, usize),
     /// A triple-click in the overview strip: the text of the line without its line break, so the caret stays on the line.
@@ -51,7 +58,6 @@ pub enum PaneAction {
     /// The overview strip took a press; Up and Down now switch between its lines.
     FocusStrip,
 }
-
 
 /// View state of the panes, kept by the app between frames.
 #[derive(Debug, Clone)]
@@ -82,21 +88,29 @@ pub struct PaneState {
     pub viewports: [Option<Viewport>; 4],
 }
 
-
 impl Default for PaneState {
     fn default() -> Self {
-        PaneState { caret: None, void_row: None, caret_hidden: false, strip_focused: false, jump: None, reveal_caret: false, page_rows: 1, merge_fraction: DEFAULT_MERGE_FRACTION, path_fields: Default::default(), source_scroll: SmoothScroll::default(), output_scroll: SmoothScroll::default(), viewports: [None; 4] }
+        PaneState {
+            caret: None,
+            void_row: None,
+            caret_hidden: false,
+            strip_focused: false,
+            jump: None,
+            reveal_caret: false,
+            page_rows: 1,
+            merge_fraction: DEFAULT_MERGE_FRACTION,
+            path_fields: Default::default(),
+            source_scroll: SmoothScroll::default(),
+            output_scroll: SmoothScroll::default(),
+            viewports: [None; 4],
+        }
     }
 }
 
-
 impl PaneState {
     pub fn caret_in(&self, document: Document) -> Option<Cursor> {
-        self.caret
-            .filter(|(caret_document, _)| *caret_document == document)
-            .map(|(_, cursor)| cursor)
+        self.caret.filter(|(caret_document, _)| *caret_document == document).map(|(_, cursor)| cursor)
     }
-
 
     /// Moves the caret and shows it; `void_row` is the row when it sits on a void.
     pub fn set_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
@@ -105,7 +119,6 @@ impl PaneState {
         self.caret_hidden = false;
     }
 
-
     /// Moves the caret to where a jump lands, without drawing it until it is moved again.
     pub fn set_hidden_caret(&mut self, document: Document, cursor: Cursor, void_row: Option<usize>) {
         self.set_caret(document, cursor, void_row);
@@ -113,15 +126,14 @@ impl PaneState {
         self.strip_focused = false;
     }
 
-
     /// The caret to draw in `document`'s pane, if it is there and not hidden.
     pub fn visible_caret(&self, document: Document) -> Option<Caret> {
-        self.caret_in(document)
-            .filter(|_| !self.caret_hidden)
-            .map(|cursor| Caret { cursor, void_row: self.void_row.clone() })
+        self.caret_in(document).filter(|_| !self.caret_hidden).map(|cursor| Caret {
+            cursor,
+            void_row: self.void_row.clone(),
+        })
     }
 }
-
 
 /// View settings the panes draw with.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,14 +152,12 @@ pub struct PaneOptions {
     pub alignment_color: Color32,
 }
 
-
 /// Which scroll offset a pane follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrollGroup {
     Sources,
     Output,
 }
-
 
 /// How a pane's vertical scrolling went in a frame: the offset it was given, where it ended up, the wheel scrolling over it and its largest offset.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -159,7 +169,6 @@ struct PaneScroll {
     max: f32,
 }
 
-
 /// Shows the overview strip; whatever it returns also gives the strip the keyboard.
 fn strip_actions(ui: &mut Ui, mirror: &Mirror, state: &PaneState, style: &ViewStyle<'_>, actions: &mut Vec<PaneAction>) {
     let shown = overview::show(ui, mirror, state, style);
@@ -169,12 +178,25 @@ fn strip_actions(ui: &mut Ui, mirror: &Mirror, state: &PaneState, style: &ViewSt
     }
 }
 
-
 /// Source panes side by side, then the overview strip when it is on; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = &theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, scroll_step_rows: options.scroll_step_rows, region_corner_radius: options.region_corner_radius, other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0, whitespace: options.whitespace.clone(), alignment_color: None };
-    let source_style = ViewStyle { alignment_color: Some(options.alignment_color), ..style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing }) };
+    let style = |margin: MarginKind| ViewStyle {
+        palette,
+        line_numbers: options.line_numbers,
+        margin,
+        current_region: mirror.current_region(),
+        current_region_color: options.current_region_color,
+        scroll_step_rows: options.scroll_step_rows,
+        region_corner_radius: options.region_corner_radius,
+        other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0,
+        whitespace: options.whitespace.clone(),
+        alignment_color: None,
+    };
+    let source_style = ViewStyle {
+        alignment_color: Some(options.alignment_color),
+        ..style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing })
+    };
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
     if let Some(region) = state.jump
@@ -192,14 +214,18 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         let strip_height = if options.overview_strip { overview::height(ui, strip_documents) } else { 0.0 };
         let strip_space = if options.overview_strip { strip_height + ui.spacing().item_spacing.y } else { 0.0 };
         if mirror.output().is_none() {
-            ui.allocate_ui(vec2(total.x, (total.y - strip_space).max(0.0)), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
+            ui.allocate_ui(vec2(total.x, (total.y - strip_space).max(0.0)), |ui| {
+                source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls)
+            });
             if options.overview_strip {
                 ui.allocate_ui(vec2(total.x, strip_height), |ui| strip_actions(ui, mirror, state, &source_style, &mut actions));
             }
         } else {
             let usable = (total.y - strip_space - SPLITTER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
             let merge_height = (usable * state.merge_fraction).round();
-            ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls));
+            ui.allocate_ui(vec2(total.x, usable - merge_height), |ui| {
+                source_columns(ui, &source_style, mirror, state, &mut actions, &mut scrolls)
+            });
             if options.overview_strip {
                 splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
                 ui.allocate_ui(vec2(total.x, strip_height), |ui| strip_actions(ui, mirror, state, &source_style, &mut actions));
@@ -219,7 +245,6 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     actions
 }
 
-
 /// Whether every pane of the session showed all rows of `region` in the last frame. A pane with no viewport yet does not.
 fn region_in_view_everywhere(mirror: &Mirror, viewports: &[Option<Viewport>; 4], region: usize) -> bool {
     scroll_groups(mirror)
@@ -228,7 +253,6 @@ fn region_in_view_everywhere(mirror: &Mirror, viewports: &[Option<Viewport>; 4],
         .all(|(document, rows)| region_in_view(Some(rows), viewports[document_index(document)], region))
 }
 
-
 /// The panes of the session with their rows, by the scroll offset they follow: the source panes, with D when it lines up with them, and D on its own otherwise. Panes without row maps can't be jumped in and are left out.
 fn scroll_groups(mirror: &Mirror) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>)> {
     let mut sources: Vec<(Document, Rows<'_>)> = mirror
@@ -236,9 +260,7 @@ fn scroll_groups(mirror: &Mirror) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>
         .iter()
         .filter_map(|text| mirror.rows(text.document.clone()).map(|rows| (text.document.clone(), Rows::Mapped(rows))))
         .collect();
-    let output = mirror
-        .output()
-        .map(|_| (Document::D, Rows::Mapped(mirror.output_rows())));
+    let output = mirror.output().map(|_| (Document::D, Rows::Mapped(mirror.output_rows())));
     let mut groups = Vec::new();
     match output {
         Some(output) if mirror.is_aligned() => sources.push(output),
@@ -249,7 +271,6 @@ fn scroll_groups(mirror: &Mirror) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>
     groups
 }
 
-
 /// Whether `viewport` shows every row of `region`. Without rows for it, there is nothing to scroll to.
 fn region_in_view(rows: Option<Rows<'_>>, viewport: Option<Viewport>, region: usize) -> bool {
     match rows.and_then(|rows| rows.region_rows(region)) {
@@ -258,7 +279,6 @@ fn region_in_view(rows: Option<Rows<'_>>, viewport: Option<Viewport>, region: us
     }
 }
 
-
 /// Where a jump scrolls one group of panes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum JumpTarget {
@@ -266,19 +286,18 @@ enum JumpTarget {
     NotReady,
     /// The group has no rows for the region.
     Nowhere,
-    Offset { offset: f32, max: f32 },
+    Offset {
+        offset: f32,
+        max: f32,
+    },
 }
-
 
 /// Starts scrolling every group of panes to `region`. Returns false, scrolling nothing, while a pane has not been laid out yet.
 fn start_jump(mirror: &Mirror, state: &mut PaneState, region: usize, options: &PaneOptions) -> bool {
     let targets: Vec<(ScrollGroup, JumpTarget)> = scroll_groups(mirror)
         .into_iter()
         .map(|(group, panes)| {
-            let panes: Vec<(Rows<'_>, Option<Viewport>)> = panes
-                .into_iter()
-                .map(|(document, rows)| (rows, state.viewports[document_index(document)]))
-                .collect();
+            let panes: Vec<(Rows<'_>, Option<Viewport>)> = panes.into_iter().map(|(document, rows)| (rows, state.viewports[document_index(document)])).collect();
             (group, jump_target(&panes, region, options.jump_context_rows))
         })
         .collect();
@@ -297,15 +316,12 @@ fn start_jump(mirror: &Mirror, state: &mut PaneState, region: usize, options: &P
     true
 }
 
-
 /// Where a group of panes that scroll together goes for a jump to `region`: as in its shortest pane, which every pane can follow.
 fn jump_target(panes: &[(Rows<'_>, Option<Viewport>)], region: usize, context: usize) -> JumpTarget {
     if panes.iter().any(|(_, viewport)| viewport.is_none()) {
         return JumpTarget::NotReady;
     }
-    let rows = panes
-        .iter()
-        .find_map(|(rows, _)| rows.region_rows(region));
+    let rows = panes.iter().find_map(|(rows, _)| rows.region_rows(region));
     let shortest = panes
         .iter()
         .filter_map(|(_, viewport)| *viewport)
@@ -316,12 +332,14 @@ fn jump_target(panes: &[(Rows<'_>, Option<Viewport>)], region: usize, context: u
                 .iter()
                 .filter_map(|(_, viewport)| viewport.map(|viewport| viewport.max_offset()))
                 .fold(f32::INFINITY, f32::min);
-            JumpTarget::Offset { offset: jump_offset(rows, context, viewport), max }
+            JumpTarget::Offset {
+                offset: jump_offset(rows, context, viewport),
+                max,
+            }
         }
         _ => JumpTarget::Nowhere,
     }
 }
-
 
 /// The scroll offset that shows `rows` with `context` rows above them. A pane too short for that keeps fewer, splitting the rows the region leaves free above and below it; a region taller than the pane starts at its top.
 pub fn jump_offset(rows: Range<usize>, context: usize, viewport: Viewport) -> f32 {
@@ -330,29 +348,16 @@ pub fn jump_offset(rows: Range<usize>, context: usize, viewport: Viewport) -> f3
     rows.start.saturating_sub(context) as f32 * viewport.row_height
 }
 
-
 /// After a frame: a pane of `group` that ended up away from its given offset, because the user dragged its scroll bar or it revealed the caret, takes the group's offset with it; otherwise the wheel over the group's panes scrolls them.
 fn follow_panes(scroll: &mut SmoothScroll, group: ScrollGroup, panes: &[PaneScroll], motion: ScrollMotion) {
-    let panes: Vec<&PaneScroll> = panes
-        .iter()
-        .filter(|pane| pane.group == group)
-        .collect();
+    let panes: Vec<&PaneScroll> = panes.iter().filter(|pane| pane.group == group).collect();
     if let Some(moved) = panes.iter().find(|pane| (pane.after - pane.given).abs() > MOVED_BY_PANE) {
         scroll.set(moved.after.clone());
         return;
     }
-    let stepped: f32 = panes
-        .iter()
-        .map(|pane| pane.wheel.stepped)
-        .sum();
-    let direct: f32 = panes
-        .iter()
-        .map(|pane| pane.wheel.direct)
-        .sum();
-    let max = panes
-        .iter()
-        .map(|pane| pane.max)
-        .fold(f32::INFINITY, f32::min);
+    let stepped: f32 = panes.iter().map(|pane| pane.wheel.stepped).sum();
+    let direct: f32 = panes.iter().map(|pane| pane.wheel.direct).sum();
+    let max = panes.iter().map(|pane| pane.max).fold(f32::INFINITY, f32::min);
     if stepped != 0.0 {
         scroll.scroll_by(stepped, max.clone(), motion);
     }
@@ -360,7 +365,6 @@ fn follow_panes(scroll: &mut SmoothScroll, group: ScrollGroup, panes: &[PaneScro
         scroll.shift(direct, max);
     }
 }
-
 
 /// Moves the border between the source panes and the merge pane. The share is kept, so the split scales with the window.
 fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, fraction: &mut f32) {
@@ -374,23 +378,43 @@ fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, frac
     }
 }
 
-
 /// The source panes all show the shared scroll offset. Each reports how its scrolling went to `scrolls`.
 fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
     let count = mirror.documents().len().max(1);
     let given = state.source_scroll.offset.clone();
     ui.columns(count, |columns| {
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
-            let lines = Lines { text: &text.text, ranges: &text.lines };
+            let lines = Lines {
+                text: &text.text,
+                ranges: &text.lines,
+            };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
-            let char_runs = mirror.char_diffs(text.document.clone()).map(|runs| CharRuns { document: text.document.clone(), lines: runs, sources: mirror.documents().len() });
+            let char_runs = mirror.char_diffs(text.document.clone()).map(|runs| CharRuns {
+                document: text.document.clone(),
+                lines: runs,
+                sources: mirror.documents().len(),
+            });
             let marks: Vec<AlignmentMark> = mirror.alignments().of(text.document.clone()).cloned().collect();
             let highest = mirror.alignments().marks.iter().map(|mark| mark.number).max().unwrap_or(0);
-            scrolls.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, PaneMarks { marks: &marks, highest }, ScrollGroup::Sources, given.clone(), state, actions));
+            scrolls.push(pane(
+                column,
+                style,
+                text.document.clone(),
+                text.label.as_deref(),
+                Some(&text.path),
+                false,
+                lines,
+                rows,
+                char_runs,
+                PaneMarks { marks: &marks, highest },
+                ScrollGroup::Sources,
+                given.clone(),
+                state,
+                actions,
+            ));
         }
     });
 }
-
 
 /// D scrolls on its own, unless it is lined up with the source panes: then it shares their offset.
 fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
@@ -401,13 +425,42 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
             false => (ScrollGroup::Output, state.output_scroll.offset.clone()),
         };
         let rows = Rows::Mapped(mirror.output_rows());
-        scrolls.push(pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, PaneMarks { marks: &[], highest: 0 }, group, given, state, actions));
+        scrolls.push(pane(
+            ui,
+            style,
+            Document::D,
+            None,
+            output.path.as_deref(),
+            output.modified,
+            lines,
+            rows,
+            None,
+            PaneMarks { marks: &[], highest: 0 },
+            group,
+            given,
+            state,
+            actions,
+        ));
     }
 }
 
-
 /// Shows one pane at the vertical scroll offset `given`, and reports how its scrolling went.
-fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, marks: PaneMarks<'_>, group: ScrollGroup, given: f32, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> PaneScroll {
+fn pane(
+    ui: &mut Ui,
+    style: &ViewStyle<'_>,
+    document: Document,
+    label: Option<&str>,
+    path: Option<&Path>,
+    modified: bool,
+    lines: Lines<'_>,
+    rows: Rows<'_>,
+    char_runs: Option<CharRuns<'_>>,
+    marks: PaneMarks<'_>,
+    group: ScrollGroup,
+    given: f32,
+    state: &mut PaneState,
+    actions: &mut Vec<PaneAction>,
+) -> PaneScroll {
     let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
@@ -416,14 +469,34 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
-                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), Some(given.clone()), style, marks);
+                    let response = text_view::show(
+                        ui,
+                        document.letter(),
+                        lines,
+                        rows,
+                        char_runs,
+                        caret,
+                        state.reveal_caret && caret.is_some(),
+                        Some(given.clone()),
+                        style,
+                        marks,
+                    );
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }
                     state.viewports[document_index(document.clone())] = Some(response.viewport);
                     match response.pointer {
-                        Some(PointerAction::Press { position, void_row, extend }) => actions.push(PaneAction::Press { document: document.clone(), position, void_row, extend }),
-                        Some(PointerAction::Drag { position, void_row }) => actions.push(PaneAction::Drag { document: document.clone(), position, void_row }),
+                        Some(PointerAction::Press { position, void_row, extend }) => actions.push(PaneAction::Press {
+                            document: document.clone(),
+                            position,
+                            void_row,
+                            extend,
+                        }),
+                        Some(PointerAction::Drag { position, void_row }) => actions.push(PaneAction::Drag {
+                            document: document.clone(),
+                            position,
+                            void_row,
+                        }),
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
@@ -436,7 +509,13 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                         Some(MenuAction::RenumberMark(number, to)) => actions.push(PaneAction::RenumberAlignmentMark(document.clone(), number, to)),
                         None => {}
                     }
-                    PaneScroll { group, given, after: response.viewport.offset, wheel: response.wheel, max: response.viewport.max_offset() }
+                    PaneScroll {
+                        group,
+                        given,
+                        after: response.viewport.offset,
+                        wheel: response.wheel,
+                        max: response.viewport.max_offset(),
+                    }
                 })
                 .inner
         })
@@ -444,7 +523,17 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
 }
 
 /// Letter, label, editable path and Browse button. The field shows the document's path unless the user is editing it.
-fn header(ui: &mut Ui, palette: &Palette, radius: u8, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, state: &mut PaneState, actions: &mut Vec<PaneAction>) {
+fn header(
+    ui: &mut Ui,
+    palette: &Palette,
+    radius: u8,
+    document: Document,
+    label: Option<&str>,
+    path: Option<&Path>,
+    modified: bool,
+    state: &mut PaneState,
+    actions: &mut Vec<PaneAction>,
+) {
     theme::pane_header_frame(palette, document.clone(), radius).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -477,7 +566,6 @@ fn header(ui: &mut Ui, palette: &Palette, radius: u8, document: Document, label:
     ui.painter().hline(ui.max_rect().x_range(), separator_y, Stroke::new(1.0, palette.pane_border));
 }
 
-
 fn document_index(document: Document) -> usize {
     match document {
         Document::A => 0,
@@ -487,7 +575,6 @@ fn document_index(document: Document) -> usize {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use kdiff4_protocol::engine::{Comparison, HunkChange, Region, RegionStatus, Row};
@@ -495,18 +582,19 @@ mod tests {
     use super::*;
     use crate::rows::RowMap;
 
-
     #[test]
     fn caret_belongs_to_one_document() {
         let mut state = PaneState::default();
         assert_eq!(state.caret_in(Document::A), None);
-        let cursor = Cursor { anchor: Position { line: 0, column: 0 }, head: Position { line: 2, column: 1 } };
+        let cursor = Cursor {
+            anchor: Position { line: 0, column: 0 },
+            head: Position { line: 2, column: 1 },
+        };
         state.caret = Some((Document::B, cursor));
         assert_eq!(state.caret_in(Document::B), Some(cursor));
         assert_eq!(state.caret_in(Document::A), None);
         assert_eq!(state.caret_in(Document::D), None);
     }
-
 
     #[test]
     fn jumps_hide_the_caret_until_it_moves() {
@@ -519,7 +607,6 @@ mod tests {
         assert_eq!(state.visible_caret(Document::A), Some(Caret { cursor, void_row: None }));
     }
 
-
     #[test]
     fn jumps_take_the_keyboard_back_from_the_strip() {
         let mut state = PaneState::default();
@@ -530,18 +617,40 @@ mod tests {
         assert!(!state.strip_focused);
     }
 
-
     #[test]
     fn region_counts_as_in_view_when_all_its_rows_are() {
         let comparison = Comparison {
             regions: vec![
-                Region { hunks: vec![0..10, 0..10], status: RegionStatus::Diff(HunkChange::Unchanged), rows: (0..10).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
-                Region { hunks: vec![10..12, 10..12], status: RegionStatus::Diff(HunkChange::Modified), rows: (10..12).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+                Region {
+                    hunks: vec![0..10, 0..10],
+                    status: RegionStatus::Diff(HunkChange::Unchanged),
+                    rows: (0..10)
+                        .map(|line| Row {
+                            lines: vec![Some(line), Some(line)],
+                        })
+                        .collect(),
+                },
+                Region {
+                    hunks: vec![10..12, 10..12],
+                    status: RegionStatus::Diff(HunkChange::Modified),
+                    rows: (10..12)
+                        .map(|line| Row {
+                            lines: vec![Some(line), Some(line)],
+                        })
+                        .collect(),
+                },
             ],
         };
         let map = RowMap::for_source(&comparison, &[], 0, 12, None);
         let rows = Some(Rows::Mapped(&map));
-        let viewport = |offset: f32| Some(Viewport { offset, height: 50.0, row_height: 10.0, content_height: 120.0 });
+        let viewport = |offset: f32| {
+            Some(Viewport {
+                offset,
+                height: 50.0,
+                row_height: 10.0,
+                content_height: 120.0,
+            })
+        };
         assert!(region_in_view(rows, viewport(80.0), 1));
         assert!(region_in_view(rows, viewport(70.0), 1));
         assert!(!region_in_view(rows, viewport(69.0), 1));
@@ -552,19 +661,27 @@ mod tests {
         assert!(region_in_view(None, None, 1));
     }
 
-
     const INSTANT: ScrollMotion = ScrollMotion { smooth: false, duration: 0.0 };
 
-
     fn scroll(group: ScrollGroup, given: f32, after: f32, wheel: f32) -> PaneScroll {
-        PaneScroll { group, given, after, wheel: Wheel { stepped: wheel, direct: 0.0 }, max: 500.0 }
+        PaneScroll {
+            group,
+            given,
+            after,
+            wheel: Wheel { stepped: wheel, direct: 0.0 },
+            max: 500.0,
+        }
     }
-
 
     #[test]
     fn shared_offset_follows_the_pane_that_moved() {
         let mut shared = SmoothScroll { offset: 10.0, target: 10.0 };
-        follow_panes(&mut shared, ScrollGroup::Sources, &[scroll(ScrollGroup::Sources, 10.0, 10.0, 0.0), scroll(ScrollGroup::Sources, 10.0, 42.0, 0.0)], INSTANT);
+        follow_panes(
+            &mut shared,
+            ScrollGroup::Sources,
+            &[scroll(ScrollGroup::Sources, 10.0, 10.0, 0.0), scroll(ScrollGroup::Sources, 10.0, 42.0, 0.0)],
+            INSTANT,
+        );
         assert_eq!(shared, SmoothScroll { offset: 42.0, target: 42.0 });
         follow_panes(&mut shared, ScrollGroup::Sources, &[scroll(ScrollGroup::Output, 42.0, 7.0, 0.0)], INSTANT);
         assert_eq!(shared.offset, 42.0);
@@ -572,11 +689,14 @@ mod tests {
         assert_eq!(shared.offset, 42.0);
     }
 
-
     #[test]
     fn wheel_over_any_pane_scrolls_its_group() {
         let mut shared = SmoothScroll::default();
-        let panes = [scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0), scroll(ScrollGroup::Sources, 0.0, 0.0, 45.0), scroll(ScrollGroup::Output, 0.0, 0.0, 900.0)];
+        let panes = [
+            scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0),
+            scroll(ScrollGroup::Sources, 0.0, 0.0, 45.0),
+            scroll(ScrollGroup::Output, 0.0, 0.0, 900.0),
+        ];
         follow_panes(&mut shared, ScrollGroup::Sources, &panes, INSTANT);
         assert_eq!(shared.offset, 45.0);
         let mut output = SmoothScroll::default();
@@ -584,31 +704,43 @@ mod tests {
         assert_eq!(output.offset, 500.0);
     }
 
-
     #[test]
     fn trackpad_scrolling_is_never_animated() {
         let smooth = ScrollMotion { smooth: true, duration: 0.2 };
         let mut shared = SmoothScroll::default();
-        let pane = PaneScroll { group: ScrollGroup::Sources, given: 0.0, after: 0.0, wheel: Wheel { stepped: 0.0, direct: 12.0 }, max: 500.0 };
+        let pane = PaneScroll {
+            group: ScrollGroup::Sources,
+            given: 0.0,
+            after: 0.0,
+            wheel: Wheel { stepped: 0.0, direct: 12.0 },
+            max: 500.0,
+        };
         follow_panes(&mut shared, ScrollGroup::Sources, &[pane], smooth);
         assert_eq!(shared, SmoothScroll { offset: 12.0, target: 12.0 });
     }
 
-
-
     #[test]
     fn jumps_keep_context_rows_above_when_the_pane_has_room() {
-        let tall = Viewport { offset: 0.0, height: 400.0, row_height: 10.0, content_height: 2000.0 };
+        let tall = Viewport {
+            offset: 0.0,
+            height: 400.0,
+            row_height: 10.0,
+            content_height: 2000.0,
+        };
         assert_eq!(jump_offset(30..32, 12, tall), 180.0);
         assert_eq!(jump_offset(5..6, 12, tall), 0.0);
         assert_eq!(jump_offset(30..32, 0, tall), 300.0);
     }
 
-
     // Regression: with 12 context rows a region landed below the bottom of a short merge pane, so the jump missed it.
     #[test]
     fn jumps_in_short_panes_keep_the_region_in_view() {
-        let short = Viewport { offset: 0.0, height: 80.0, row_height: 10.0, content_height: 2000.0 };
+        let short = Viewport {
+            offset: 0.0,
+            height: 80.0,
+            row_height: 10.0,
+            content_height: 2000.0,
+        };
         let offset = jump_offset(30..32, 12, short);
         assert_eq!(offset, 270.0);
         assert!(Viewport { offset, ..short }.shows(30..32));
@@ -618,30 +750,54 @@ mod tests {
         assert_eq!(jump_offset(30..30, 12, short), 270.0);
     }
 
-
     fn two_region_map() -> RowMap {
         let comparison = Comparison {
             regions: vec![
-                Region { hunks: vec![0..30, 0..30], status: RegionStatus::Diff(HunkChange::Unchanged), rows: (0..30).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
-                Region { hunks: vec![30..32, 30..32], status: RegionStatus::Diff(HunkChange::Modified), rows: (30..32).map(|line| Row { lines: vec![Some(line), Some(line)] }).collect() },
+                Region {
+                    hunks: vec![0..30, 0..30],
+                    status: RegionStatus::Diff(HunkChange::Unchanged),
+                    rows: (0..30)
+                        .map(|line| Row {
+                            lines: vec![Some(line), Some(line)],
+                        })
+                        .collect(),
+                },
+                Region {
+                    hunks: vec![30..32, 30..32],
+                    status: RegionStatus::Diff(HunkChange::Modified),
+                    rows: (30..32)
+                        .map(|line| Row {
+                            lines: vec![Some(line), Some(line)],
+                        })
+                        .collect(),
+                },
             ],
         };
         RowMap::for_source(&comparison, &[], 0, 32, None)
     }
 
-
     #[test]
     fn group_jumps_follow_their_shortest_pane() {
         let map = two_region_map();
-        let tall = Viewport { offset: 0.0, height: 400.0, row_height: 10.0, content_height: 320.0 };
-        let short = Viewport { height: 80.0, content_height: 320.0, ..tall };
-        assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(tall)), (Rows::Mapped(&map), Some(short))], 1, 12), JumpTarget::Offset { offset: 270.0, max: 0.0 });
+        let tall = Viewport {
+            offset: 0.0,
+            height: 400.0,
+            row_height: 10.0,
+            content_height: 320.0,
+        };
+        let short = Viewport {
+            height: 80.0,
+            content_height: 320.0,
+            ..tall
+        };
+        assert_eq!(
+            jump_target(&[(Rows::Mapped(&map), Some(tall)), (Rows::Mapped(&map), Some(short))], 1, 12),
+            JumpTarget::Offset { offset: 270.0, max: 0.0 }
+        );
         assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(short)), (Rows::Mapped(&map), None)], 1, 12), JumpTarget::NotReady);
         assert_eq!(jump_target(&[(Rows::Mapped(&map), Some(short))], 9, 12), JumpTarget::Nowhere);
         assert_eq!(jump_target(&[(Rows::PerLine(32), Some(short))], 1, 12), JumpTarget::Nowhere);
     }
-
-
 
     #[test]
     fn merge_pane_starts_at_half_height() {

@@ -4,8 +4,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kdiff4_protocol::engine::{ComparisonOptions, MergeStatus, RegionStatus};
-use kdiff4_protocol::{Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
-
+use kdiff4_protocol::{
+    Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response,
+    Revision, Snapshot, in_process,
+};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("kdiff4-core-host-{name}-{}", std::process::id()));
@@ -14,20 +16,17 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-
 fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, text).unwrap();
     path
 }
 
-
 fn start() -> (Client, JoinHandle<()>) {
     let (client, endpoint) = in_process();
     let host = kdiff4_core::spawn_host(endpoint).unwrap();
     (client, host)
 }
-
 
 fn next_message(client: &Client) -> HostMessage {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -40,14 +39,12 @@ fn next_message(client: &Client) -> HostMessage {
     }
 }
 
-
 fn expect_snapshot(client: &Client) -> Snapshot {
     match next_message(client) {
         HostMessage::Event(Event::Snapshot(snapshot)) => snapshot,
         other => panic!("expected a snapshot, got {other:?}"),
     }
 }
-
 
 fn expect_delta(client: &Client) -> Delta {
     match next_message(client) {
@@ -56,11 +53,9 @@ fn expect_delta(client: &Client) -> Delta {
     }
 }
 
-
 fn expect_ok(client: &Client, id: kdiff4_protocol::RequestId) {
     assert_eq!(next_message(client), HostMessage::Response(Response { id, result: Ok(()) }));
 }
-
 
 #[test]
 fn open_sends_snapshot_then_ok_response() {
@@ -71,13 +66,22 @@ fn open_sends_snapshot_then_ok_response() {
     let output = write(&dir, "out.txt", "merged\n");
     let (mut client, host) = start();
 
-    let labels = Labels { a: Some("Base".to_string()), b: None, c: None };
-    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), output: Some(output.clone()), labels })).unwrap();
+    let labels = Labels {
+        a: Some("Base".to_string()),
+        b: None,
+        c: None,
+    };
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            output: Some(output.clone()),
+            labels,
+        }))
+        .unwrap();
     let snapshot = expect_snapshot(&client);
-    let lines: Vec<(Document, &str)> = snapshot.documents
-        .iter()
-        .map(|text| (text.document.clone(), text.line(0)))
-        .collect();
+    let lines: Vec<(Document, &str)> = snapshot.documents.iter().map(|text| (text.document.clone(), text.line(0))).collect();
     assert_eq!(lines, [(Document::A, "base"), (Document::B, "left"), (Document::C, "right")]);
     assert_eq!(snapshot.documents[0].label.as_deref(), Some("Base"));
     let d = snapshot.output.unwrap();
@@ -93,14 +97,19 @@ fn open_sends_snapshot_then_ok_response() {
     host.join().unwrap();
 }
 
-
 #[test]
 fn open_missing_file_sends_error_response_only() {
     let dir = temp_dir("missing");
     let a = write(&dir, "a.txt", "a");
     let (mut client, host) = start();
 
-    let id = client.send(Command::Open(OpenFiles { a, b: dir.join("missing.txt"), ..OpenFiles::default() })).unwrap();
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b: dir.join("missing.txt"),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
     let HostMessage::Response(response) = next_message(&client) else {
         panic!("expected a response");
     };
@@ -113,7 +122,6 @@ fn open_missing_file_sends_error_response_only() {
     drop(client);
     host.join().unwrap();
 }
-
 
 #[test]
 fn commands_before_open_are_rejected() {
@@ -128,7 +136,6 @@ fn commands_before_open_are_rejected() {
     host.join().unwrap();
 }
 
-
 #[test]
 fn edit_save_and_reload_go_through_deltas() {
     let dir = temp_dir("round-trip");
@@ -137,7 +144,14 @@ fn edit_save_and_reload_go_through_deltas() {
     let c = write(&dir, "c.txt", "c\n");
     let (mut client, host) = start();
 
-    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), ..OpenFiles::default() })).unwrap();
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
     let snapshot = expect_snapshot(&client);
     expect_ok(&client, id);
     assert_eq!(snapshot.output.as_ref().unwrap().path, None);
@@ -151,7 +165,14 @@ fn edit_save_and_reload_go_through_deltas() {
     assert_eq!(response.id, id);
     assert!(response.result.unwrap_err().message.contains("unresolved"));
 
-    let id = client.send(Command::EditOutput(OutputEdit { base: snapshot.revision.clone(), range: 0..0, text: "x\n".to_string(), region: None })).unwrap();
+    let id = client
+        .send(Command::EditOutput(OutputEdit {
+            base: snapshot.revision.clone(),
+            range: 0..0,
+            text: "x\n".to_string(),
+            region: None,
+        }))
+        .unwrap();
     let delta = expect_delta(&client);
     assert_eq!((delta.revision.clone(), delta.cause.clone()), (Revision(2), Some(id.clone())));
     let Change::OutputEdited { range, text, modified, merge } = delta.change else {
@@ -161,7 +182,14 @@ fn edit_save_and_reload_go_through_deltas() {
     assert!(merge.merge[0].edited);
     expect_ok(&client, id);
 
-    let stale = client.send(Command::EditOutput(OutputEdit { base: Revision(1), range: 0..0, text: "y".to_string(), region: None })).unwrap();
+    let stale = client
+        .send(Command::EditOutput(OutputEdit {
+            base: Revision(1),
+            range: 0..0,
+            text: "y".to_string(),
+            region: None,
+        }))
+        .unwrap();
     let HostMessage::Response(response) = next_message(&client) else {
         panic!("expected a response");
     };
@@ -186,15 +214,31 @@ fn edit_save_and_reload_go_through_deltas() {
     assert!(!modified);
     expect_ok(&client, id);
 
-    let id = client.send(Command::SetChoice { base: Revision(5), region: 0, choice: Choice::Hunks(vec![Document::C]) }).unwrap();
+    let id = client
+        .send(Command::SetChoice {
+            base: Revision(5),
+            region: 0,
+            choice: Choice::Hunks(vec![Document::C]),
+        })
+        .unwrap();
     let delta = expect_delta(&client);
     assert!(matches!(delta.change, Change::OutputEdited { ref text, .. } if text == "c\n"));
     expect_ok(&client, id);
-    let id = client.send(Command::ChooseForUnresolved { base: Revision(6), document: Document::B }).unwrap();
+    let id = client
+        .send(Command::ChooseForUnresolved {
+            base: Revision(6),
+            document: Document::B,
+        })
+        .unwrap();
     expect_ok(&client, id);
 
     let new_b = write(&dir, "b2.txt", "b2\n");
-    let id = client.send(Command::LoadSource { document: Document::B, path: new_b }).unwrap();
+    let id = client
+        .send(Command::LoadSource {
+            document: Document::B,
+            path: new_b,
+        })
+        .unwrap();
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.revision, Revision(7));
     assert_eq!(snapshot.documents[1].line(0), "b2");
@@ -215,7 +259,6 @@ fn edit_save_and_reload_go_through_deltas() {
     host.join().unwrap();
 }
 
-
 #[test]
 fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     let dir = temp_dir("navigate");
@@ -223,18 +266,49 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     let b = write(&dir, "b.txt", "s\nb\n");
     let c = write(&dir, "c.txt", "s\nc\n");
     let (mut client, host) = start();
-    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), ..OpenFiles::default() })).unwrap();
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
     let snapshot = expect_snapshot(&client);
     expect_ok(&client, id);
 
-    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict, include_alignments: false }).unwrap();
-    assert_eq!(next_message(&client), HostMessage::Event(Event::CurrentRegion(CurrentRegion { revision: snapshot.revision.clone(), region: Some(1), cause: Some(id.clone()) })));
+    let id = client
+        .send(Command::Navigate {
+            base: snapshot.revision.clone(),
+            from: None,
+            to: Navigation::NextConflict,
+            include_alignments: false,
+        })
+        .unwrap();
+    assert_eq!(
+        next_message(&client),
+        HostMessage::Event(Event::CurrentRegion(CurrentRegion {
+            revision: snapshot.revision.clone(),
+            region: Some(1),
+            cause: Some(id.clone())
+        }))
+    );
     expect_ok(&client, id);
 
-    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict, include_alignments: false }).unwrap();
+    let id = client
+        .send(Command::Navigate {
+            base: snapshot.revision.clone(),
+            from: None,
+            to: Navigation::NextConflict,
+            include_alignments: false,
+        })
+        .unwrap();
     expect_ok(&client, id);
 
-    let options = ComparisonOptions { try_hard: true, ..ComparisonOptions::default() };
+    let options = ComparisonOptions {
+        try_hard: true,
+        ..ComparisonOptions::default()
+    };
     let id = client.send(Command::SetComparisonOptions(options.clone())).unwrap();
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.options, options);
@@ -245,7 +319,6 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     host.join().unwrap();
 }
 
-
 #[test]
 fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
     let dir = temp_dir("alignment");
@@ -253,36 +326,68 @@ fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
     let b = write(&dir, "b.txt", "Bar\nFoo\nBaz\n");
     let c = write(&dir, "c.txt", "Bar\nQux\nBaz\n");
     let (mut client, host) = start();
-    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), ..OpenFiles::default() })).unwrap();
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.alignments, Alignments::default());
     expect_ok(&client, id);
 
-    let marks = [(Document::A, 1..1), (Document::A, 1..1), (Document::B, 1..2), (Document::B, 2..2), (Document::C, 1..1), (Document::C, 1..2)];
+    let marks = [
+        (Document::A, 1..1),
+        (Document::A, 1..1),
+        (Document::B, 1..2),
+        (Document::B, 2..2),
+        (Document::C, 1..1),
+        (Document::C, 1..2),
+    ];
     for (index, (document, lines)) in marks.into_iter().enumerate() {
         let id = client.send(Command::MarkAlignment { document, lines }).unwrap();
         let delta = expect_delta(&client);
         assert_eq!(delta.revision, Revision(snapshot.revision.0 + index as u64 + 1));
         assert_eq!(delta.cause, Some(id.clone()));
-        let Change::AlignmentsChanged(alignments) = delta.change else { panic!("expected the marks") };
+        let Change::AlignmentsChanged(alignments) = delta.change else {
+            panic!("expected the marks")
+        };
         assert_eq!(alignments.marks.len(), index + 1);
         assert!(alignments.changed || index < 5);
         expect_ok(&client, id);
     }
 
-    let id = client.send(Command::SetChoice { base: Revision(snapshot.revision.0 + 6), region: 1, choice: Choice::Hunks(vec![Document::B]) }).unwrap();
+    let id = client
+        .send(Command::SetChoice {
+            base: Revision(snapshot.revision.0 + 6),
+            region: 1,
+            choice: Choice::Hunks(vec![Document::B]),
+        })
+        .unwrap();
     expect_delta(&client);
     expect_ok(&client, id);
 
     let id = client.send(Command::ApplyAlignments { confirmed: false }).unwrap();
-    let HostMessage::Response(response) = next_message(&client) else { panic!("expected a response") };
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response")
+    };
     assert_eq!(response.id, id);
     assert_eq!(response.result.unwrap_err().kind, ErrorKind::NeedsConfirmation);
 
     let id = client.send(Command::ApplyAlignments { confirmed: true }).unwrap();
     let snapshot = expect_snapshot(&client);
     let statuses: Vec<RegionStatus> = snapshot.comparison.regions.iter().map(|region| region.status.clone()).collect();
-    assert_eq!(statuses, [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB), RegionStatus::Merge(MergeStatus::ChangedInC), RegionStatus::Merge(MergeStatus::Unchanged)]);
+    assert_eq!(
+        statuses,
+        [
+            RegionStatus::Merge(MergeStatus::Unchanged),
+            RegionStatus::Merge(MergeStatus::ChangedInB),
+            RegionStatus::Merge(MergeStatus::ChangedInC),
+            RegionStatus::Merge(MergeStatus::Unchanged)
+        ]
+    );
     assert_eq!(snapshot.output.unwrap().text, "Bar\nFoo\nQux\nBaz\n");
     assert!(!snapshot.alignments.changed);
     assert!(snapshot.alignments.marks.iter().all(|mark| mark.status == MarkStatus::Applied));

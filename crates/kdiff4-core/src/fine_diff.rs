@@ -1,13 +1,10 @@
 use std::ops::Range;
 
-
 /// How many characters of the second line kdiff3 looks at for a match of one character of the first line.
 const MAX_SEARCH_RANGE: usize = 500;
 
-
 /// Runs of equal characters shorter than this are merged into the change next to them, unless the lines have a longer run.
 const SHORT_MATCH: usize = 4;
-
 
 /// `equal` characters that are the same in both lines, followed by `first` characters of the first line and `second` characters of the second line that are not.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,7 +13,6 @@ struct Step {
     first: usize,
     second: usize,
 }
-
 
 /// The changed columns of two lines, found the way kdiff3 does: per change, its columns in `first` and in `second`, either of which can be empty. The result depends on which line comes first. Unlike kdiff3, when the lines have a long match, a change starts at the first character that differs.
 /// kdiff3: diff.cpp, `DiffList::calcDiff` and `DiffList::optimize`
@@ -47,7 +43,6 @@ pub fn changed_ranges(first: &[char], second: &[char]) -> Vec<(Range<usize>, Ran
     ranges
 }
 
-
 /// Matching can pull a character that both lines have at the same place into the start of a change, like the space after the `=` of `let total = cost` and `let total = price * count`; this moves each change past such characters and drops a change that nothing is left of.
 fn skip_shared_starts(first: &[char], second: &[char], ranges: &mut Vec<(Range<usize>, Range<usize>)>) {
     for (first_columns, second_columns) in ranges.iter_mut() {
@@ -59,11 +54,9 @@ fn skip_shared_starts(first: &[char], second: &[char], ranges: &mut Vec<(Range<u
     ranges.retain(|(first_columns, second_columns)| !first_columns.is_empty() || !second_columns.is_empty());
 }
 
-
 fn has_long_match(steps: &[Step]) -> bool {
     steps.iter().any(|step| step.equal >= SHORT_MATCH)
 }
-
 
 /// Not an LCS: after each run of equal characters it takes the nearest plausible match, then goes back over equal characters that the match skipped. After `max_rounds` rounds it gives up and reports the lines as different as a whole.
 fn match_steps(first: &[char], second: &[char], max_rounds: usize) -> Vec<Step> {
@@ -85,16 +78,22 @@ fn match_steps(first: &[char], second: &[char], max_rounds: usize) -> Vec<Step> 
                 }
                 at_first += skip_first;
                 at_second += skip_second;
-                Step { equal, first: skip_first.clone(), second: skip_second.clone() }
+                Step {
+                    equal,
+                    first: skip_first.clone(),
+                    second: skip_second.clone(),
+                }
             }
             None => {
                 end_reached = true;
-                Step { equal, first: first.len() - at_first, second: second.len() - at_second }
+                Step {
+                    equal,
+                    first: first.len() - at_first,
+                    second: second.len() - at_second,
+                }
             }
         };
-        let matched_before = (1..=at_first.min(at_second))
-            .take_while(|back| first[at_first - back] == second[at_second - back])
-            .count();
+        let matched_before = (1..=at_first.min(at_second)).take_while(|back| first[at_first - back] == second[at_second - back]).count();
         if matched_before > 0 {
             let original = step.clone();
             let mut remaining = matched_before.clone();
@@ -127,9 +126,12 @@ fn match_steps(first: &[char], second: &[char], max_rounds: usize) -> Vec<Step> 
             return steps;
         }
     }
-    vec![Step { equal: 0, first: first.len(), second: second.len() }]
+    vec![Step {
+        equal: 0,
+        first: first.len(),
+        second: second.len(),
+    }]
 }
-
 
 /// How many characters to skip in `first` and in `second` to reach the match with the fewest skipped characters. A match counts when its characters are at most two columns apart, when the next characters match too, or when both are the last ones.
 fn nearest_match(first: &[char], second: &[char]) -> Option<(usize, usize)> {
@@ -153,13 +155,11 @@ fn nearest_match(first: &[char], second: &[char]) -> Option<(usize, usize)> {
     best
 }
 
-
 fn is_plausible(first: &[char], second: &[char], skip_first: usize, skip_second: usize) -> bool {
     let first_is_last = skip_first + 1 == first.len();
     let second_is_last = skip_second + 1 == second.len();
     skip_first.abs_diff(skip_second) < 3 || (first_is_last && second_is_last) || (!first_is_last && !second_is_last && first[skip_first + 1] == second[skip_second + 1])
 }
-
 
 /// A short match is merged into the change after it. Only the first step keeps its short match, and only when another match is long.
 /// kdiff3 1.14.70 inverts this and merges just the first step (a 2022 refactor, commit 92b1326e); kdiff3 0.9.98 and Kdiff4 do what is written here.
@@ -174,30 +174,25 @@ fn merge_short_matches(steps: &mut [Step]) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
 
-
     fn chars(text: &str) -> Vec<char> {
         text.chars().collect()
     }
 
-
     fn ranges(first: &str, second: &str) -> Vec<(Range<usize>, Range<usize>)> {
         changed_ranges(&chars(first), &chars(second))
     }
-
 
     #[test]
     fn equal_lines_have_no_changes() {
         assert_eq!(ranges("", ""), []);
         assert_eq!(ranges("let x = 1;", "let x = 1;"), []);
     }
-
 
     #[test]
     fn whole_lines_can_be_added_or_removed() {
@@ -206,24 +201,20 @@ mod tests {
         assert_eq!(ranges("abc", "xyz"), [(0..3, 0..3)]);
     }
 
-
     #[test]
     fn a_renamed_word_is_changed_as_a_whole() {
         assert_eq!(ranges("let total = price * quantity;", "let total = cost * quantity;"), [(12..17, 12..16)]);
     }
-
 
     #[test]
     fn short_matches_inside_a_change_are_merged_into_it() {
         assert_eq!(ranges("let total = price * count + tax;", "let total = price * quantity;"), [(20..31, 20..28)]);
     }
 
-
     #[test]
     fn a_change_does_not_start_with_the_space_both_lines_have_there() {
         assert_eq!(ranges("let total = cost * quantity;", "let total = price * count + tax;"), [(12..27, 12..31)]);
     }
-
 
     #[test]
     fn a_change_keeps_the_characters_both_lines_have_there_when_the_lines_have_no_long_match() {
@@ -231,13 +222,11 @@ mod tests {
         assert_eq!(ranges("ab cd", "ab ef"), [(0..5, 0..5)]);
     }
 
-
     #[test]
     fn the_direction_changes_which_characters_match() {
         assert_eq!(ranges("a a", "alpha a"), [(0..0, 0..4)]);
         assert_eq!(ranges("alpha a", "a a"), [(0..7, 0..3)]);
     }
-
 
     #[test]
     fn lines_without_a_long_match_are_changed_as_a_whole() {
@@ -245,34 +234,32 @@ mod tests {
         assert_eq!(ranges("abcdef", "abcdeg"), [(5..6, 5..6)]);
     }
 
-
     #[test]
     fn the_first_short_match_is_kept_when_another_match_is_long() {
         assert_eq!(ranges("abXdefgh", "abYdefgh"), [(2..3, 2..3)]);
     }
 
-
     #[test]
     fn gives_up_after_the_round_limit_with_the_lines_different_as_a_whole() {
         let (first, second) = (chars("let total = price * count + tax;"), chars("let total = price * quantity;"));
-        assert_eq!(match_steps(&first, &second, 1), [Step { equal: 0, first: first.len(), second: second.len() }]);
+        assert_eq!(
+            match_steps(&first, &second, 1),
+            [Step {
+                equal: 0,
+                first: first.len(),
+                second: second.len()
+            }]
+        );
         assert_ne!(match_steps(&first, &second, 100).len(), 1);
     }
-
 
     fn kept(chars: &[char], changes: Vec<Range<usize>>) -> Vec<char> {
         let mut changed = vec![false; chars.len()];
         for column in changes.into_iter().flatten() {
             changed[column] = true;
         }
-        chars
-            .iter()
-            .zip(changed)
-            .filter(|(_, changed)| !changed)
-            .map(|(&char, _)| char)
-            .collect()
+        chars.iter().zip(changed).filter(|(_, changed)| !changed).map(|(&char, _)| char).collect()
     }
-
 
     proptest! {
         #[test]
