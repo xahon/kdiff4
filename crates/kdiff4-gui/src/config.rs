@@ -25,8 +25,6 @@ pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
 pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
 pub const MAX_OTHER_REGION_BORDER_PERCENT: u8 = 100;
 pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
-/// Char-diff red text color: dark enough to keep 4.5:1 contrast on every light-theme background it is drawn on.
-pub const DEFAULT_CHAR_DIFF_RED: [u8; 3] = [0xB0, 0x00, 0x00];
 
 
 #[derive(Debug, Error)]
@@ -93,8 +91,6 @@ pub struct ViewConfig {
     pub region_corner_radius: u8,
     /// Opacity of the borders of the regions other than the jumped-to one, in percent.
     pub other_region_border_percent: u8,
-    /// RGB of the char-diff text and background of characters that differ from every other document.
-    pub char_diff_red: [u8; 3],
     pub theme: ThemeChoice,
     pub light_colors: ThemeColors,
     pub dark_colors: ThemeColors,
@@ -104,7 +100,7 @@ pub struct ViewConfig {
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, char_diff_red: DEFAULT_CHAR_DIFF_RED, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -159,6 +155,16 @@ pub struct ThemeColors {
     /// Text in the panes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane_text: Option<[u8; 3]>,
+    /// The color of document A: its pane header, gutter blocks and char-diff fill in the other panes. The fills are derived from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_a: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_b: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_c: Option<[u8; 3]>,
+    /// The red of text and gutter blocks that differ from every other document, and of the `<Merge Conflict>` marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub red: Option<[u8; 3]>,
 }
 
 
@@ -295,7 +301,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, char_diff_red: [9, 8, 7], theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]) }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None, document_a: Some([4, 5, 6]), document_b: None, document_c: Some([7, 8, 9]), red: Some([10, 11, 12]) }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]), document_a: None, document_b: Some([13, 14, 15]), document_c: None, red: None }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -366,7 +372,7 @@ show_overview_strip = false
         fs::write(&path, "[view]\ntheme = \"dark\"\n[view.dark_colors]\npane_text = [10, 20, 30]\n[view.whitespace]\ntabs = false\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.theme, ThemeChoice::Dark);
-        assert_eq!(view.dark_colors, ThemeColors { ui_text: None, pane_text: Some([10, 20, 30]) });
+        assert_eq!(view.dark_colors, ThemeColors { pane_text: Some([10, 20, 30]), ..ThemeColors::default() });
         assert_eq!(view.light_colors, ThemeColors::default());
         assert_eq!(view.whitespace, WhitespaceConfig { tabs: false, ..WhitespaceConfig::default() });
     }
@@ -385,6 +391,17 @@ show_overview_strip = false
         view.colors_mut(true).ui_text = Some([9, 9, 9]);
         assert_eq!(view.colors(true).ui_text, Some([9, 9, 9]));
         assert_eq!(view.colors(false).ui_text, None);
+    }
+
+
+    #[test]
+    fn document_and_red_colors_are_read_per_theme_and_the_old_char_diff_red_is_ignored() {
+        let dir = temp_dir("document-colors");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "[view]\nchar_diff_red = [1, 2, 3]\n[view.light_colors]\ndocument_a = [10, 20, 30]\nred = [200, 0, 0]\n[view.dark_colors]\ndocument_c = [40, 50, 60]\n").unwrap();
+        let view = load(&path).unwrap().view;
+        assert_eq!(view.light_colors, ThemeColors { document_a: Some([10, 20, 30]), red: Some([200, 0, 0]), ..ThemeColors::default() });
+        assert_eq!(view.dark_colors, ThemeColors { document_c: Some([40, 50, 60]), ..ThemeColors::default() });
     }
 
 

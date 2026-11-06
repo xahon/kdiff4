@@ -1,11 +1,10 @@
 use std::ops::Range;
 
-use egui::Color32;
 use kdiff4_protocol::Document;
-use kdiff4_protocol::engine::CharRun;
+use kdiff4_protocol::engine::{CharRun, HunkChange, MergeStatus, RegionStatus};
 
 
-/// How a run of characters is marked: red when its characters differ from every other document of the row, otherwise in the color of the one other document they differ from.
+/// How a run of characters or a gutter block is marked: red when it differs from every other document of the row, otherwise in the color of the one other document it differs from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharStyle {
     Red,
@@ -22,7 +21,7 @@ pub struct SameIn {
 }
 
 
-/// The char-diff rules: how a run of `document` is marked, from where its characters are the same. `None` is plain text. A document with no line in the row is never the same, and a 2-way diff follows the same rules with C missing.
+/// The char-diff rules: how a run of `document` is marked, from where its characters are the same. `None` is plain text. A document with no line in the row is never the same. A 2-way diff follows the same rules with C missing, so A is marked in B's color and B in A's, like kdiff3.
 pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
     if document == Document::D {
         return None;
@@ -39,27 +38,29 @@ pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
         .collect();
     match different.as_slice() {
         [] => None,
-        [other] if others.len() > 1 => Some(CharStyle::Document(other.clone())),
+        [other] => Some(CharStyle::Document(other.clone())),
         _ => Some(CharStyle::Red),
     }
 }
 
 
-/// The color red char-diff runs are drawn with; runs of a document are drawn with that document's color of the theme.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CharDiffLook {
-    pub red: Color32,
-}
-
-
-impl CharDiffLook {
-    /// The color of the text of a run: red text for red runs, `plain` for the runs of a document.
-    pub fn text_color(&self, style: &CharStyle, plain: Color32) -> Color32 {
-        match style {
-            CharStyle::Red => self.red.clone(),
-            CharStyle::Document(_) => plain,
-        }
-    }
+/// How the gutter block of a region is marked in the pane of `document`: by the char-diff rules, with the region's documents being the same where its status says they are. A 3-way merge region takes A as the base. `None` when the hunks are all equal. `sources` is how many source documents the comparison has.
+pub fn region_style(document: Document, status: &RegionStatus, sources: usize) -> Option<CharStyle> {
+    let (a_equals_b, a_equals_c, b_equals_c) = match status {
+        RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged) => (true, true, true),
+        RegionStatus::Merge(MergeStatus::ChangedInB) => (false, true, false),
+        RegionStatus::Merge(MergeStatus::ChangedInC) => (true, false, false),
+        RegionStatus::Merge(MergeStatus::ChangedAlike) => (false, false, true),
+        RegionStatus::Diff(_) | RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict) => (false, false, false),
+    };
+    let three_way = sources > 2;
+    let same = match document {
+        Document::A => SameIn { a: true, b: a_equals_b, c: three_way.then_some(a_equals_c) },
+        Document::B => SameIn { a: a_equals_b, b: true, c: three_way.then_some(b_equals_c) },
+        Document::C => SameIn { a: a_equals_c, b: b_equals_c, c: Some(true) },
+        Document::D => return None,
+    };
+    char_style(document, same)
 }
 
 
@@ -136,10 +137,10 @@ mod tests {
 
 
     #[test]
-    fn two_way_diffs_follow_the_same_rules_without_c() {
-        assert_eq!(char_style(Document::A, same(true, false, None)), RED);
+    fn two_way_diffs_are_marked_in_the_color_of_the_other_document() {
+        assert_eq!(char_style(Document::A, same(true, false, None)), FROM_B);
         assert_eq!(char_style(Document::A, same(true, true, None)), None);
-        assert_eq!(char_style(Document::B, same(false, true, None)), RED);
+        assert_eq!(char_style(Document::B, same(false, true, None)), FROM_A);
         assert_eq!(char_style(Document::B, same(true, true, None)), None);
     }
 
@@ -150,11 +151,70 @@ mod tests {
     }
 
 
+    const UNCHANGED_3: RegionStatus = RegionStatus::Merge(MergeStatus::Unchanged);
+    const IN_B: RegionStatus = RegionStatus::Merge(MergeStatus::ChangedInB);
+    const IN_C: RegionStatus = RegionStatus::Merge(MergeStatus::ChangedInC);
+    const ALIKE: RegionStatus = RegionStatus::Merge(MergeStatus::ChangedAlike);
+    const CONFLICT: RegionStatus = RegionStatus::Merge(MergeStatus::Conflict);
+    const WHITESPACE: RegionStatus = RegionStatus::Merge(MergeStatus::WhitespaceConflict);
+
+
     #[test]
-    fn only_red_text_has_its_own_color() {
-        let look = CharDiffLook { red: Color32::RED };
-        assert_eq!(look.text_color(&CharStyle::Red, Color32::BLACK), Color32::RED);
-        assert_eq!(look.text_color(&CharStyle::Document(Document::B), Color32::BLACK), Color32::BLACK);
+    fn regions_with_equal_hunks_have_no_style() {
+        for document in [Document::A, Document::B, Document::C] {
+            assert_eq!(region_style(document, &UNCHANGED_3, 3), None);
+        }
+        assert_eq!(region_style(Document::A, &RegionStatus::Diff(HunkChange::Unchanged), 2), None);
+        assert_eq!(region_style(Document::B, &RegionStatus::Diff(HunkChange::Unchanged), 2), None);
+    }
+
+
+    #[test]
+    fn region_changed_in_b_is_b_colored_in_a_and_c_and_red_in_b() {
+        assert_eq!(region_style(Document::A, &IN_B, 3), FROM_B);
+        assert_eq!(region_style(Document::B, &IN_B, 3), RED);
+        assert_eq!(region_style(Document::C, &IN_B, 3), FROM_B);
+    }
+
+
+    #[test]
+    fn region_changed_in_c_is_c_colored_in_a_and_b_and_red_in_c() {
+        assert_eq!(region_style(Document::A, &IN_C, 3), FROM_C);
+        assert_eq!(region_style(Document::B, &IN_C, 3), FROM_C);
+        assert_eq!(region_style(Document::C, &IN_C, 3), RED);
+    }
+
+
+    #[test]
+    fn region_changed_alike_in_b_and_c_is_a_colored_in_both_and_red_in_a() {
+        assert_eq!(region_style(Document::A, &ALIKE, 3), RED);
+        assert_eq!(region_style(Document::B, &ALIKE, 3), FROM_A);
+        assert_eq!(region_style(Document::C, &ALIKE, 3), FROM_A);
+    }
+
+
+    #[test]
+    fn conflicting_regions_are_red_everywhere() {
+        for status in [CONFLICT, WHITESPACE] {
+            for document in [Document::A, Document::B, Document::C] {
+                assert_eq!(region_style(document, &status, 3), RED);
+            }
+        }
+    }
+
+
+    #[test]
+    fn two_way_regions_are_marked_in_the_color_of_the_other_document() {
+        for change in [HunkChange::Added, HunkChange::Removed, HunkChange::Modified] {
+            assert_eq!(region_style(Document::A, &RegionStatus::Diff(change), 2), FROM_B);
+            assert_eq!(region_style(Document::B, &RegionStatus::Diff(change), 2), FROM_A);
+        }
+    }
+
+
+    #[test]
+    fn output_regions_have_no_style() {
+        assert_eq!(region_style(Document::D, &CONFLICT, 3), None);
     }
 
 
@@ -192,7 +252,7 @@ mod tests {
     #[test]
     fn segments_leave_plain_runs_out() {
         let runs = [run(0..2, &[true, true]), run(2..3, &[true, false]), run(3..5, &[true, true])];
-        assert_eq!(segments(Document::A, &runs, 2), [(2..3, CharStyle::Red)]);
+        assert_eq!(segments(Document::A, &runs, 2), [(2..3, CharStyle::Document(Document::B))]);
     }
 
 

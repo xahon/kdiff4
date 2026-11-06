@@ -204,7 +204,7 @@ fn paint_lines(ui: &mut Ui, lenses: &[Lens<'_>], sources: usize, state: &PaneSta
         .map(|lens| match lens.line() {
             Some(line) => {
                 let segments = lens.char_runs.map(|runs| char_diff::segments(lens.document.clone(), runs.line(line), sources.clone())).unwrap_or_default();
-                let galley = text_view::layout_styled(ui, lens.lines.line(line), &segments, font_id, palette, &style.char_diff);
+                let galley = text_view::layout_styled(ui, lens.lines.line(line), &segments, font_id, palette);
                 let terminator = text_view::shown_terminator(lens.lines, line, &style.whitespace);
                 (Some(galley), segments, terminator)
             }
@@ -226,7 +226,7 @@ fn paint_lines(ui: &mut Ui, lenses: &[Lens<'_>], sources: usize, state: &PaneSta
         let void_row = state.void_row.filter(|row| lens.rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none()));
         let (Some(line), Some(galley)) = (lens.line(), galley) else {
             if lens.pane_row().is_some_and(|pane_row| pane_row.conflict_marker) {
-                painter.text(pos2(text_rect.left(), text_rect.center().y), Align2::LEFT_CENTER, text_view::CONFLICT_MARKER, font_id.clone(), palette.conflict_marker);
+                painter.text(pos2(text_rect.left(), text_rect.center().y), Align2::LEFT_CENTER, text_view::CONFLICT_MARKER, font_id.clone(), palette.red());
             } else {
                 text_view::paint_void(&painter, text_rect, palette);
             }
@@ -237,7 +237,7 @@ fn paint_lines(ui: &mut Ui, lenses: &[Lens<'_>], sources: usize, state: &PaneSta
             continue;
         };
         let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
-        text_view::paint_char_backgrounds(&painter, segments, galley, text_origin.x, rect, palette, &style.char_diff);
+        text_view::paint_char_backgrounds(&painter, segments, galley, text_origin.x, rect, palette);
         if let Some(cursor) = caret {
             text_view::paint_selection(&painter, lens.lines, line, text_rect, galley, cursor, row_height, palette);
         }
@@ -354,7 +354,6 @@ mod tests {
     use egui_kittest::Harness;
 
     use super::*;
-    use crate::char_diff::CharDiffLook;
     use crate::config::WhitespaceConfig;
     use crate::rows::{self, RowMap};
     use crate::text_view::MarginKind;
@@ -548,7 +547,6 @@ mod tests {
     }
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED };
 
 
     /// The strip in a test harness, and what its frames did: the actions it returned, the rect it took, the height `height` reserves for it, and its row height and line count.
@@ -570,7 +568,7 @@ mod tests {
             .with_step_dt(0.01)
             .build_ui_state(
                 |ui, test: &mut StripTest| {
-                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, char_diff: LOOK, whitespace: WhitespaceConfig::default() };
+                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, whitespace: WhitespaceConfig::default() };
                     let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
                     test.actions.extend(shown.inner);
                     test.rect = shown.response.rect;

@@ -72,6 +72,8 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 
 - Whitespace markers have one toggle per kind (spaces, tabs, line feeds, carriage returns, other Unicode spaces) under a master switch, and line ends are marked per line from the line's own terminator. kdiff3 has two switches, for whitespace in the text and in the differences.
 - The theme can be light, dark or follow the system, and the UI text and pane text colors can be overridden per theme. Light text is black by default.
+- The colors of A, B and C and the red of what differs from every other document are configurable per theme, and gutters, char diffs, pane headers, the overview strip and the `<Merge Conflict>` marker all draw with them. kdiff3 has one color per file and a conflict color too, shared by its gutter and char diffs, but a single set, with no themes.
+- A gutter marks a whole region with one bordered block, colored by the same rules as char diffs: the color of the one other file the region differs from, red when it differs from all. kdiff3 draws a small square per line, and hatches it when only white space differs; Kdiff4 doesn't hatch.
 
 ### Open dialog
 

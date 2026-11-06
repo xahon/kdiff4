@@ -3,6 +3,7 @@ use std::ops::Range;
 use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, Region, RegionStatus};
 use kdiff4_protocol::{Choice, Document, RegionMerge};
 
+use crate::char_diff::{self, CharStyle};
 use crate::editing::Position;
 
 
@@ -14,11 +15,12 @@ pub enum Mark {
 }
 
 
-/// One gutter block of a pane: the rows of a region that differs. `index` tells neighboring blocks apart; `origin` is the source document the block is colored with, or `None` in D, whose rows carry their own origins.
+/// One gutter block of a pane: the rows of a region that differs. `index` tells neighboring blocks apart; `origin` is the source document the block belongs to, or `None` in D, whose rows carry their own origins. `style` is how a source pane marks the block, by the char-diff rules: in the color of the one other document its region differs from, or red when it differs from all of them; `None` in D, and in a source pane when the hunks are all equal (a hand-edited region), where the block keeps its own document's color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Block {
     pub index: usize,
     pub origin: Option<Mark>,
+    pub style: Option<CharStyle>,
 }
 
 
@@ -53,7 +55,9 @@ impl RowMap {
         for (index, region) in comparison.regions.iter().enumerate() {
             region_starts.push(rows.len());
             let boxed = stands_out(region, merge.get(index));
-            let block = boxed.then(|| Block { index: index.clone(), origin: Document::ALL.get(document_index).cloned().map(Mark::Source) });
+            let document = Document::ALL.get(document_index).cloned();
+            let style = document.and_then(|document| char_diff::region_style(document, &region.status, region.hunks.len()));
+            let block = boxed.then(|| Block { index: index.clone(), origin: document.map(Mark::Source), style });
             for row in &region.rows {
                 let line = row.lines.get(document_index).cloned().flatten();
                 if let Some(line) = line {
@@ -81,7 +85,7 @@ impl RowMap {
         for (index, state) in merge.iter().enumerate() {
             region_starts.push(rows.len());
             let boxed = regions.get(index).is_some_and(|region| stands_out(region, Some(state)));
-            let block = boxed.then(|| Block { index: index.clone(), origin: None });
+            let block = boxed.then(|| Block { index: index.clone(), origin: None, style: None });
             if state.output_lines == 0 && (boxed || state.is_unresolved()) {
                 rows.push(PaneRow { region: Some(index), boxed, block, conflict_marker: state.is_unresolved(), ..PaneRow::default() });
             }
@@ -361,17 +365,22 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.row(0), Some(line(0, 0)));
-        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: source_block(1, Document::A), ..void(1) }));
+        assert_eq!(rows.row(1), Some(PaneRow { boxed: true, block: source_block(1, Document::A, FROM_B), ..void(1) }));
         assert_eq!(rows.row(3), Some(line(1, 2)));
         assert_eq!(rows.row(4), None);
         assert_eq!(rows.row_of_line(1), 3);
         let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None);
-        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { boxed: true, block: source_block(1, Document::B), ..line(2, 1) }));
+        assert_eq!(Rows::Mapped(&map).row(2), Some(PaneRow { boxed: true, block: source_block(1, Document::B, FROM_A), ..line(2, 1) }));
     }
 
 
-    fn source_block(region: usize, document: Document) -> Option<Block> {
-        Some(Block { index: region, origin: Some(Mark::Source(document)) })
+    const FROM_A: Option<CharStyle> = Some(CharStyle::Document(Document::A));
+    const FROM_B: Option<CharStyle> = Some(CharStyle::Document(Document::B));
+    const RED: Option<CharStyle> = Some(CharStyle::Red);
+
+
+    fn source_block(region: usize, document: Document, style: Option<CharStyle>) -> Option<Block> {
+        Some(Block { index: region, origin: Some(Mark::Source(document)), style })
     }
 
 
@@ -379,7 +388,7 @@ mod tests {
     fn unchanged_regions_have_no_gutter() {
         let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None);
         let blocks: Vec<Option<Block>> = (0..4).map(|row| Rows::Mapped(&map).block_of_row(row)).collect();
-        assert_eq!(blocks, [None, source_block(1, Document::B), source_block(1, Document::B), None]);
+        assert_eq!(blocks, [None, source_block(1, Document::B, FROM_A), source_block(1, Document::B, FROM_A), None]);
         let merge = RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 1 };
         let output = RowMap::for_output(&[merge], &two_way_comparison().regions[..1], 1, None);
         assert_eq!(Rows::Mapped(&output).block_of_row(0), None);
@@ -409,7 +418,7 @@ mod tests {
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows.row(1), Some(void(0)));
-        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, block: source_block(1, Document::A), ..void(1) }));
+        assert_eq!(rows.row(3), Some(PaneRow { boxed: true, block: source_block(1, Document::A, FROM_B), ..void(1) }));
         assert_eq!(rows.region_rows(1), Some(2..4));
         assert_eq!(rows.row_of_line(1), 4);
         assert_eq!(rows.region_start(2), Some(4));
@@ -530,7 +539,7 @@ mod tests {
 
 
     fn output_block(region: usize) -> Option<Block> {
-        Some(Block { index: region, origin: None })
+        Some(Block { index: region, origin: None, style: None })
     }
 
 
@@ -603,7 +612,7 @@ mod tests {
     fn hand_edited_stable_lines_get_a_block_in_every_pane() {
         let (comparison, merge) = split_stable_line();
         let source = RowMap::for_source(&comparison, &merge, 1, 3, None);
-        let block = Some(Block { index: 1, origin: Some(Mark::Source(Document::B)) });
+        let block = source_block(1, Document::B, None);
         assert_eq!(Rows::Mapped(&source).row(0), Some(line(0, 0)));
         assert_eq!(Rows::Mapped(&source).row(1), Some(PaneRow { boxed: true, block, ..line(1, 1) }));
         assert_eq!(Rows::Mapped(&source).row(2), Some(line(2, 2)));
@@ -622,6 +631,27 @@ mod tests {
         let output = RowMap::for_output(&merge, &comparison.regions, 2, None);
         assert_eq!(Rows::Mapped(&output).row(1), Some(PaneRow { boxed: true, block: output_block(1), ..void(1) }));
         assert_eq!(Rows::Mapped(&output).row(2), Some(line(1, 2)));
+    }
+
+
+    fn styles_of_single_row_region(status: MergeStatus) -> Vec<Option<CharStyle>> {
+        let comparison = Comparison { regions: vec![region(&[0..1, 0..1, 0..1], RegionStatus::Merge(status), &[&[Some(0), Some(0), Some(0)]])] };
+        (0..3)
+            .map(|document_index| {
+                let map = RowMap::for_source(&comparison, &[], document_index, 1, None);
+                Rows::Mapped(&map).block_of_row(0).and_then(|block| block.style)
+            })
+            .collect()
+    }
+
+
+    #[test]
+    fn source_blocks_are_marked_in_the_color_of_the_documents_their_region_differs_from() {
+        assert_eq!(styles_of_single_row_region(MergeStatus::ChangedInB), [FROM_B, RED, FROM_B]);
+        assert_eq!(styles_of_single_row_region(MergeStatus::ChangedInC), [Some(CharStyle::Document(Document::C)), Some(CharStyle::Document(Document::C)), RED]);
+        assert_eq!(styles_of_single_row_region(MergeStatus::ChangedAlike), [RED, FROM_A, FROM_A]);
+        assert_eq!(styles_of_single_row_region(MergeStatus::Conflict), [RED, RED, RED]);
+        assert_eq!(styles_of_single_row_region(MergeStatus::WhitespaceConflict), [RED, RED, RED]);
     }
 
 

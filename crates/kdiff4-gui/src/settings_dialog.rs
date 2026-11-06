@@ -1,4 +1,5 @@
 use egui::{Button, Checkbox, Color32, ComboBox, DragValue, Label, RichText, ScrollArea, Theme, Ui};
+use kdiff4_protocol::Document;
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
 use crate::config::{MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES, MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig};
@@ -226,11 +227,29 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "char_diff_colors", "Character diff: Colors", |ui| {
-            ui.label("Red:");
-            ui.color_edit_button_srgb(&mut self.draft.char_diff_red).on_hover_text("Text that differs from every other document. Text that differs from just one other document is drawn on the color of that document.");
+        let dark = theme == Theme::Dark;
+        let defaults = theme::palette(theme);
+        section(ui, "document_colors", "Documents: Colors", |ui| {
+            let colors = self.draft.colors_mut(dark);
+            let name = theme_name(theme);
+            ui.label("A:");
+            color_override(ui, &mut colors.document_a, defaults.colors(Document::A).gutter_border, &format!("The color of A in the {name} theme: its pane header, and the gutter blocks and characters of B and C that differ from A only."));
+            ui.end_row();
+
+            ui.label("B:");
+            color_override(ui, &mut colors.document_b, defaults.colors(Document::B).gutter_border, &format!("The color of B in the {name} theme: its pane header, and the gutter blocks and characters of A and C that differ from B only."));
+            ui.end_row();
+
+            ui.label("C:");
+            color_override(ui, &mut colors.document_c, defaults.colors(Document::C).gutter_border, &format!("The color of C in the {name} theme: its pane header, and the gutter blocks and characters of A and B that differ from C only."));
+            ui.end_row();
+
+            ui.label("Differs from all:");
+            color_override(ui, &mut colors.red, defaults.red(), &format!("The color in the {name} theme of gutter blocks and characters that differ from every other document, and of the <Merge Conflict> marker."));
             ui.end_row();
         });
+        ui.add_space(4.0);
+        ui.label(RichText::new(format!("Colors are kept per theme; these are the {} theme's. Fills and borders are derived from them.", theme_name(theme))).weak());
     }
 
 
@@ -467,11 +486,15 @@ mod tests {
     fn reset_restores_theme_colors_and_whitespace() {
         let mut view = ViewConfig { theme: ThemeChoice::Dark, ..ViewConfig::default() };
         view.dark_colors.pane_text = Some([1, 1, 1]);
+        view.dark_colors.document_b = Some([2, 2, 2]);
+        view.light_colors.red = Some([3, 3, 3]);
         view.whitespace.render = false;
         let mut dialog = SettingsDialog::new(&view, None);
         dialog.reset_to_defaults();
         assert_eq!(dialog.draft().theme, ThemeChoice::Light);
         assert_eq!(dialog.draft().dark_colors.pane_text, None);
+        assert_eq!(dialog.draft().dark_colors.document_b, None);
+        assert_eq!(dialog.draft().light_colors.red, None);
         assert!(dialog.draft().whitespace.render);
     }
 

@@ -393,6 +393,7 @@ impl Mirror {
 mod tests {
     use kdiff4_protocol::engine::{EngineCapabilities, Region, Row};
 
+    use crate::char_diff::CharStyle;
     use crate::rows::{Block, Mark, PaneRow, Rows};
     use kdiff4_protocol::{EolStyle, OutputDocument};
 
@@ -440,7 +441,7 @@ mod tests {
         assert_eq!(mirror.unresolved_count(), 1);
         assert_eq!(mirror.difference_summary(), "1 difference; 1 unresolved");
         let rows = Rows::Mapped(mirror.output_rows());
-        assert_eq!(rows.row(0), Some(PaneRow { region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None }), conflict_marker: true, ..PaneRow::default() }));
+        assert_eq!(rows.row(0), Some(PaneRow { region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None, style: None }), conflict_marker: true, ..PaneRow::default() }));
         assert_eq!(rows.row(1), Some(PaneRow { line: Some(0), ..PaneRow::default() }));
     }
 
@@ -494,7 +495,7 @@ mod tests {
         assert_eq!(mirror.output().unwrap().text, "b\n");
         assert_eq!(mirror.unresolved_count(), 0);
         assert_eq!(mirror.difference_summary(), "1 difference; nothing unresolved");
-        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None }), origin: Some(Mark::Source(Document::B)), ..PaneRow::default() }));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None, style: None }), origin: Some(Mark::Source(Document::B)), ..PaneRow::default() }));
         assert_eq!(Rows::Mapped(mirror.output_rows()).region_of_row(1), None);
     }
 
@@ -564,7 +565,7 @@ mod tests {
         let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() };
         let mirror = Mirror::from_snapshot(snapshot, false);
         assert_eq!(mirror.comparison(), &comparison(&[RegionStatus::Diff(HunkChange::Modified)]));
-        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: Some(Mark::Source(Document::A)) }), ..PaneRow::default() }));
+        assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: Some(Mark::Source(Document::A)), style: Some(CharStyle::Document(Document::B)) }), ..PaneRow::default() }));
         assert!(mirror.rows(Document::C).is_none());
     }
 
@@ -590,7 +591,7 @@ mod tests {
         assert_eq!(mirror.empty_region_at_row(0), None, "an unresolved conflict's placeholder");
         mirror.merge[0] = RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 0 };
         mirror.refresh_output_rows();
-        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None }), ..PaneRow::default() }));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).row(0), Some(PaneRow { region: Some(0), boxed: true, block: Some(Block { index: 0, origin: None, style: None }), ..PaneRow::default() }));
         assert_eq!(mirror.empty_region_at_row(0), Some(0));
         assert_eq!(mirror.empty_region_at_row(1), None);
         let command = mirror.apply_local_edit(&Edit { range: 0..0, text: "x\n".to_string() }, Some(0)).unwrap();

@@ -1,15 +1,40 @@
 use egui::{Color32, CornerRadius, FontId, Frame, Id, Margin, Stroke, Style, TextStyle, Theme, ThemePreference, Ui};
 use kdiff4_protocol::Document;
 
+use crate::char_diff::CharStyle;
 use crate::config::{ThemeChoice, ThemeColors, ViewConfig};
 
 
-/// The colors of one document: its pane header, which also fills its gutter blocks, and the block border; `gutter_active` fills the blocks of the current region.
+/// Share of a document's color that its light fill (pane header, gutter blocks) keeps when blended into the pane background, in percent.
+const FILL_SHARE: u16 = 20;
+/// The same for the stronger fill of active gutter blocks and char-diff backgrounds.
+const ACTIVE_SHARE: u16 = 50;
+
+
+/// The colors of one document: its pane header, which also fills its gutter blocks, and the block border; `gutter_active` fills the blocks of the current region and the char-diff backgrounds. The red of a character or block that differs from every other document has a set too. All three come from one color, `gutter_border`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DocumentColors {
     pub header: Color32,
     pub gutter_border: Color32,
     pub gutter_active: Color32,
+}
+
+
+impl DocumentColors {
+    /// The set of the one color `base`, which is the border; the fills are `base` blended into `background`.
+    pub const fn derive(base: Color32, background: Color32) -> DocumentColors {
+        DocumentColors { header: blend(base, background, FILL_SHARE), gutter_border: base, gutter_active: blend(base, background, ACTIVE_SHARE) }
+    }
+}
+
+
+const fn blend(over: Color32, under: Color32, share: u16) -> Color32 {
+    Color32::from_rgb(mix(over.r(), under.r(), share), mix(over.g(), under.g(), share), mix(over.b(), under.b(), share))
+}
+
+
+const fn mix(over: u8, under: u8, share: u16) -> u8 {
+    ((over as u16 * share + under as u16 * (100 - share) + 50) / 100) as u8
 }
 
 
@@ -33,14 +58,18 @@ pub struct Palette {
     /// A, B and C; D's header and D's blocks of hand-edited or unknown origin use `output`.
     pub sources: [DocumentColors; 3],
     pub output: DocumentColors,
-    /// The `<Merge Conflict>` marker of an unresolved conflict in D.
-    pub conflict_marker: Color32,
+    /// The red of text and gutter blocks that differ from every other document, and of the `<Merge Conflict>` marker of an unresolved conflict in D.
+    pub conflict: DocumentColors,
 }
+
+
+const LIGHT_PANE_BG: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+const DARK_PANE_BG: Color32 = Color32::from_rgb(0x12, 0x14, 0x17);
 
 
 pub const LIGHT: Palette = Palette {
     window_bg: Color32::from_rgb(0xEC, 0xEE, 0xF1),
-    pane_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    pane_bg: LIGHT_PANE_BG,
     pane_border: Color32::from_rgb(0x9A, 0xA2, 0xAE),
     pane_header_bg: Color32::from_rgb(0xDE, 0xE3, 0xE9),
     text: Color32::BLACK,
@@ -51,18 +80,18 @@ pub const LIGHT: Palette = Palette {
     region_border: Color32::from_rgb(0x5A, 0x66, 0x76),
     void_hatch: Color32::from_rgb(0xC4, 0xCA, 0xD3),
     sources: [
-        DocumentColors { header: Color32::from_rgb(0xCF, 0xE0, 0xFA), gutter_border: Color32::from_rgb(0x2F, 0x6B, 0xC4), gutter_active: Color32::from_rgb(0x8D, 0xB6, 0xF2) },
-        DocumentColors { header: Color32::from_rgb(0xCD, 0xEF, 0xD3), gutter_border: Color32::from_rgb(0x2E, 0x8B, 0x43), gutter_active: Color32::from_rgb(0x8C, 0xD6, 0x9B) },
-        DocumentColors { header: Color32::from_rgb(0xE3, 0xD5, 0xF7), gutter_border: Color32::from_rgb(0x7A, 0x4C, 0xC2), gutter_active: Color32::from_rgb(0xBF, 0xA1, 0xEC) },
+        DocumentColors::derive(Color32::from_rgb(0x2F, 0x6B, 0xC4), LIGHT_PANE_BG),
+        DocumentColors::derive(Color32::from_rgb(0x2E, 0x8B, 0x43), LIGHT_PANE_BG),
+        DocumentColors::derive(Color32::from_rgb(0x7A, 0x4C, 0xC2), LIGHT_PANE_BG),
     ],
     output: DocumentColors { header: Color32::from_rgb(0xDE, 0xE3, 0xE9), gutter_border: Color32::from_rgb(0x6B, 0x74, 0x80), gutter_active: Color32::from_rgb(0xB4, 0xBC, 0xC7) },
-    conflict_marker: Color32::from_rgb(0xC0, 0x10, 0x10),
+    conflict: DocumentColors::derive(Color32::from_rgb(0xB0, 0x00, 0x00), LIGHT_PANE_BG),
 };
 
 
 pub const DARK: Palette = Palette {
     window_bg: Color32::from_rgb(0x1E, 0x21, 0x26),
-    pane_bg: Color32::from_rgb(0x12, 0x14, 0x17),
+    pane_bg: DARK_PANE_BG,
     pane_border: Color32::from_rgb(0x55, 0x5C, 0x67),
     pane_header_bg: Color32::from_rgb(0x2A, 0x2F, 0x36),
     text: Color32::from_rgb(0xE8, 0xEA, 0xED),
@@ -73,16 +102,32 @@ pub const DARK: Palette = Palette {
     region_border: Color32::from_rgb(0x8A, 0x94, 0xA3),
     void_hatch: Color32::from_rgb(0x3C, 0x42, 0x4B),
     sources: [
-        DocumentColors { header: Color32::from_rgb(0x22, 0x34, 0x4F), gutter_border: Color32::from_rgb(0x6F, 0xA4, 0xF0), gutter_active: Color32::from_rgb(0x2F, 0x5A, 0x99) },
-        DocumentColors { header: Color32::from_rgb(0x1F, 0x3D, 0x27), gutter_border: Color32::from_rgb(0x6C, 0xCB, 0x80), gutter_active: Color32::from_rgb(0x2E, 0x6B, 0x3D) },
-        DocumentColors { header: Color32::from_rgb(0x35, 0x28, 0x4A), gutter_border: Color32::from_rgb(0xB4, 0x8E, 0xF0), gutter_active: Color32::from_rgb(0x5A, 0x3F, 0x86) },
+        DocumentColors::derive(Color32::from_rgb(0x6F, 0xA4, 0xF0), DARK_PANE_BG),
+        DocumentColors::derive(Color32::from_rgb(0x6C, 0xCB, 0x80), DARK_PANE_BG),
+        DocumentColors::derive(Color32::from_rgb(0xB4, 0x8E, 0xF0), DARK_PANE_BG),
     ],
     output: DocumentColors { header: Color32::from_rgb(0x2A, 0x2F, 0x36), gutter_border: Color32::from_rgb(0x8A, 0x92, 0x9D), gutter_active: Color32::from_rgb(0x4A, 0x52, 0x5D) },
-    conflict_marker: Color32::from_rgb(0xFF, 0x8A, 0x8A),
+    conflict: DocumentColors::derive(Color32::from_rgb(0xFF, 0xA3, 0xA3), DARK_PANE_BG),
 };
 
 
 impl Palette {
+    /// The red of text that differs from every other document and of the conflict marker.
+    pub fn red(&self) -> Color32 {
+        self.conflict.gutter_border
+    }
+
+
+    /// The colors a block or run marked with `style` is drawn with.
+    pub fn style_colors(&self, style: CharStyle) -> &DocumentColors {
+        match style {
+            CharStyle::Red => &self.conflict,
+            CharStyle::Document(document) => self.colors(document),
+        }
+    }
+
+
+
     pub fn colors(&self, document: Document) -> &DocumentColors {
         match document {
             Document::A => &self.sources[0],
@@ -124,6 +169,16 @@ pub fn customized(theme: Theme, colors: &ThemeColors) -> Palette {
     }
     if let Some([r, g, b]) = colors.pane_text {
         palette.pane_text = Color32::from_rgb(r, g, b);
+    }
+    let background = palette.pane_bg;
+    let derived = |[r, g, b]: [u8; 3]| DocumentColors::derive(Color32::from_rgb(r, g, b), background);
+    for (document, picked) in palette.sources.iter_mut().zip([colors.document_a, colors.document_b, colors.document_c]) {
+        if let Some(rgb) = picked {
+            *document = derived(rgb);
+        }
+    }
+    if let Some(rgb) = colors.red {
+        palette.conflict = derived(rgb);
     }
     palette
 }
@@ -277,15 +332,13 @@ mod tests {
 
 
     #[test]
-    fn default_char_diff_colors_are_readable_in_the_light_theme() {
-        let rgb = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
-        let colors = [crate::config::DEFAULT_CHAR_DIFF_RED];
+    fn default_red_is_readable_on_the_pane_the_selection_and_the_jump_highlight() {
         let [r, g, b, a] = crate::config::DEFAULT_CURRENT_REGION_COLOR;
         let blend = |over: u8, under: u8| ((over as f32 * a as f32 + under as f32 * (255 - a) as f32) / 255.0).round() as u8;
-        let highlight = Color32::from_rgb(blend(r, LIGHT.pane_bg.r()), blend(g, LIGHT.pane_bg.g()), blend(b, LIGHT.pane_bg.b()));
-        for color in colors.map(rgb) {
-            for background in [LIGHT.pane_bg, LIGHT.selection, highlight] {
-                assert!(contrast_ratio(color, background) >= 4.5, "{color:?} on {background:?}");
+        for palette in [LIGHT, DARK] {
+            let highlight = Color32::from_rgb(blend(r, palette.pane_bg.r()), blend(g, palette.pane_bg.g()), blend(b, palette.pane_bg.b()));
+            for background in [palette.pane_bg, palette.selection, highlight] {
+                assert!(contrast_ratio(palette.red(), background) >= 4.5, "{:?} on {background:?} in {palette:?}", palette.red());
             }
         }
     }
@@ -294,8 +347,8 @@ mod tests {
     #[test]
     fn gutters_and_conflict_markers_are_readable() {
         for palette in [LIGHT, DARK] {
-            assert!(contrast_ratio(palette.conflict_marker, palette.pane_bg) >= 4.5, "{palette:?}");
-            for colors in palette.sources.iter().chain([&palette.output]) {
+            assert!(contrast_ratio(palette.red(), palette.pane_bg) >= 4.5, "{palette:?}");
+            for colors in palette.sources.iter().chain([&palette.output, &palette.conflict]) {
                 assert!(contrast_ratio(colors.gutter_border, colors.header) >= 2.0, "{colors:?} in {palette:?}");
                 assert!(contrast_ratio(colors.gutter_border, colors.gutter_active) >= 1.5, "{colors:?} in {palette:?}");
                 assert!(contrast_ratio(colors.gutter_active, colors.header) >= 1.3, "active blocks must stand out: {colors:?} in {palette:?}");
@@ -370,13 +423,49 @@ mod tests {
     #[test]
     fn customized_palette_takes_only_the_picked_colors() {
         assert_eq!(customized(Theme::Light, &ThemeColors::default()), LIGHT);
-        let colors = ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None };
+        let colors = ThemeColors { ui_text: Some([1, 2, 3]), ..ThemeColors::default() };
         let palette = customized(Theme::Dark, &colors);
         assert_eq!(palette.text, Color32::from_rgb(1, 2, 3));
         assert_eq!(palette.pane_text, DARK.pane_text);
         assert_eq!(palette.pane_bg, DARK.pane_bg);
-        let colors = ThemeColors { ui_text: None, pane_text: Some([4, 5, 6]) };
+        let colors = ThemeColors { pane_text: Some([4, 5, 6]), ..ThemeColors::default() };
         assert_eq!(customized(Theme::Light, &colors).pane_text, Color32::from_rgb(4, 5, 6));
+    }
+
+
+    #[test]
+    fn derived_colors_keep_the_base_as_border_and_fade_into_the_background() {
+        let base = Color32::from_rgb(0x20, 0x40, 0x80);
+        let colors = DocumentColors::derive(base, Color32::WHITE);
+        assert_eq!(colors.gutter_border, base);
+        assert_eq!(DocumentColors::derive(base, base).header, base);
+        assert_eq!(DocumentColors::derive(base, base).gutter_active, base);
+        assert!(relative_luminance(colors.gutter_active) > relative_luminance(base));
+        assert!(relative_luminance(colors.header) > relative_luminance(colors.gutter_active));
+        assert!(relative_luminance(colors.header) < relative_luminance(Color32::WHITE));
+    }
+
+
+    #[test]
+    fn picked_document_and_red_colors_replace_their_whole_set() {
+        let colors = ThemeColors { document_a: Some([10, 20, 30]), document_b: None, document_c: Some([40, 50, 60]), red: Some([200, 0, 0]), ..ThemeColors::default() };
+        for palette in [&LIGHT, &DARK] {
+            let theme = if palette == &LIGHT { Theme::Light } else { Theme::Dark };
+            let customized = customized(theme, &colors);
+            assert_eq!(customized.colors(Document::A), &DocumentColors::derive(Color32::from_rgb(10, 20, 30), palette.pane_bg));
+            assert_eq!(customized.colors(Document::B), palette.colors(Document::B));
+            assert_eq!(customized.colors(Document::C), &DocumentColors::derive(Color32::from_rgb(40, 50, 60), palette.pane_bg));
+            assert_eq!(customized.conflict, DocumentColors::derive(Color32::from_rgb(200, 0, 0), palette.pane_bg));
+            assert_eq!(customized.red(), Color32::from_rgb(200, 0, 0));
+            assert_eq!(customized.colors(Document::D), palette.colors(Document::D));
+        }
+    }
+
+
+    #[test]
+    fn style_colors_follow_the_style() {
+        assert_eq!(LIGHT.style_colors(CharStyle::Red), &LIGHT.conflict);
+        assert_eq!(LIGHT.style_colors(CharStyle::Document(Document::B)), LIGHT.colors(Document::B));
     }
 
 

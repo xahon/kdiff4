@@ -5,7 +5,6 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use kdiff4_protocol::{Change, Client, Command, Document, Event, HostMessage, Navigation, RequestId, Response};
 
 use crate::Startup;
-use crate::char_diff::CharDiffLook;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::fonts::{self, FontScan};
@@ -1034,9 +1033,7 @@ impl KdiffApp {
     fn pane_options(&self) -> PaneOptions {
         let view = self.view();
         let [r, g, b, a] = view.current_region_color;
-        let rgb = |[r, g, b]: [u8; 3]| egui::Color32::from_rgb(r, g, b);
-        let char_diff = CharDiffLook { red: rgb(view.char_diff_red) };
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_corner_radius: view.region_corner_radius, other_region_border_percent: view.other_region_border_percent, char_diff, whitespace: view.whitespace.clone(), overview_strip: view.show_overview_strip }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_corner_radius: view.region_corner_radius, other_region_border_percent: view.other_region_border_percent, whitespace: view.whitespace.clone(), overview_strip: view.show_overview_strip }
     }
 
 

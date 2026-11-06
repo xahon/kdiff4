@@ -6,10 +6,10 @@ use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, R
 
 use kdiff4_protocol::{Document, LineCharRuns};
 
-use crate::char_diff::{self, CharDiffLook, CharStyle};
+use crate::char_diff::{self, CharStyle};
 use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
-use crate::rows::{Mark, PaneRow, Rows};
+use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
 
 
@@ -58,7 +58,6 @@ pub struct ViewStyle<'a> {
     pub region_corner_radius: u8,
     /// Opacity of the borders of the regions other than the current one, from 0 to 1.
     pub other_region_border_opacity: f32,
-    pub char_diff: CharDiffLook,
     pub whitespace: WhitespaceConfig,
 }
 
@@ -240,7 +239,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     .zip(char_runs)
                     .map(|(line, runs)| char_diff::segments(runs.document.clone(), runs.lines.line(line), runs.sources.clone()))
                     .unwrap_or_default();
-                let galley = pane_row.line.map(|line| layout_styled(ui, lines.line(line), &segments, &font_id, palette, &style.char_diff));
+                let galley = pane_row.line.map(|line| layout_styled(ui, lines.line(line), &segments, &font_id, palette));
                 let terminator = pane_row.line.map(|line| shown_terminator(lines, line, &style.whitespace)).unwrap_or_default();
                 let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x) + terminator.len() as f32 * char_width;
                 let width = (margin.total() + text_width + CARET_WIDTH * 2.0).max(ui.available_width());
@@ -262,7 +261,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                 let caret_on_void = caret.and_then(|caret| caret.void_row) == Some(row);
                 let (Some(line), Some(galley)) = (pane_row.line, galley) else {
                     if pane_row.conflict_marker {
-                        text_painter.text(pos2(text_rect.left(), text_rect.center().y), Align2::LEFT_CENTER, CONFLICT_MARKER, font_id.clone(), palette.conflict_marker);
+                        text_painter.text(pos2(text_rect.left(), text_rect.center().y), Align2::LEFT_CENTER, CONFLICT_MARKER, font_id.clone(), palette.red());
                     } else {
                         paint_void(&text_painter, text_rect, palette);
                     }
@@ -272,7 +271,7 @@ pub fn show(ui: &mut Ui, id_salt: &str, lines: Lines<'_>, rows: Rows<'_>, char_r
                     continue;
                 };
                 let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
-                paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, palette, &style.char_diff);
+                paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, palette);
                 if let Some(caret) = caret {
                     paint_selection(&text_painter, lines, line, text_rect, &galley, caret.cursor, row_height, palette);
                 }
@@ -426,8 +425,8 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
     {
         let (first, last) = rows.block_edges(row);
         let active = pane_row.region.is_some() && pane_row.region == style.current_region;
-        let fill = pane_row.origin.or(block.origin);
-        paint_gutter_block(painter, column_left, margin.column, rect, first, last, origin_colors(palette, fill), origin_colors(palette, block.origin), active);
+        let (fill, border) = gutter_colors(palette, block, pane_row.origin);
+        paint_gutter_block(painter, column_left, margin.column, rect, first, last, fill, border, active);
         if style.margin == MarginKind::Marks
             && let Some(origin) = pane_row.origin
         {
@@ -437,6 +436,15 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
     if margin.numbers + margin.column > 0.0 {
         let x = left + margin.numbers + margin.column + TEXT_GAP / 2.0;
         painter.vline(x, rect.y_range(), Stroke::new(1.0, palette.void_hatch));
+    }
+}
+
+
+/// The fill and border colors of `block`: a block marked by the char-diff rules, in a source pane, takes the colors of its style; otherwise the border is its origin's, and the fill the row's `line_origin` in D, or the block's origin.
+fn gutter_colors<'a>(palette: &'a Palette, block: Block, line_origin: Option<Mark>) -> (&'a DocumentColors, &'a DocumentColors) {
+    match block.style {
+        Some(style) => (palette.style_colors(style), palette.style_colors(style)),
+        None => (origin_colors(palette, line_origin.or(block.origin)), origin_colors(palette, block.origin)),
     }
 }
 
@@ -570,17 +578,17 @@ fn paint_whitespace_mark(painter: &Painter, whitespace: Whitespace, cell: Rect, 
 
 
 /// Lays out `text` with the colors of its char-diff `segments`, given in columns.
-pub fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette, look: &CharDiffLook) -> std::sync::Arc<Galley> {
+pub fn layout_styled(ui: &Ui, text: &str, segments: &[(Range<usize>, CharStyle)], font_id: &FontId, palette: &Palette) -> std::sync::Arc<Galley> {
     let mut job = LayoutJob::default();
-    for (bytes, color) in colored_byte_ranges(text, segments, palette.pane_text, look) {
+    for (bytes, color) in colored_byte_ranges(text, segments, palette.pane_text, palette.red()) {
         job.append(&text[bytes], 0.0, TextFormat::simple(font_id.clone(), color));
     }
     ui.painter().layout_job(job)
 }
 
 
-/// `text` cut into byte ranges at the edges of `segments`, each with its color: the segment's, or `plain` between segments. Columns past the text's end are ignored.
-fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain: Color32, look: &CharDiffLook) -> Vec<(Range<usize>, Color32)> {
+/// `text` cut into byte ranges at the edges of `segments`, each with its color: `red` for a red segment, otherwise `plain`, as between segments. Columns past the text's end are ignored.
+fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain: Color32, red: Color32) -> Vec<(Range<usize>, Color32)> {
     let offsets: Vec<usize> = text
         .char_indices()
         .map(|(offset, _)| offset)
@@ -596,7 +604,7 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
             ranges.push((at..start, plain.clone()));
         }
         if end > start {
-            ranges.push((start..end, look.text_color(char_style, plain.clone())));
+            ranges.push((start..end, if *char_style == CharStyle::Red { red.clone() } else { plain.clone() }));
         }
         at = end;
     }
@@ -608,16 +616,16 @@ fn colored_byte_ranges(text: &str, segments: &[(Range<usize>, CharStyle)], plain
 
 
 /// The background of a char-diff segment: red at partial alpha, or the stronger fill of the document the characters differ from.
-fn char_background(style: &CharStyle, palette: &Palette, look: &CharDiffLook) -> Color32 {
+fn char_background(style: &CharStyle, palette: &Palette) -> Color32 {
     match style {
-        CharStyle::Red => look.red.gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA),
-        CharStyle::Document(document) => palette.colors(document.clone()).gutter_active.clone(),
+        CharStyle::Red => palette.red().gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA),
+        CharStyle::Document(_) => palette.style_colors(style.clone()).gutter_active.clone(),
     }
 }
 
 
 /// Fills the background of each char-diff segment, over the full height of the row `rect`; the text starts at `text_left`.
-pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, palette: &Palette, look: &CharDiffLook) {
+pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, CharStyle)], galley: &Galley, text_left: f32, rect: Rect, palette: &Palette) {
     for (columns, char_style) in segments {
         if columns.is_empty() {
             continue;
@@ -627,7 +635,7 @@ pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, Char
         if right <= left {
             continue;
         }
-        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, char_background(char_style, palette, look));
+        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, char_background(char_style, palette));
     }
 }
 
@@ -707,42 +715,43 @@ mod tests {
     use crate::theme::{DARK, LIGHT};
 
 
-    const LOOK: CharDiffLook = CharDiffLook { red: Color32::RED };
     const PLAIN: Color32 = Color32::BLACK;
     const FROM_B: CharStyle = CharStyle::Document(kdiff4_protocol::Document::B);
 
 
     #[test]
     fn unmarked_text_is_one_plain_range() {
-        assert_eq!(colored_byte_ranges("abc", &[], PLAIN, &LOOK), [(0..3, PLAIN)]);
-        assert_eq!(colored_byte_ranges("", &[], PLAIN, &LOOK), [(0..0, PLAIN)]);
+        assert_eq!(colored_byte_ranges("abc", &[], PLAIN, Color32::RED), [(0..3, PLAIN)]);
+        assert_eq!(colored_byte_ranges("", &[], PLAIN, Color32::RED), [(0..0, PLAIN)]);
     }
 
 
     #[test]
     fn red_segments_color_their_bytes_and_document_segments_keep_the_plain_color() {
         let segments = [(1..2, CharStyle::Red), (2..4, FROM_B)];
-        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, PLAIN), (4..5, PLAIN)]);
+        assert_eq!(colored_byte_ranges("abcde", &segments, PLAIN, Color32::RED), [(0..1, PLAIN), (1..2, Color32::RED), (2..4, PLAIN), (4..5, PLAIN)]);
     }
 
 
     #[test]
     fn segment_columns_are_characters() {
-        assert_eq!(colored_byte_ranges("äöü", &[(1..2, CharStyle::Red)], PLAIN, &LOOK), [(0..2, PLAIN), (2..4, Color32::RED), (4..6, PLAIN)]);
+        assert_eq!(colored_byte_ranges("äöü", &[(1..2, CharStyle::Red)], PLAIN, Color32::RED), [(0..2, PLAIN), (2..4, Color32::RED), (4..6, PLAIN)]);
     }
 
 
     #[test]
     fn segments_past_the_end_are_cut_off() {
-        assert_eq!(colored_byte_ranges("ab", &[(1..9, CharStyle::Red), (9..12, FROM_B)], PLAIN, &LOOK), [(0..1, PLAIN), (1..2, Color32::RED)]);
+        assert_eq!(colored_byte_ranges("ab", &[(1..9, CharStyle::Red), (9..12, FROM_B)], PLAIN, Color32::RED), [(0..1, PLAIN), (1..2, Color32::RED)]);
     }
 
 
     #[test]
     fn red_backgrounds_are_translucent_and_document_backgrounds_are_the_stronger_document_fill() {
-        assert_eq!(char_background(&CharStyle::Red, &LIGHT, &LOOK), Color32::RED.gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
+        for palette in [&LIGHT, &DARK] {
+            assert_eq!(char_background(&CharStyle::Red, palette), palette.red().gamma_multiply_u8(CHAR_DIFF_BACKGROUND_ALPHA));
+        }
         for (palette, document) in [(&LIGHT, kdiff4_protocol::Document::A), (&LIGHT, kdiff4_protocol::Document::B), (&LIGHT, kdiff4_protocol::Document::C), (&DARK, kdiff4_protocol::Document::B)] {
-            assert_eq!(char_background(&CharStyle::Document(document), palette, &LOOK), palette.colors(document).gutter_active);
+            assert_eq!(char_background(&CharStyle::Document(document), palette), palette.colors(document).gutter_active);
         }
     }
 
@@ -837,7 +846,7 @@ mod tests {
 
 
     fn style(line_numbers: bool, margin: MarginKind) -> ViewStyle<'static> {
-        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, char_diff: LOOK, whitespace: WhitespaceConfig::default() }
+        ViewStyle { palette: &LIGHT, line_numbers, margin, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, whitespace: WhitespaceConfig::default() }
     }
 
 
@@ -863,7 +872,7 @@ mod tests {
 
     #[test]
     fn clicks_on_gutter_blocks_select_their_region() {
-        let block = Some(Block { index: 0, origin: None });
+        let block = Some(Block { index: 0, origin: None, style: None });
         let map = RowMap::from_rows(vec![PaneRow { line: Some(0), region: Some(0), ..PaneRow::default() }, PaneRow { line: Some(1), region: Some(1), block, ..PaneRow::default() }, PaneRow { region: Some(1), block, ..PaneRow::default() }]);
         let rows = Rows::Mapped(&map);
         let margin = Margin { numbers: 20.0, column: 16.0 };
@@ -883,6 +892,30 @@ mod tests {
         assert_eq!(colors(Some(Mark::Source(kdiff4_protocol::Document::C))), &LIGHT.sources[2]);
         assert_eq!(colors(Some(Mark::Modified)), &LIGHT.output);
         assert_eq!(colors(None), &LIGHT.output);
+    }
+
+
+    #[test]
+    fn marked_gutter_blocks_take_the_colors_of_their_style() {
+        use kdiff4_protocol::Document;
+        let block = |origin: Document, style| Block { index: 0, origin: Some(Mark::Source(origin)), style };
+        let (fill, border) = gutter_colors(&LIGHT, block(Document::A, Some(FROM_B)), None);
+        assert_eq!((fill, border), (&LIGHT.sources[1], &LIGHT.sources[1]));
+        let (fill, border) = gutter_colors(&LIGHT, block(Document::B, Some(CharStyle::Red)), None);
+        assert_eq!((fill, border), (&LIGHT.conflict, &LIGHT.conflict));
+        let (fill, border) = gutter_colors(&DARK, block(Document::C, None), None);
+        assert_eq!((fill, border), (&DARK.sources[2], &DARK.sources[2]));
+    }
+
+
+    #[test]
+    fn output_gutter_blocks_keep_the_origin_colors_of_their_lines() {
+        use kdiff4_protocol::Document;
+        let block = Block { index: 0, origin: None, style: None };
+        let (fill, border) = gutter_colors(&LIGHT, block, Some(Mark::Source(Document::B)));
+        assert_eq!((fill, border), (&LIGHT.sources[1], &LIGHT.output));
+        let (fill, border) = gutter_colors(&LIGHT, block, None);
+        assert_eq!((fill, border), (&LIGHT.output, &LIGHT.output));
     }
 
 
