@@ -78,6 +78,8 @@ pub struct ViewConfig {
     pub align_output: bool,
     /// The overview strip: the current line of every document, between the source panes and D.
     pub show_overview_strip: bool,
+    /// The minimap: the whole document as a narrow column right of the panes, which scrolls them like a scroll bar.
+    pub show_minimap: bool,
     /// Rows kept above a region that navigation jumps to.
     pub jump_context_lines: u8,
     /// Wheel scrolling and jumps glide to where they go instead of moving at once.
@@ -114,6 +116,7 @@ impl Default for ViewConfig {
             show_gutters: true,
             align_output: false,
             show_overview_strip: true,
+            show_minimap: true,
             jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES,
             smooth_scrolling: true,
             smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS,
@@ -337,6 +340,7 @@ mod tests {
             show_gutters: false,
             align_output: true,
             show_overview_strip: false,
+            show_minimap: false,
             jump_context_lines: 7,
             smooth_scrolling: false,
             smooth_scroll_ms: 400,

@@ -6,6 +6,7 @@ mod editing;
 mod find;
 mod fonts;
 mod language;
+mod minimap;
 mod mirror;
 mod open_dialog;
 mod overview;

@@ -8,6 +8,7 @@ use crate::alignment_gutter::PaneMarks;
 use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::find::FindState;
+use crate::minimap;
 use crate::mirror::Mirror;
 use crate::overview;
 use crate::rows::Rows;
@@ -153,6 +154,7 @@ pub struct PaneOptions {
     pub other_region_border_percent: u8,
     pub whitespace: WhitespaceConfig,
     pub overview_strip: bool,
+    pub minimap: bool,
     pub alignment_color: Color32,
 }
 
@@ -211,6 +213,14 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     let dt = ui.input(|input| input.stable_dt).min(MAX_SCROLL_STEP);
     state.source_scroll.step(dt.clone(), options.scroll_motion);
     state.output_scroll.step(dt, options.scroll_motion);
+    if options.minimap {
+        egui::Panel::right("minimap")
+            .resizable(false)
+            .exact_size(minimap::WIDTH)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| minimap::show(ui, mirror, state, palette));
+    }
     egui::CentralPanel::default().show(ui, |ui| {
         let total = ui.available_size();
         let mut scrolls = Vec::new();

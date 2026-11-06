@@ -36,6 +36,7 @@ const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COM
 const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
 const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
@@ -57,6 +58,8 @@ const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
 const VOID_TOGGLE_LABEL: &str = "Void Space";
 const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
+const MINIMAP_TOGGLE_LABEL: &str = "Minimap";
+const MINIMAP_TOGGLE_HINT: &str = "Toggle the Minimap: the whole document as a column right of the panes, to scroll by clicking or dragging";
 const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
 const OVERVIEW_TOGGLE_HINT: &str = "Toggle the Overview Strip: the current line of every document, with its character diff";
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
@@ -1094,6 +1097,9 @@ impl KdiffApp {
         if ctx.input_mut(|input| input.consume_shortcut(&SETTINGS_SHORTCUT)) {
             self.open_settings(ctx);
         }
+        if ctx.input_mut(|input| input.consume_shortcut(&MINIMAP_SHORTCUT)) {
+            self.toggle_minimap();
+        }
     }
 
     fn show_settings(&mut self, ctx: &egui::Context) {
@@ -1224,6 +1230,14 @@ impl KdiffApp {
                         self.toggle_void_space();
                     }
                 });
+                ui.menu_button("View", |ui| {
+                    let mut minimap = self.view().show_minimap;
+                    let item = egui::Checkbox::new(&mut minimap, MINIMAP_TOGGLE_LABEL);
+                    let shortcut = ui.ctx().format_shortcut(&MINIMAP_SHORTCUT);
+                    if ui.add(item).on_hover_text(format!("{MINIMAP_TOGGLE_HINT} ({shortcut})")).clicked() {
+                        self.toggle_minimap();
+                    }
+                });
                 ui.menu_button("Settings", |ui| {
                     let configure = egui::Button::new("Configure Kdiff4...").shortcut_text(ui.ctx().format_shortcut(&SETTINGS_SHORTCUT));
                     if ui.add(configure).clicked() {
@@ -1242,6 +1256,8 @@ impl KdiffApp {
         let overview_on = self.view().show_overview_strip;
         let mut toggled = false;
         let mut overview_toggled = false;
+        let mut minimap_toggled = false;
+        let minimap_on = self.view().show_minimap;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, paint_void_icon).on_hover_text(VOID_TOGGLE_HINT);
@@ -1254,6 +1270,12 @@ impl KdiffApp {
                 {
                     overview_toggled = true;
                 }
+                if toolbar_toggle(ui, MINIMAP_TOGGLE_LABEL, minimap_on, true, paint_minimap_icon)
+                    .on_hover_text(MINIMAP_TOGGLE_HINT)
+                    .clicked()
+                {
+                    minimap_toggled = true;
+                }
             });
         });
         if toggled {
@@ -1261,6 +1283,9 @@ impl KdiffApp {
         }
         if overview_toggled {
             self.toggle_overview_strip();
+        }
+        if minimap_toggled {
+            self.toggle_minimap();
         }
     }
 
@@ -1290,6 +1315,19 @@ impl KdiffApp {
         self.save_config(false);
     }
 
+    /// Shows or hides the minimap, from the toolbar, the View menu or Ctrl+G. Saved at once, and followed by an open settings dialog.
+    fn toggle_minimap(&mut self) {
+        let on = !self.view().show_minimap;
+        self.config.view.show_minimap = on;
+        if let Some(applied) = self.applied_view.as_mut() {
+            applied.show_minimap = on;
+        }
+        if let Some(dialog) = self.settings.as_mut() {
+            dialog.set_show_minimap(on);
+        }
+        self.save_config(false);
+    }
+
     /// The view settings in effect: the settings dialog's draft while it is open, otherwise the saved ones.
     fn view(&self) -> &ViewConfig {
         self.applied_view.as_ref().unwrap_or(&self.config.view)
@@ -1312,6 +1350,7 @@ impl KdiffApp {
             other_region_border_percent: view.other_region_border_percent,
             whitespace: view.whitespace.clone(),
             overview_strip: view.show_overview_strip,
+            minimap: view.show_minimap,
             alignment_color: egui::Color32::from_rgba_unmultiplied(view.alignment_color[0], view.alignment_color[1], view.alignment_color[2], view.alignment_color[3]),
         }
     }
@@ -1540,6 +1579,17 @@ fn paint_void_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32)
     }
     ui.painter()
         .rect_stroke(square, radius.min(4), egui::Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
+}
+
+/// A tall box with a smaller box inside it, standing for the view on the whole document.
+fn paint_minimap_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
+    let radius = theme::corner_radius_of(ui).max(3);
+    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
+    let stroke = egui::Stroke::new(1.0, stroke_color);
+    let view = egui::Rect::from_min_size(square.min + egui::vec2(3.0, square.height() * 0.3), egui::vec2(square.width() - 6.0, square.height() * 0.3));
+    ui.painter().rect_filled(view, 0.0, stroke_color.gamma_multiply(0.4));
+    ui.painter().rect_stroke(view, 0.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
 }
 
 /// Four lines of text of different lengths in a box.

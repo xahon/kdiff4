@@ -176,7 +176,6 @@ impl Mirror {
         self.output.is_some()
     }
 
-    #[cfg(test)]
     pub fn comparison(&self) -> &Comparison {
         &self.comparison
     }

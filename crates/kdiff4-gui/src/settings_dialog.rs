@@ -72,6 +72,12 @@ impl SettingsDialog {
         self.draft.show_overview_strip = show;
     }
 
+    /// Follows the toolbar's and the shortcut's minimap toggle, which also works while the dialog is open.
+    pub fn set_show_minimap(&mut self, show: bool) {
+        self.original.show_minimap = show;
+        self.draft.show_minimap = show;
+    }
+
     pub fn original(&self) -> &ViewConfig {
         &self.original
     }
@@ -188,6 +194,8 @@ impl SettingsDialog {
                     .on_hover_text("Line D up with A, B and C: every region gets the same rows in every pane, padded with void space.");
                 ui.checkbox(&mut self.draft.show_overview_strip, "Overview strip")
                     .on_hover_text("The current line of every document, with its character diff, between A, B and C and the output pane. D can be edited there.");
+                ui.checkbox(&mut self.draft.show_minimap, "Minimap")
+                    .on_hover_text("The whole document as a narrow column right of the panes, with a block for every difference. Click or drag in it to scroll.");
             });
             ui.end_row();
 
@@ -550,6 +558,14 @@ mod tests {
         let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
         dialog.set_align_output(true);
         assert!(dialog.original().align_output && dialog.draft().align_output);
+    }
+
+    #[test]
+    fn minimap_toggle_reaches_the_open_dialog() {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
+        assert!(dialog.draft().show_minimap);
+        dialog.set_show_minimap(false);
+        assert!(!dialog.original().show_minimap && !dialog.draft().show_minimap);
     }
 
     #[test]
