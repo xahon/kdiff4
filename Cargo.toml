@@ -31,6 +31,7 @@ skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
 clap = { version = "4.6.7", features = ["derive"] }
 insta = "1.49.0"
 proptest = "1.12.0"
+regex = "1.13.1"
 
 [package]
 name = "kdiff4"

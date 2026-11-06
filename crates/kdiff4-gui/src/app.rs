@@ -7,6 +7,7 @@ use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostM
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
+use crate::find::{self, FindEvent};
 use crate::fonts::{self, FontScan};
 use crate::language::{self, Language, LanguageState};
 use crate::mirror::{DeltaOutcome, Mirror};
@@ -32,6 +33,9 @@ const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifi
 const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
+const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
+const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
 const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
@@ -49,6 +53,8 @@ const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
     (Navigation::PreviousConflict, "Previous Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp)),
     (Navigation::NextConflict, "Next Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown)),
 ];
+/// Distance of the find bar from the top right corner of the panes.
+const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
 const VOID_TOGGLE_LABEL: &str = "Void Space";
 const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
 const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
@@ -321,6 +327,7 @@ impl KdiffApp {
     }
 
     fn handle_message(&mut self, ctx: &egui::Context, message: HostMessage) {
+        self.panes.find.stale = true;
         match message {
             HostMessage::Event(Event::Snapshot(snapshot)) => {
                 if self.is_opening() {
@@ -523,6 +530,86 @@ impl KdiffApp {
         }
         self.config.recent.last_dir = dir;
         self.save_config(false);
+    }
+
+    /// The pane the find bar searches: the one with the caret, else the first document.
+    fn find_target(&self) -> Option<Document> {
+        self.panes
+            .caret
+            .map(|(document, _)| document)
+            .or_else(|| self.mirror.as_ref().and_then(|mirror| mirror.documents().first()).map(|text| text.document))
+    }
+
+    /// Shows the find bar with the keyboard, searching for the selected text if it is on one line.
+    fn open_find(&mut self) {
+        let selected = self.panes.caret.and_then(|(document, cursor)| {
+            let (start, end) = cursor.range();
+            let lines = lines_of(self.mirror.as_ref()?, document)?;
+            let text: String = lines.line(start.line).chars().skip(start.column).take(end.column.saturating_sub(start.column)).collect();
+            (start.line == end.line && !text.is_empty()).then_some(text)
+        });
+        if let Some(text) = selected {
+            self.panes.find.query = text;
+        }
+        self.panes.find.open = true;
+        self.panes.find.focus = true;
+    }
+
+    /// Finds the matches in the searched pane again if needed, and follows the selection.
+    fn refresh_find(&mut self) {
+        if !self.panes.find.open {
+            return;
+        }
+        let Some(document) = self.find_target() else { return };
+        let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) else { return };
+        self.panes.find.refresh(document, lines);
+        let selection = self.panes.caret_in(document);
+        self.panes.find.follow(selection);
+    }
+
+    fn select_match(&mut self, ctx: &egui::Context, document: Document, index: usize) {
+        let Some(found) = self.panes.find.matches.get(index).copied() else { return };
+        self.panes.set_caret(document, found.cursor(), None);
+        self.panes.strip_focused = false;
+        self.panes.reveal_caret = true;
+        self.panes.find.current = Some(index);
+        ctx.request_repaint();
+    }
+
+    /// Goes to the next or previous match in the pane with the caret. With nothing to search for, opens the find bar.
+    fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
+        if self.panes.find.query.is_empty() {
+            self.open_find();
+            return;
+        }
+        self.panes.find.open = true;
+        self.refresh_find();
+        let Some(document) = self.panes.find.document else { return };
+        let cursor = self.panes.caret_in(document).unwrap_or_default();
+        let matches = &self.panes.find.matches;
+        let index = if forward { find::next_after(matches, cursor) } else { find::previous_before(matches, cursor) };
+        if let Some(index) = index {
+            self.select_match(ctx, document, index);
+        }
+    }
+
+    fn handle_find_event(&mut self, ctx: &egui::Context, event: FindEvent) {
+        match event {
+            FindEvent::Changed => {
+                self.refresh_find();
+                let Some(document) = self.panes.find.document else { return };
+                let from = self.panes.caret_in(document).map_or_else(Position::default, |cursor| cursor.range().0);
+                if let Some(index) = find::first_from(&self.panes.find.matches, from) {
+                    self.select_match(ctx, document, index);
+                }
+            }
+            FindEvent::Next => self.find_step(ctx, true),
+            FindEvent::Previous => self.find_step(ctx, false),
+            FindEvent::Close => {
+                self.panes.find.open = false;
+                self.panes.find.clear();
+            }
+        }
     }
 
     fn is_merge(&self) -> bool {
@@ -772,6 +859,7 @@ impl KdiffApp {
 
     /// Applies a key to D locally at once and sends the edit to the engine.
     fn edit_output(&mut self, key: EditKey) {
+        self.panes.find.stale = true;
         let cursor = match self.panes.caret {
             Some((Document::D, cursor)) => cursor,
             _ => return,
@@ -980,6 +1068,17 @@ impl KdiffApp {
                 }
             }
         }
+        if self.mirror.is_some() {
+            if ctx.input_mut(|input| input.consume_shortcut(&FIND_PREVIOUS_SHORTCUT)) {
+                self.find_step(ctx, false);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&FIND_NEXT_SHORTCUT)) {
+                self.find_step(ctx, true);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&FIND_SHORTCUT)) {
+                self.open_find();
+            }
+        }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN_SHORTCUT)) {
             self.form_open = true;
         }
@@ -1053,6 +1152,19 @@ impl KdiffApp {
                     let redo = egui::Button::new("Redo").shortcut_text(ctx.format_shortcut(&REDO_SHORTCUT));
                     if ui.add_enabled(is_merge, redo).clicked() {
                         self.undo_redo(&ctx, Command::Redo);
+                    }
+                    ui.separator();
+                    let find = egui::Button::new("Find...").shortcut_text(ctx.format_shortcut(&FIND_SHORTCUT));
+                    if ui.add_enabled(has_session, find).clicked() {
+                        self.open_find();
+                    }
+                    let find_next = egui::Button::new("Find Next").shortcut_text(ctx.format_shortcut(&FIND_NEXT_SHORTCUT));
+                    if ui.add_enabled(has_session, find_next).clicked() {
+                        self.find_step(&ctx, true);
+                    }
+                    let find_previous = egui::Button::new("Find Previous").shortcut_text(ctx.format_shortcut(&FIND_PREVIOUS_SHORTCUT));
+                    if ui.add_enabled(has_session, find_previous).clicked() {
+                        self.find_step(&ctx, false);
                     }
                 });
                 let choosable = self.choosable();
@@ -1242,6 +1354,7 @@ impl eframe::App for KdiffApp {
         let ctx = ui.ctx().clone();
         self.handle_shortcuts(&ctx);
         self.handle_pane_keys(&ctx);
+        self.refresh_find();
         self.show_menu(ui);
         if self.mirror.is_some() {
             self.show_toolbar(ui);
@@ -1255,6 +1368,7 @@ impl eframe::App for KdiffApp {
         let busy = self.is_opening();
         let mut form_action = None;
         let mut pane_actions = Vec::new();
+        let mut find_events = Vec::new();
         match self.mirror.as_ref() {
             None => {
                 egui::CentralPanel::default().show(ui, |ui| {
@@ -1265,8 +1379,12 @@ impl eframe::App for KdiffApp {
                 if let Some(picked) = self.show_status(ui) {
                     self.language.pick(picked, mirror);
                 }
+                let find_corner = ui.available_rect_before_wrap().right_top() + egui::vec2(-FIND_BAR_MARGIN.x, FIND_BAR_MARGIN.y);
                 pane_actions = panes::show_session(ui, mirror, &mut self.panes, &pane_options);
                 self.panes.reveal_caret = false;
+                if self.panes.find.open {
+                    find_events = find::show_bar(&ctx, find_corner, &mut self.panes.find);
+                }
                 if self.form_open {
                     let modal = egui::Modal::new(egui::Id::unique("open_dialog")).show(&ctx, |ui| {
                         ui.heading("Open");
@@ -1280,6 +1398,9 @@ impl eframe::App for KdiffApp {
         }
         for action in pane_actions {
             self.handle_pane_action(&ctx, action);
+        }
+        for event in find_events {
+            self.handle_find_event(&ctx, event);
         }
         if let Some(action) = form_action {
             self.handle_form_action(action);
@@ -1924,5 +2045,121 @@ mod tests {
     fn missing_navigation_targets_are_named() {
         assert_eq!(navigation_noun(Navigation::NextConflict), "next conflict");
         assert_eq!(navigation_noun(Navigation::PreviousDifference), "previous difference");
+    }
+
+    fn selected(app: &KdiffApp) -> Option<(Document, Position, Position)> {
+        app.panes.caret.map(|(document, cursor)| (document, cursor.range().0, cursor.range().1))
+    }
+
+    fn at(line: usize, column: usize) -> Position {
+        Position { line, column }
+    }
+
+    /// An app searching for every character.
+    fn app_finding_every_character() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
+        let (mut app, host, ctx) = app_with_session();
+        app.panes.find.query = ".".to_string();
+        app.panes.find.options.regex = true;
+        (app, host, ctx)
+    }
+
+    #[test]
+    fn ctrl_f_opens_the_find_bar_with_the_keyboard() {
+        let (mut app, _host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::F, Modifiers::COMMAND);
+        assert!(app.panes.find.open && app.panes.find.focus);
+    }
+
+    #[test]
+    fn ctrl_f_searches_for_the_selected_text() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.panes.set_caret(Document::A, Cursor { anchor: at(1, 0), head: at(1, 1) }, None);
+        press(&mut app, &ctx, Key::F, Modifiers::COMMAND);
+        assert_eq!(app.panes.find.query, "x");
+    }
+
+    #[test]
+    fn f3_without_a_query_opens_the_find_bar() {
+        let (mut app, _host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert!(app.panes.find.open && app.panes.find.focus);
+        assert_eq!(selected(&app), None);
+    }
+
+    #[test]
+    fn f3_selects_the_next_match_in_the_pane_with_the_caret() {
+        let (mut app, _host, ctx) = app_finding_every_character();
+        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))));
+        assert_eq!(app.panes.find.current, Some(0));
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))), "wraps to the first match");
+        assert!(app.panes.reveal_caret);
+    }
+
+    #[test]
+    fn shift_f3_selects_the_previous_match_and_wraps() {
+        let (mut app, _host, ctx) = app_finding_every_character();
+        app.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
+        assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))));
+        press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
+        assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))), "wraps to the last match");
+    }
+
+    #[test]
+    fn the_search_runs_in_the_pane_that_was_clicked() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.panes.find.query = "b".to_string();
+        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 0))), "A has no b");
+        app.panes.set_caret(Document::B, Cursor::at(at(1, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::B, at(0, 0), at(0, 1))));
+        assert_eq!(app.panes.find.document, Some(Document::B));
+    }
+
+    #[test]
+    fn the_output_pane_can_be_searched() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.panes.find.query = "x".to_string();
+        app.panes.set_caret(Document::D, Cursor::at(at(0, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::D, at(1, 0), at(1, 1))));
+    }
+
+    #[test]
+    fn typing_in_the_find_bar_selects_the_first_match_from_the_caret() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.panes.set_caret(Document::A, Cursor::at(at(0, 1)), None);
+        app.panes.find.query = "x".to_string();
+        app.panes.find.open = true;
+        app.handle_find_event(&ctx, FindEvent::Changed);
+        assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
+    }
+
+    #[test]
+    fn closing_the_find_bar_keeps_the_query_and_the_selection() {
+        let (mut app, _host, ctx) = app_finding_every_character();
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        app.handle_find_event(&ctx, FindEvent::Close);
+        assert!(!app.panes.find.open && app.panes.find.matches.is_empty());
+        assert_eq!(app.panes.find.query, ".");
+        assert!(selected(&app).is_some());
+    }
+
+    #[test]
+    fn f3_after_closing_the_find_bar_continues_the_search() {
+        let (mut app, _host, ctx) = app_finding_every_character();
+        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        app.handle_find_event(&ctx, FindEvent::Close);
+        press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+        assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
+        assert!(app.panes.find.open);
     }
 }

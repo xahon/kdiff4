@@ -10,6 +10,7 @@ use crate::alignment_gutter::{self, PaneMarks, Place};
 use crate::char_diff::{self, CharStyle};
 use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
+use crate::find::Match;
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
 
@@ -25,6 +26,8 @@ const MARGIN_PADDING: f32 = 4.0;
 /// Space between a gutter block and the column's edges. The column is one row height wide, so with the block's top and bottom inset by this too, a one-row block is a square.
 const GUTTER_INSET: f32 = 1.0;
 const ACTIVE_GUTTER_STROKE: f32 = 2.0;
+const FIND_MATCH_COLOR: Color32 = Color32::from_rgba_premultiplied(120, 90, 0, 120);
+const FIND_CURRENT_COLOR: Color32 = Color32::from_rgba_premultiplied(200, 100, 0, 200);
 /// Space between the margin and the text.
 const TEXT_GAP: f32 = 4.0;
 pub const CONFLICT_MARKER: &str = "<Merge Conflict>";
@@ -67,6 +70,13 @@ pub struct CharRuns<'a> {
     pub document: Document,
     pub lines: &'a LineCharRuns,
     pub sources: usize,
+}
+
+/// The matches of the find bar in a pane, sorted by position, and the one the user is at.
+#[derive(Debug, Clone, Copy)]
+pub struct FindHits<'a> {
+    pub matches: &'a [Match],
+    pub current: Option<usize>,
 }
 
 /// A whitespace character the panes can mark.
@@ -225,6 +235,7 @@ pub fn show(
     offset: Option<f32>,
     style: &ViewStyle<'_>,
     marks: PaneMarks<'_>,
+    find: Option<FindHits<'_>>,
 ) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
@@ -324,6 +335,9 @@ pub fn show(
                 };
                 let text_origin = text_rect.min + vec2(0.0, (row_height - galley.size().y) / 2.0);
                 paint_char_backgrounds(&text_painter, &segments, &galley, text_origin.x, rect, palette);
+                if let Some(find) = find {
+                    paint_find(&text_painter, find, line, &galley, text_origin.x, rect);
+                }
                 if let Some(caret) = caret {
                     paint_selection(&text_painter, lines, line, text_rect, &galley, caret.cursor, row_height, palette);
                 }
@@ -825,6 +839,18 @@ pub fn paint_char_backgrounds(painter: &Painter, segments: &[(Range<usize>, Char
     }
 }
 
+/// Fills the matches of the find bar in `line`, the current one stronger.
+fn paint_find(painter: &Painter, find: FindHits<'_>, line: usize, galley: &Galley, text_left: f32, rect: Rect) {
+    let first = find.matches.partition_point(|found| found.line < line);
+    for (index, found) in find.matches.iter().enumerate().skip(first).take_while(|(_, found)| found.line == line) {
+        let left = text_left + galley.pos_from_cursor(CCursor::new(found.start)).min.x;
+        let right = text_left + galley.pos_from_cursor(CCursor::new(found.end)).min.x;
+        let color = if find.current == Some(index) { FIND_CURRENT_COLOR } else { FIND_MATCH_COLOR };
+        painter.rect_filled(Rect::from_min_max(pos2(left, rect.top()), pos2(right, rect.bottom())), 0.0, color);
+    }
+}
+
+
 /// The row the caret is drawn on.
 pub fn caret_row(rows: Rows<'_>, caret: Caret) -> usize {
     caret.void_row.unwrap_or_else(|| rows.row_of_line(caret.cursor.head.line))
@@ -1183,7 +1209,7 @@ mod tests {
                     marks: &test.marks,
                     highest: test.highest,
                 };
-                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks);
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None);
                 if response.menu.is_some() {
                     test.menu = response.menu;
                 }

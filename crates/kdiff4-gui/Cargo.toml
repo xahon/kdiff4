@@ -17,6 +17,7 @@ egui_extras.workspace = true
 rfd.workspace = true
 fontique.workspace = true
 skrifa.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

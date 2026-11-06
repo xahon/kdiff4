@@ -7,11 +7,12 @@ use kdiff4_protocol::{AlignmentMark, Document};
 use crate::alignment_gutter::PaneMarks;
 use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
+use crate::find::FindState;
 use crate::mirror::Mirror;
 use crate::overview;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
-use crate::text_view::{self, Caret, CharRuns, MarginKind, MenuAction, PointerAction, ViewStyle, Viewport, Wheel};
+use crate::text_view::{self, Caret, CharRuns, FindHits, MarginKind, MenuAction, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
 const SPLITTER_HEIGHT: f32 = 0.0;
@@ -86,6 +87,8 @@ pub struct PaneState {
     pub output_scroll: SmoothScroll,
     /// What each pane showed in the last frame, in `Document::ALL` order.
     pub viewports: [Option<Viewport>; 4],
+    /// The find bar and its matches in the pane with the caret.
+    pub find: FindState,
 }
 
 impl Default for PaneState {
@@ -103,6 +106,7 @@ impl Default for PaneState {
             source_scroll: SmoothScroll::default(),
             output_scroll: SmoothScroll::default(),
             viewports: [None; 4],
+            find: FindState::default(),
         }
     }
 }
@@ -469,6 +473,9 @@ fn pane(
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
+                    let find = Some(&state.find)
+                        .filter(|find| find.open && find.document == Some(document))
+                        .map(|find| FindHits { matches: &find.matches, current: find.current });
                     let response = text_view::show(
                         ui,
                         document.letter(),
@@ -480,6 +487,7 @@ fn pane(
                         Some(given.clone()),
                         style,
                         marks,
+                        find,
                     );
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;

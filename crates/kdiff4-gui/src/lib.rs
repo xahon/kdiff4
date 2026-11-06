@@ -3,6 +3,7 @@ mod app;
 mod char_diff;
 mod config;
 mod editing;
+mod find;
 mod fonts;
 mod language;
 mod mirror;
