@@ -1,0 +1,82 @@
+name: Release
+
+# Push a tag like v0.2.0 (it must match the version in Cargo.toml). The workflow builds a single executable per platform and
+# opens a DRAFT release with generated notes. Edit the notes if you like, then press "Publish release": Kdiff4's update check
+# only sees published releases, and its "What's new" window shows these notes.
+#
+# The executable names are a contract with the updater (see platform_asset_name in crates/kdiff4-gui/src/update_check.rs).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            asset: kdiff4-windows-x86_64.exe
+            binary: target/release/kdiff4.exe
+          - os: ubuntu-latest
+            asset: kdiff4-linux-x86_64
+            binary: target/release/kdiff4
+          - os: macos-latest
+            asset: kdiff4-macos-aarch64
+            binary: target/release/kdiff4
+          - os: macos-13
+            asset: kdiff4-macos-x86_64
+            binary: target/release/kdiff4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag matches the crate version
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kdiff4") | .version')
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match the crate version v$version"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Name the executable for the updater
+        shell: bash
+        run: cp "${{ matrix.binary }}" "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Draft the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "${GITHUB_REPOSITORY}" --title "Kdiff4 ${GITHUB_REF_NAME}" --generate-notes --draft

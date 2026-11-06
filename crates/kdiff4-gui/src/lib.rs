@@ -14,9 +14,12 @@ mod panes;
 mod paths;
 mod rows;
 mod scroll;
+mod self_update;
 mod settings_dialog;
 mod text_view;
 mod theme;
+mod update_check;
+mod update_dialog;
 mod window_frame;
 
 use std::path::PathBuf;
@@ -48,5 +51,9 @@ pub fn run(client: Client, startup: Startup) -> Result<(), GuiError> {
         viewport: egui::ViewportBuilder::default().with_title("Kdiff4").with_inner_size(app::INITIAL_WINDOW_SIZE),
         ..Default::default()
     };
-    eframe::run_native("Kdiff4", options, Box::new(|cc| Ok(Box::new(app::KdiffApp::new(&cc.egui_ctx, client, startup))))).map_err(|error| GuiError::Eframe(error.to_string()))
+    eframe::run_native("Kdiff4", options, Box::new(|cc| {
+            let mut app = app::KdiffApp::new(&cc.egui_ctx, client, startup);
+            app.begin_startup_update_tasks(&cc.egui_ctx);
+            Ok(Box::new(app))
+        })).map_err(|error| GuiError::Eframe(error.to_string()))
 }

@@ -32,6 +32,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 insta = "1.49.0"
 proptest = "1.12.0"
 regex = "1.13.1"
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+semver = "1.0.28"
+serde_json = "1.0.154"
+egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
 
 [package]
 name = "kdiff4"

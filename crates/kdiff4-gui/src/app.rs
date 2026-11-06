@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
+use egui_commonmark::CommonMarkCache;
+use semver::Version;
 use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostMessage, Navigation, RequestId, Response};
 
 use crate::Startup;
@@ -19,7 +21,10 @@ use crate::rows::{self, Rows};
 use crate::scroll::ScrollMotion;
 use crate::settings_dialog::{SettingsAction, SettingsDialog};
 use crate::text_view::{self, Caret};
+use crate::self_update::{self, UpdateInstall};
 use crate::theme;
+use crate::update_check::{self, CheckOutcome, ReleaseInfo, UpdateCheck, UpdateError};
+use crate::update_dialog::{self, AvailableAction, InstallOffer};
 use crate::window_frame;
 
 const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -102,6 +107,14 @@ struct Status {
     is_error: bool,
 }
 
+/// The update window in front of everything: the offer, the download with its progress, or a notice.
+enum UpdateWindow {
+    Available(ReleaseInfo),
+    Installing { release: ReleaseInfo, install: UpdateInstall },
+    Message { title: String, text: String },
+}
+
+
 pub struct KdiffApp {
     client: Client,
     config_path: Option<PathBuf>,
@@ -127,6 +140,11 @@ pub struct KdiffApp {
     frame_radius: Option<u8>,
     /// Whether the title bar theme was re-sent after the window first got focus.
     title_bar_refreshed: bool,
+    current_version: Version,
+    update_check: Option<UpdateCheck>,
+    update_window: Option<UpdateWindow>,
+    update_cache: CommonMarkCache,
+    update_modal_id: egui::Id,
 }
 
 impl KdiffApp {
@@ -178,6 +196,11 @@ impl KdiffApp {
             applied_view: None,
             frame_radius: None,
             title_bar_refreshed: false,
+            current_version: update_check::current_version(),
+            update_check: None,
+            update_window: None,
+            update_cache: CommonMarkCache::default(),
+            update_modal_id: egui::Id::unique("update_window"),
         };
         app.apply_view(ctx, &view);
         app
@@ -209,6 +232,175 @@ impl KdiffApp {
             log::warn!("font family {name:?} is not installed; using the built-in font");
         }
         found
+    }
+
+    /// Removes what the last update left behind and, when due, looks for a newer release. Not part of `new`, so tests never touch the network.
+    pub fn begin_startup_update_tasks(&mut self, ctx: &egui::Context) {
+        self_update::clean_up_previous_update();
+        let updates = &self.config.updates;
+        if updates.check_automatically && update_check::is_due(updates.last_check_unix, update_check::now_unix()) {
+            self.begin_update_check(ctx, false);
+        }
+    }
+
+    fn begin_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.update_check.is_some() || matches!(self.update_window, Some(UpdateWindow::Installing { .. })) {
+            return;
+        }
+        let repaint_ctx = ctx.clone();
+        self.update_check = Some(UpdateCheck::start(update_check::release_url(), manual, move || repaint_ctx.request_repaint()));
+    }
+
+    fn poll_update_check(&mut self) {
+        let Some(check) = self.update_check.as_ref() else {
+            return;
+        };
+        let Some(result) = check.poll() else {
+            return;
+        };
+        let manual = check.manual;
+        self.update_check = None;
+        match result {
+            Ok(release) => {
+                self.config.updates.last_check_unix = update_check::now_unix();
+                self.save_config(false);
+                let outcome = update_check::evaluate(&self.current_version, release, self.config.updates.skipped_version.as_deref(), manual);
+                match outcome {
+                    CheckOutcome::Available(release) => self.update_window = Some(UpdateWindow::Available(release)),
+                    CheckOutcome::UpToDate if manual => {
+                        self.update_window = Some(UpdateWindow::Message {
+                            title: "No Update Available".to_string(),
+                            text: format!("Kdiff4 {} is the newest version.", self.current_version),
+                        });
+                    }
+                    CheckOutcome::UpToDate | CheckOutcome::Skipped => {}
+                }
+            }
+            Err(error) => {
+                log::warn!("{error}");
+                if manual {
+                    self.update_window = Some(UpdateWindow::Message {
+                        title: "Update Check Failed".to_string(),
+                        text: error.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn update_message(&mut self, title: &str, error: &UpdateError) {
+        self.update_window = Some(UpdateWindow::Message {
+            title: title.to_string(),
+            text: error.to_string(),
+        });
+    }
+
+    fn start_install(&mut self, ctx: &egui::Context, release: ReleaseInfo) {
+        let Some(asset) = release.asset_for_this_platform().cloned() else {
+            self.open_release_page(&release);
+            return;
+        };
+        let overridden = std::env::var_os(update_check::URL_OVERRIDE_ENV).is_some();
+        if !overridden && !asset.url.starts_with("https://") {
+            self.update_message("Update Failed", &UpdateError::Download(format!("refusing to download over an insecure address: {}", asset.url)));
+            return;
+        }
+        let repaint_ctx = ctx.clone();
+        match UpdateInstall::start(asset.url, asset.size, move || repaint_ctx.request_repaint()) {
+            Ok(install) => self.update_window = Some(UpdateWindow::Installing { release, install }),
+            Err(error) => self.update_message("Update Failed", &error),
+        }
+    }
+
+    fn open_release_page(&mut self, release: &ReleaseInfo) {
+        if !release.page_url.starts_with("https://") && !release.page_url.starts_with("http://") {
+            self.report_error(format!("Not opening the release page: {:?} is not a web address", release.page_url));
+            return;
+        }
+        if let Err(error) = config::open_command(Path::new(&release.page_url)).spawn() {
+            self.report_error(format!("Cannot open {}: {error}", release.page_url));
+        }
+    }
+
+    fn finish_install(&mut self, ctx: &egui::Context, exe: &Path, result: Result<(), UpdateError>) {
+        match result {
+            Ok(()) => match self_update::relaunch(exe, std::env::args_os().skip(1).collect()) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(error) => {
+                    self.update_window = Some(UpdateWindow::Message {
+                        title: "Update Installed".to_string(),
+                        text: format!("The new version is installed, but it did not start: {error}. Start Kdiff4 again by hand."),
+                    });
+                }
+            },
+            Err(UpdateError::Canceled) => {}
+            Err(error) => self.update_message("Update Failed", &error),
+        }
+    }
+
+    fn show_update_window(&mut self, ctx: &egui::Context) {
+        self.poll_update_check();
+        let has_unsaved_changes = self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.modified);
+        let mut choice = None;
+        let mut finished = None;
+        let mut dismissed = false;
+        match self.update_window.as_ref() {
+            None => return,
+            Some(UpdateWindow::Available(release)) => {
+                let offer = InstallOffer {
+                    can_install: release.asset_for_this_platform().is_some(),
+                    has_unsaved_changes,
+                };
+                let modal = egui::Modal::new(self.update_modal_id).show(ctx, |ui| {
+                    choice = update_dialog::show_available(ui, release, &self.current_version, offer, &mut self.update_cache);
+                });
+                if choice.is_none() && modal.should_close() {
+                    choice = Some(AvailableAction::RemindLater);
+                }
+            }
+            Some(UpdateWindow::Installing { release, install }) => match install.poll() {
+                Some(result) => finished = Some(result),
+                None => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                    let downloaded = install.downloaded.load(std::sync::atomic::Ordering::Relaxed);
+                    let total = install.total.load(std::sync::atomic::Ordering::Relaxed);
+                    egui::Modal::new(self.update_modal_id).show(ctx, |ui| {
+                        if update_dialog::show_progress(ui, &release.version, install.fraction(), downloaded, total) {
+                            install.cancel();
+                        }
+                    });
+                }
+            },
+            Some(UpdateWindow::Message { title, text }) => {
+                let modal = egui::Modal::new(self.update_modal_id).show(ctx, |ui| dismissed = update_dialog::show_message(ui, title, text));
+                dismissed |= modal.should_close();
+            }
+        }
+        if dismissed {
+            self.update_window = None;
+        }
+        if let Some(result) = finished {
+            if let Some(UpdateWindow::Installing { install, .. }) = self.update_window.take() {
+                self.finish_install(ctx, &install.exe, result);
+            }
+        }
+        if let Some(choice) = choice {
+            if let Some(UpdateWindow::Available(release)) = self.update_window.take() {
+                self.handle_update_choice(ctx, choice, release);
+            }
+        }
+    }
+
+    fn handle_update_choice(&mut self, ctx: &egui::Context, choice: AvailableAction, release: ReleaseInfo) {
+        match choice {
+            AvailableAction::Install => self.start_install(ctx, release),
+            AvailableAction::OpenPage => self.open_release_page(&release),
+            AvailableAction::RemindLater => {}
+            AvailableAction::SkipVersion => {
+                self.config.updates.skipped_version = Some(release.version.to_string());
+                self.save_config(false);
+            }
+        }
     }
 
     fn open_settings(&mut self, ctx: &egui::Context) {
@@ -748,7 +940,7 @@ impl KdiffApp {
             Some((document, _)) => document,
             None => return,
         };
-        if self.mirror.is_none() || self.settings.is_some() || self.form_open || ctx.text_edit_focused() {
+        if self.mirror.is_none() || self.settings.is_some() || self.update_window.is_some() || self.form_open || ctx.text_edit_focused() {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
@@ -1245,6 +1437,17 @@ impl KdiffApp {
                         self.open_settings(&ctx);
                     }
                 });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Check for Updates...").clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.begin_update_check(&ctx, true);
+                    }
+                    let mut automatic = self.config.updates.check_automatically;
+                    if ui.checkbox(&mut automatic, "Check for Updates Automatically").clicked() {
+                        self.config.updates.check_automatically = automatic;
+                        self.save_config(false);
+                    }
+                });
             });
         });
     }
@@ -1391,7 +1594,9 @@ impl eframe::App for KdiffApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.handle_shortcuts(&ctx);
+        if self.update_window.is_none() {
+            self.handle_shortcuts(&ctx);
+        }
         self.handle_pane_keys(&ctx);
         self.refresh_find();
         self.show_menu(ui);
@@ -1445,6 +1650,7 @@ impl eframe::App for KdiffApp {
             self.handle_form_action(action);
         }
         self.show_settings(&ctx);
+        self.show_update_window(&ctx);
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
     }
@@ -2211,5 +2417,90 @@ mod tests {
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
         assert!(app.panes.find.open);
+    }
+
+    fn update_release(url: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: Version::new(9, 0, 0),
+            tag: "v9.0.0".to_string(),
+            notes: "notes".to_string(),
+            page_url: "https://example.com/release".to_string(),
+            assets: vec![crate::update_check::ReleaseAsset {
+                name: crate::update_check::platform_asset_name(),
+                size: 10,
+                url: url.to_string(),
+            }],
+        }
+    }
+
+    fn app_without_config_file() -> (KdiffApp, egui::Context) {
+        let (mut app, _host, ctx) = app_with_session();
+        app.config_path = None;
+        (app, ctx)
+    }
+
+    #[test]
+    fn skipping_a_version_remembers_it() {
+        let (mut app, ctx) = app_without_config_file();
+        app.update_window = Some(UpdateWindow::Available(update_release("https://example.com/kdiff4")));
+        let Some(UpdateWindow::Available(release)) = app.update_window.take() else {
+            panic!("the window should offer the release");
+        };
+        app.handle_update_choice(&ctx, AvailableAction::SkipVersion, release);
+        assert_eq!(app.config.updates.skipped_version.as_deref(), Some("9.0.0"));
+        assert!(app.update_window.is_none());
+    }
+
+    #[test]
+    fn remind_me_later_remembers_nothing() {
+        let (mut app, ctx) = app_without_config_file();
+        app.handle_update_choice(&ctx, AvailableAction::RemindLater, update_release("https://example.com/kdiff4"));
+        assert_eq!(app.config.updates.skipped_version, None);
+        assert!(app.update_window.is_none());
+    }
+
+    #[test]
+    fn installing_over_an_insecure_address_is_refused() {
+        let (mut app, ctx) = app_without_config_file();
+        app.start_install(&ctx, update_release("http://example.com/kdiff4"));
+        match app.update_window {
+            Some(UpdateWindow::Message { ref text, .. }) => assert!(text.contains("insecure"), "{text}"),
+            _ => panic!("the refusal should be shown"),
+        }
+    }
+
+    #[test]
+    fn failed_install_is_reported_in_a_window() {
+        let (mut app, ctx) = app_without_config_file();
+        app.finish_install(&ctx, Path::new("kdiff4.exe"), Err(UpdateError::Download("connection reset".to_string())));
+        match app.update_window {
+            Some(UpdateWindow::Message { ref title, ref text }) => {
+                assert_eq!(title, "Update Failed");
+                assert!(text.contains("connection reset"));
+            }
+            _ => panic!("the failure should be shown"),
+        }
+    }
+
+    #[test]
+    fn canceled_install_closes_quietly() {
+        let (mut app, ctx) = app_without_config_file();
+        app.finish_install(&ctx, Path::new("kdiff4.exe"), Err(UpdateError::Canceled));
+        assert!(app.update_window.is_none());
+    }
+
+    #[test]
+    fn an_open_update_window_blocks_pane_keys() {
+        let (mut app, ctx) = app_without_config_file();
+        app.update_window = Some(UpdateWindow::Message {
+            title: "t".to_string(),
+            text: "x".to_string(),
+        });
+        app.panes.caret = Some((Document::D, Default::default()));
+        let before = app.status.clone();
+        ctx.input_mut(|input| input.events.push(egui::Event::Text("typed".to_string())));
+        app.handle_pane_keys(&ctx);
+        assert_eq!(app.status, before);
+        assert!(app.mirror.as_ref().and_then(|mirror| mirror.output()).is_none_or(|output| !output.modified));
     }
 }

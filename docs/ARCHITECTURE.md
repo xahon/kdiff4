@@ -65,6 +65,9 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | gui | `open_dialog.rs` | the Open form, its Run rule, file pickers and the overwrite question |
 | gui | `settings_dialog.rs` | the Settings dialog: Panes, Appearance and Comparison tabs, with live preview of the view settings |
 | gui | `config.rs` | `gui.toml`: loading, saving and backing up a broken file |
+| gui | `update_check.rs` | finding out whether a newer release exists: the GitHub latest-release request on a worker thread, parsing the release (version, Markdown notes, page, files), choosing the file for this platform, the once-a-day rule and the skipped-version rule |
+| gui | `self_update.rs` | installing a release: downloading the platform's executable to `<exe>.new` with progress and cancel, checking it is complete and looks like an executable, moving the running executable to `<exe>.old`, putting the download in its place, restarting, and removing the leftovers at the next start |
+| gui | `update_dialog.rs` | the update windows: Update Available with the release notes rendered as Markdown, the download progress, and plain notices |
 | gui | `fonts.rs` | discovering monospace font families and installing the chosen one |
 | gui | `language.rs` | the languages the status bar offers with their logos, file names, extensions and shebang programs, detecting a session's language from its paths and first lines, keeping a picked language while the source files stay, and the drop-down |
 | gui | `theme.rs` | palettes with the user's color overrides, the theme choice and the egui style, including corner radius and pane frames |
@@ -88,6 +91,8 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | Config | `serde`, `toml`, `dirs` | core, gui |
 | GUI | `egui`, `eframe`, `egui_extras` | gui |
 | File dialogs | `rfd` | gui |
+| Update check and download | `ureq` (rustls), `semver`, `serde_json` | gui |
+| Release notes display | `egui_commonmark` | gui |
 | Font discovery and monospace detection | `fontique`, `skrifa` | gui |
 | CLI | `clap` | bin |
 | Log output | `flexi_logger` | bin |
@@ -210,6 +215,9 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Find match**: one occurrence of the find bar text in a line of the searched pane. All of them are highlighted, the one the selection covers stronger.
 - **Open dialog**: the window where A, B, C and D are chosen before a session opens.
 - **Settings dialog**: the window where GUI config is edited, with a live preview.
+- **Update check**: asking GitHub for the latest published release, at most once a day on start, or at once from Help → Check for Updates... Runs on its own thread; a failure is logged, and shown only when the user asked.
+- **Update window**: the modal that follows a check: Update Available with the release notes and the choices Update and Restart, Remind Me Later and Skip This Version; the download progress; or a notice. While one is open the rest of the window takes no input.
+- **Update install**: downloading the release's executable for this platform, replacing the running executable in place and restarting it with the same command line.
 - **Theme**: light or dark appearance of the GUI; the user picks light, dark, or following the system.
 - **Palette**: the colors one theme draws with: window and pane backgrounds, pane border, UI text, pane text, the document colors of A, B, C and D, and the red of what differs from every other document. The user can override the UI text and pane text colors, the colors of A, B and C, and the red, per theme.
 - **Theme colors**: the colors the user picked for one theme; a color left unset keeps the palette's.
@@ -468,6 +476,7 @@ Sections with representative keys; the config definitions in code are the author
 - `[view.light_colors]`, `[view.dark_colors]`: per-theme overrides of the UI text color (`ui_text`), the pane text color (`pane_text`), the document colors of A, B and C (`document_a`, `document_b`, `document_c`) and the red of whatever differs from every other document (`red`), red, green and blue, 0 to 255 each; absent keeps the theme's color. Light text is black by default. A document color or the red is one color: the border of its gutter blocks; the pane header, the block fill and the stronger fill of active blocks and char-diff backgrounds are derived from it by blending it into the pane background. The old `char_diff_red` key of `[view]` is ignored.
 - `[colors]`: foreground, background, removed, added, modified, conflict, manual alignment ranges, void regions.
 - `[window]`: size, position, maximized, full screen.
+- `[updates]`: look for a newer release when the program starts (`check_automatically`, on by default), Unix time of the last successful automatic check (`last_check_unix`, 0 when none), and the release the user chose to skip (`skipped_version`, absent by default).
 - `[recent]`: recent A/B/C/output files and encodings, directory of the last file confirmed in a file dialog (`last_dir`).
 
 ### Precedence
@@ -534,6 +543,21 @@ The binary routes each override by its section to the engine (in the open comman
   - Amber (conflicts)
   - Implemented so far: void hatching and the border of region boxes, as fixed colors of the palette; D's neutral color, also fixed; the jumped-to region's background, from `current_region_color`, whose default keeps text at 7:1 contrast. The colors of A (blue by default), B (green), C (violet) and the red are the one source for everything drawn in them: pane headers, gutter blocks, char-diff text and backgrounds, the overview strip and the `<Merge Conflict>` marker. They are set per theme in `[view.light_colors]` and `[view.dark_colors]`. The `[colors]` section of `gui.toml` is not read yet.
 - Character-level diff: drawn in every visible row of A, B and C that has one, in any region; D has none. The char-diff rules, one match in the GUI, map each char run to a style from its document and where its characters are the same. In A, B and C alike: characters that differ from every other document of the row are red; characters that differ from just one other document take that document's color (text changed only in B is B-colored in A and C, and red in B; a document with no line in the row always differs); characters equal in all documents are plain. A 2-way diff follows the same rules with C missing, so A's changes are in B's color and B's in A's, like kdiff3. Neighboring runs with the same style share one square background, which spans the full height of the row so that backgrounds of adjacent lines meet without a gap, and is drawn under the selection and over the jumped-to region's background. A red run has red text on the red at partial alpha; a run of a document keeps the pane's text color on the document's stronger fill (the color of its active gutter blocks). Gutter blocks use the same rules and colors (see Margin).
+
+### Updates
+
+- Source: `GET https://api.github.com/repos/xahon/kdiff4/releases/latest`, which lists published releases only (drafts and pre-releases are left out). The environment variable `KDIFF4_UPDATE_URL` replaces the address, to try the windows against a local server; it also allows a plain HTTP download address.
+- A release is newer when its tag, without a leading `v`, is a greater semantic version than the running program's. The tag, notes (Markdown), page and files come from the release. The check is sent with a `kdiff4/<version>` user agent, a 10 second timeout and a 1 MiB limit on the answer.
+- An automatic check runs on start when `check_automatically` is on and the last successful one is a day old or more (or none ran, or the clock went back). A failed check is retried at the next start. A manual check (Help → Check for Updates...) ignores the timer and the skipped version, and reports "no update" and failures in a window; an automatic one stays silent unless there is something to offer. Help → Check for Updates Automatically toggles the setting.
+- The Update Available window names both versions and shows the notes. Update and Restart installs; Remind Me Later closes the window until the next check; Skip This Version stores the version in `skipped_version`, which silences automatic checks about that version only. When the release has no file for this platform, Open Release Page replaces Update and Restart. A warning says that unsaved edits are lost when D has any.
+- Install: the release workflow publishes one executable per platform, named `kdiff4-<os>-<arch>` (`.exe` on Windows), with `os` `windows`, `macos` or `linux`, and `arch` `x86_64` or `aarch64`. The installer downloads over HTTPS to `<exe>.new` next to the running executable (the path it was started from), checks the size against what the server announced and the magic number of an executable for the platform, moves the running executable to `<exe>.old`, renames the download to the original path (putting the old one back if that fails) and starts the new executable with the arguments of the current run, then closes the window. A running Windows executable can be renamed but not deleted, so `<exe>.old` is removed at the next start. A folder that is not writable ends in an error window and nothing is changed.
+- While the download runs, a modal window with a progress bar covers the program: shortcuts and pane keys are off, and only Cancel works. Canceling removes the partial file and leaves the program as it was.
+- Restarting reopens the same files from the command line; an Open window started without arguments reopens empty. Edits to D that were not saved are lost, hence the warning.
+- Not done: a checksum or signature check of the download beyond TLS to GitHub, and updating a copy of the program that was started from a read-only location.
+
+### Releasing
+
+Push a tag `vX.Y.Z` equal to the version in `Cargo.toml`. `.github/workflows/release.yml` tests and builds on Windows, Linux and macOS (Apple silicon and Intel), names the executables as above and opens a draft release with generated notes. Edit the notes and publish the draft; the update check sees it from then on.
 
 ## Binary and CLI
 

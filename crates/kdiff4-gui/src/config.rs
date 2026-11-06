@@ -48,6 +48,7 @@ pub struct GuiConfig {
     pub version: u32,
     pub view: ViewConfig,
     pub recent: RecentConfig,
+    pub updates: UpdateConfig,
 }
 
 impl Default for GuiConfig {
@@ -56,6 +57,7 @@ impl Default for GuiConfig {
             version: CONFIG_VERSION,
             view: ViewConfig::default(),
             recent: RecentConfig::default(),
+            updates: UpdateConfig::default(),
         }
     }
 }
@@ -232,6 +234,29 @@ pub struct RecentConfig {
     pub last_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Look for a newer release when the program starts, at most once a day.
+    pub check_automatically: bool,
+    /// Unix time of the last automatic check; 0 when none ran yet.
+    pub last_check_unix: u64,
+    /// A release the user chose to skip; automatic checks stay quiet about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        UpdateConfig {
+            check_automatically: true,
+            last_check_unix: 0,
+            skipped_version: None,
+        }
+    }
+}
+
+
 pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("kdiff4").join("gui.toml"))
 }
@@ -316,6 +341,37 @@ mod tests {
         };
         assert_eq!(command.get_program(), expected);
         assert_eq!(command.get_args().collect::<Vec<_>>(), vec![path.as_os_str()]);
+    }
+
+    #[test]
+    fn updates_default_to_automatic_checks() {
+        let updates = GuiConfig::default().updates;
+        assert!(updates.check_automatically);
+        assert_eq!(updates.last_check_unix, 0);
+        assert_eq!(updates.skipped_version, None);
+    }
+
+    #[test]
+    fn updates_round_trip() {
+        let dir = temp_dir("updates");
+        let path = dir.join("gui.toml");
+        let mut config = GuiConfig::default();
+        config.updates.check_automatically = false;
+        config.updates.last_check_unix = 1_700_000_000;
+        config.updates.skipped_version = Some("0.3.0".to_string());
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap().updates, config.updates);
+    }
+
+    #[test]
+    fn file_without_updates_section_keeps_automatic_checks_on() {
+        let dir = temp_dir("updates-missing");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "version = 1
+[recent]
+last_dir = \"x\"
+").unwrap();
+        assert!(load(&path).unwrap().updates.check_automatically);
     }
 
     #[test]
