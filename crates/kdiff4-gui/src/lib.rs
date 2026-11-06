@@ -1,3 +1,4 @@
+mod alignment_gutter;
 mod app;
 mod char_diff;
 mod config;

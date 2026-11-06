@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, RegionStatus};
-use kdiff4_protocol::{Change, Choice, CurrentRegion, Delta, Document, DocumentText, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot};
+use kdiff4_protocol::{Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot};
 
 use crate::editing::{self, Edit, Lines};
 use crate::rows::{self, RowMap, Rows};
@@ -68,6 +68,7 @@ pub struct Mirror {
     awaiting_resync: bool,
     /// Per document, in `documents` order: the character-level diff of its lines.
     char_diffs: Vec<LineCharRuns>,
+    alignments: Alignments,
 }
 
 
@@ -78,7 +79,7 @@ impl Mirror {
             let lines = editing::editor_lines(&output.text);
             OutputMirror { path: output.path, text: output.text, lines, modified: output.modified }
         });
-        let mut mirror = Mirror { revision: snapshot.revision, documents: snapshot.documents, output, comparison: snapshot.comparison, row_maps: Vec::new(), merge: snapshot.merge, output_rows: RowMap::default(), aligned, options: snapshot.options, current_region: snapshot.current_region, pending_edits: VecDeque::new(), awaiting_resync: false, char_diffs: snapshot.char_diffs };
+        let mut mirror = Mirror { revision: snapshot.revision, documents: snapshot.documents, output, comparison: snapshot.comparison, row_maps: Vec::new(), merge: snapshot.merge, output_rows: RowMap::default(), aligned, options: snapshot.options, current_region: snapshot.current_region, pending_edits: VecDeque::new(), awaiting_resync: false, char_diffs: snapshot.char_diffs, alignments: snapshot.alignments };
         mirror.refresh_rows();
         mirror
     }
@@ -101,6 +102,12 @@ impl Mirror {
 
     pub fn options(&self) -> &ComparisonOptions {
         &self.options
+    }
+
+
+    /// The alignment marks and whether applying them would compare again.
+    pub fn alignments(&self) -> &Alignments {
+        &self.alignments
     }
 
 
@@ -382,6 +389,7 @@ impl Mirror {
                 }
                 None => return DeltaOutcome::NeedsResync,
             },
+            Change::AlignmentsChanged(alignments) => self.alignments = alignments,
         }
         self.revision = delta.revision;
         DeltaOutcome::Applied
@@ -408,7 +416,7 @@ mod tests {
 
     fn merge_mirror(text: &str) -> Mirror {
         let output = OutputDocument { path: Some(PathBuf::from("out.txt")), text: text.to_string(), modified: false };
-        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, false)
+        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: Alignments::default() }, false)
     }
 
 
@@ -430,7 +438,7 @@ mod tests {
     /// A 2-way merge of "a" and "b" with one modified region, unresolved, and D empty.
     fn conflict_mirror() -> Mirror {
         let output = OutputDocument { path: None, text: String::new(), modified: false };
-        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: vec![unresolved()], options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() };
+        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: Some(output), comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: vec![unresolved()], options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: Alignments::default() };
         Mirror::from_snapshot(snapshot, false)
     }
 
@@ -450,7 +458,7 @@ mod tests {
     fn char_diffs_belong_to_their_documents() {
         let runs = |same_in: &[bool]| LineCharRuns { lines: vec![vec![kdiff4_protocol::engine::CharRun { columns: 0..1, same_in: same_in.to_vec() }]] };
         let char_diffs = vec![runs(&[true, false]), runs(&[false, true])];
-        let mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: char_diffs.clone() }, false);
+        let mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: char_diffs.clone(), alignments: Alignments::default() }, false);
         assert_eq!(mirror.char_diffs(Document::A), Some(&char_diffs[0]));
         assert_eq!(mirror.char_diffs(Document::B), Some(&char_diffs[1]));
         assert_eq!(mirror.char_diffs(Document::C), None);
@@ -466,8 +474,21 @@ mod tests {
         assert!(mirror.is_aligned());
         assert_eq!(Rows::Mapped(mirror.output_rows()).region_start(0), Rows::Mapped(mirror.rows(Document::A).unwrap()).region_start(0));
         assert_eq!(Rows::Mapped(mirror.output_rows()).row(0).unwrap().conflict_marker, true);
-        let diff = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, true);
+        let diff = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: Alignments::default() }, true);
         assert!(!diff.is_aligned());
+    }
+
+
+    #[test]
+    fn alignment_marks_follow_the_snapshot_and_their_deltas() {
+        let mut mirror = conflict_mirror();
+        assert_eq!(mirror.alignments(), &Alignments::default());
+        let marked = Alignments { marks: vec![kdiff4_protocol::AlignmentMark { document: Document::A, number: 1, lines: 0..1, status: kdiff4_protocol::MarkStatus::Pending }], changed: false };
+        assert_eq!(mirror.apply_delta(delta(2, None, Change::AlignmentsChanged(marked.clone()))), DeltaOutcome::Applied);
+        assert_eq!(mirror.alignments(), &marked);
+        assert_eq!(mirror.revision(), Revision(2));
+        assert_eq!(mirror.apply_delta(delta(4, None, Change::AlignmentsChanged(Alignments::default()))), DeltaOutcome::NeedsResync);
+        assert_eq!(mirror.alignments(), &marked);
     }
 
 
@@ -562,7 +583,7 @@ mod tests {
 
     #[test]
     fn snapshot_comparison_is_kept() {
-        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() };
+        let snapshot = Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a"), source(Document::B, "b")], output: None, comparison: comparison(&[RegionStatus::Diff(HunkChange::Modified)]), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: Alignments::default() };
         let mirror = Mirror::from_snapshot(snapshot, false);
         assert_eq!(mirror.comparison(), &comparison(&[RegionStatus::Diff(HunkChange::Modified)]));
         assert_eq!(Rows::Mapped(mirror.rows(Document::A).unwrap()).row(0), Some(PaneRow { line: Some(0), region: Some(0), boxed: true, block: Some(Block { index: 0, origin: Some(Mark::Source(Document::A)), style: Some(CharStyle::Document(Document::B)) }), ..PaneRow::default() }));
@@ -715,7 +736,7 @@ mod tests {
 
     #[test]
     fn diff_mirror_has_no_output_and_rejects_edits() {
-        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, false);
+        let mut mirror = Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a")], output: None, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: Alignments::default() }, false);
         assert!(!mirror.is_merge());
         assert!(mirror.apply_local_edit(&Edit { range: 0..0, text: "x".to_string() }, None).is_none());
         assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputPathChanged(None))), DeltaOutcome::NeedsResync);

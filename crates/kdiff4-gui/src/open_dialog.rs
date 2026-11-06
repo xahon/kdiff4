@@ -135,6 +135,26 @@ pub fn confirm_overwrite(output: &Path) -> bool {
 }
 
 
+const PROCEED_LABEL: &str = "Proceed";
+
+
+/// Asks with a native message box before applying alignments discards the choices and edits in D; anything but Proceed means no.
+pub fn confirm_apply_alignments() -> bool {
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Apply alignments?")
+        .set_description("Applying the alignments compares all documents against each other again.\n\nThe conflicts you resolved and the changes you made to the output will be lost, and this cannot be undone.")
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(PROCEED_LABEL.to_string(), "Cancel".to_string()))
+        .show();
+    proceeded(&answer)
+}
+
+
+fn proceeded(answer: &rfd::MessageDialogResult) -> bool {
+    *answer == rfd::MessageDialogResult::Ok || *answer == rfd::MessageDialogResult::Custom(PROCEED_LABEL.to_string())
+}
+
+
 fn index(document: Document) -> usize {
     match document {
         Document::A => 0,
@@ -236,6 +256,16 @@ mod tests {
         let picked = Path::new("C:/work/project/file.txt");
         assert_eq!(remembered_dir(picked), Some(PathBuf::from("C:/work/project")));
         assert_eq!(remembered_dir(Path::new("file.txt")), None);
+    }
+
+
+    #[test]
+    fn only_proceed_confirms_applying_alignments() {
+        assert!(proceeded(&rfd::MessageDialogResult::Custom("Proceed".to_string())));
+        assert!(proceeded(&rfd::MessageDialogResult::Ok));
+        assert!(!proceeded(&rfd::MessageDialogResult::Custom("Cancel".to_string())));
+        assert!(!proceeded(&rfd::MessageDialogResult::Cancel));
+        assert!(!proceeded(&rfd::MessageDialogResult::No));
     }
 
 

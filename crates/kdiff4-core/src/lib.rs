@@ -1,3 +1,4 @@
+mod alignment_marks;
 mod builtin_engine;
 mod engine_registry;
 mod error;

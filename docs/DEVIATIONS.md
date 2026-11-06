@@ -31,6 +31,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
 - Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
 - Void space in the output pane: D can line up with A, B and C, padded with void rows, and scroll with them. kdiff3's merge pane always has just its own lines.
+- Previous and Next Difference can also stop at the first region of every applied manual alignment (setting `alignment_stops`), and the alignment marks have a configurable color (`alignment_color`, cyan by default). kdiff3 has neither.
 - Language selector in the status bar (see GUI in `ARCHITECTURE.md`): the language of the documents is detected from their paths and first lines and can be picked from a list, each with its logo. kdiff3 has no notion of a document's language. For now it is a label only; nothing is highlighted.
 
 ### Merge result
@@ -45,9 +46,13 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 
 kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHITECTURE.md`):
 
-- kdiff3 builds an alignment one window at a time and may leave a window out. Kdiff4 requires a part in every source document: a line range or an anchor.
-- kdiff3 has no anchors; content that is missing in one document cannot be pinned to a position there.
-- kdiff3 silently removes an older range in a window when a new range overlaps it. It also keeps each window's ranges sorted on their own and pairs the n-th range of every window, so an alignment that would cross others is silently re-paired. Kdiff4 rejects overlapping and crossing alignments with an error message and leaves the existing ones unchanged.
+- kdiff3 builds an alignment one window at a time and aligns as soon as it can, so the view jumps and reorders on every call. Kdiff4 only marks at first: every mark has a number, nothing moves, and Apply Alignments (Ctrl+Y) compares everything again on request.
+- Applying is destructive, like a reload: choices, hand edits and the undo history of D are dropped, and the user is warned first when there are any. It is not an undo step.
+- kdiff3 may leave a window out of an alignment. Kdiff4 requires a mark with the same number in every source document, and ignores the marks of other numbers.
+- kdiff3 has no anchors; content that is missing in one document cannot be pinned to a position there. Kdiff4 has anchors, several of which can share a position and are ordered by number.
+- kdiff3 silently removes an older range in a window when a new range overlaps it. It also keeps each window's ranges sorted on their own and pairs the n-th range of every window, so an alignment that would cross others is silently re-paired. Kdiff4 refuses overlapping marks when marking, and crossing alignments when applying, with an error message that names the user's numbers, and leaves the existing state unchanged.
+- Single marks are removed and renumbered from the context menu of their alignment column, and Ctrl+Shift+Y clears all of them. kdiff3 can only clear them all.
+- Ctrl+Y adds an alignment in kdiff3 as well, so Kdiff4 no longer uses it for Redo; Redo is Ctrl+Shift+Z.
 
 ### CLI
 

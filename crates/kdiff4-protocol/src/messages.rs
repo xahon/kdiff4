@@ -68,10 +68,26 @@ pub enum Command {
     Resync,
     /// Recomputes the comparison with these options. Like a reload, D is rebuilt from the new regions and its undo history starts over; the host answers with a new snapshot. On failure the session is unchanged.
     SetComparisonOptions(ComparisonOptions),
-    /// Moves the current region from region `from` (the current region when `None`) to the next or previous difference or conflict. Nothing changes when there is none. `base` is the revision `from` refers to.
-    Navigate { base: Revision, from: Option<usize>, to: Navigation },
+    /// Moves the current region from region `from` (the current region when `None`) to the next or previous difference or conflict. Nothing changes when there is none. `base` is the revision `from` refers to. With `include_alignments`, a difference move also stops at the first region of every applied alignment, whether or not its hunks differ.
+    Navigate {
+        base: Revision,
+        from: Option<usize>,
+        to: Navigation,
+        #[serde(default)]
+        include_alignments: bool,
+    },
     /// Makes region `region` current, or no region. `base` is the revision the index refers to.
     SetCurrentRegion { base: Revision, region: Option<usize> },
+    /// Marks the lines `lines` of a source document for alignment, under the lowest number that document has not used yet. An empty range is an anchor: the position before that line, which may be the document's line count. Nothing is compared again until `ApplyAlignments`. Rejected when it overlaps another mark of that document, or is an anchor strictly inside one.
+    MarkAlignment { document: Document, lines: Range<usize> },
+    /// Removes the mark `number` of a source document.
+    RemoveAlignmentMark { document: Document, number: u32 },
+    /// Gives the mark `number` of a source document the number `to`. When that document already has a mark `to`, the two swap numbers.
+    RenumberAlignmentMark { document: Document, number: u32, to: u32 },
+    /// Removes every mark. The comparison keeps the alignments it was computed with until `ApplyAlignments`.
+    ClearAlignmentMarks,
+    /// Compares again with the alignments the marks give: every number marked in all source documents. Like a reload, D is rebuilt from the new regions, its choices, edits and undo history are dropped, and the host answers with a new snapshot. Does nothing when the marks give the alignments already applied. Fails with `ErrorKind::NeedsConfirmation` when D holds choices or edits and `confirmed` is not set.
+    ApplyAlignments { confirmed: bool },
 }
 
 
@@ -174,6 +190,8 @@ pub enum Change {
     OutputEdited { range: Range<usize>, text: String, modified: bool, merge: MergeUpdate },
     OutputPathChanged(Option<PathBuf>),
     OutputSaved(PathBuf),
+    /// The alignment marks changed. The comparison did not, so regions and rows stay as they were.
+    AlignmentsChanged(Alignments),
 }
 
 
@@ -201,6 +219,56 @@ pub struct Snapshot {
     pub current_region: Option<usize>,
     /// Per source document, in `documents` order, the character-level diff of its lines. Rows depend only on the comparison, so D's edits never change them.
     pub char_diffs: Vec<LineCharRuns>,
+    /// The alignment marks and whether the comparison is up to date with them.
+    pub alignments: Alignments,
+}
+
+
+/// Where a mark stands after the last Apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MarkStatus {
+    /// Part of the alignments the current comparison was computed with.
+    Applied,
+    /// Part of a complete alignment that Apply would put into effect.
+    Pending,
+    /// Its number is not marked in every source document, so Apply ignores it.
+    Unmatched,
+}
+
+
+/// One source document's share of a manual alignment, as the user marked it. Marks with the same number in every source document are aligned with each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlignmentMark {
+    pub document: Document,
+    pub number: u32,
+    /// The marked lines. An empty range is an anchor: the position before that line.
+    pub lines: Range<usize>,
+    pub status: MarkStatus,
+}
+
+
+impl AlignmentMark {
+    pub fn is_anchor(&self) -> bool {
+        self.lines.is_empty()
+    }
+}
+
+
+/// Every mark, ordered by document and number.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alignments {
+    pub marks: Vec<AlignmentMark>,
+    /// The marks give other alignments than the comparison was computed with, so Apply would compare again.
+    pub changed: bool,
+}
+
+
+impl Alignments {
+    pub fn of(&self, document: Document) -> impl Iterator<Item = &AlignmentMark> {
+        self.marks
+            .iter()
+            .filter(move |mark| mark.document == document)
+    }
 }
 
 
@@ -324,6 +392,8 @@ pub enum ErrorKind {
     Canceled,
     /// A comparison engine failed or returned a result that broke the rules.
     Engine,
+    /// The command would discard work in D. Send it again with `confirmed` set once the user agreed.
+    NeedsConfirmation,
 }
 
 
@@ -399,6 +469,33 @@ mod tests {
         assert!(!state(Choice::Unresolved, true).is_unresolved());
         assert!(!state(Choice::Hunks(Vec::new()), false).is_unresolved());
         assert!(!state(Choice::Hunks(vec![Document::B]), false).is_unresolved());
+    }
+
+
+    fn mark(document: Document, number: u32, lines: Range<usize>) -> AlignmentMark {
+        AlignmentMark { document, number, lines, status: MarkStatus::Pending }
+    }
+
+
+    #[test]
+    fn an_empty_mark_is_an_anchor() {
+        assert!(mark(Document::A, 1, 3..3).is_anchor());
+        assert!(!mark(Document::A, 1, 3..4).is_anchor());
+    }
+
+
+    #[test]
+    fn alignments_are_listed_per_document() {
+        let alignments = Alignments { marks: vec![mark(Document::A, 1, 0..1), mark(Document::B, 1, 2..4), mark(Document::B, 2, 5..5)], changed: true };
+        let numbers = |document| -> Vec<u32> {
+            alignments
+                .of(document)
+                .map(|mark| mark.number)
+                .collect()
+        };
+        assert_eq!(numbers(Document::A), [1]);
+        assert_eq!(numbers(Document::B), [1, 2]);
+        assert!(numbers(Document::C).is_empty());
     }
 
 

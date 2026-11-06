@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kdiff4_protocol::engine::{ComparisonOptions, MergeStatus, RegionStatus};
-use kdiff4_protocol::{Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, Navigation, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
+use kdiff4_protocol::{Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response, Revision, Snapshot, in_process};
 
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -227,11 +227,11 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     let snapshot = expect_snapshot(&client);
     expect_ok(&client, id);
 
-    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict }).unwrap();
+    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict, include_alignments: false }).unwrap();
     assert_eq!(next_message(&client), HostMessage::Event(Event::CurrentRegion(CurrentRegion { revision: snapshot.revision.clone(), region: Some(1), cause: Some(id.clone()) })));
     expect_ok(&client, id);
 
-    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict }).unwrap();
+    let id = client.send(Command::Navigate { base: snapshot.revision.clone(), from: None, to: Navigation::NextConflict, include_alignments: false }).unwrap();
     expect_ok(&client, id);
 
     let options = ComparisonOptions { try_hard: true, ..ComparisonOptions::default() };
@@ -239,6 +239,63 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.options, options);
     assert_eq!(snapshot.current_region, None);
+    expect_ok(&client, id);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
+#[test]
+fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
+    let dir = temp_dir("alignment");
+    let a = write(&dir, "a.txt", "Bar\nBaz\n");
+    let b = write(&dir, "b.txt", "Bar\nFoo\nBaz\n");
+    let c = write(&dir, "c.txt", "Bar\nQux\nBaz\n");
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), ..OpenFiles::default() })).unwrap();
+    let snapshot = expect_snapshot(&client);
+    assert_eq!(snapshot.alignments, Alignments::default());
+    expect_ok(&client, id);
+
+    let marks = [(Document::A, 1..1), (Document::A, 1..1), (Document::B, 1..2), (Document::B, 2..2), (Document::C, 1..1), (Document::C, 1..2)];
+    for (index, (document, lines)) in marks.into_iter().enumerate() {
+        let id = client.send(Command::MarkAlignment { document, lines }).unwrap();
+        let delta = expect_delta(&client);
+        assert_eq!(delta.revision, Revision(snapshot.revision.0 + index as u64 + 1));
+        assert_eq!(delta.cause, Some(id.clone()));
+        let Change::AlignmentsChanged(alignments) = delta.change else { panic!("expected the marks") };
+        assert_eq!(alignments.marks.len(), index + 1);
+        assert!(alignments.changed || index < 5);
+        expect_ok(&client, id);
+    }
+
+    let id = client.send(Command::SetChoice { base: Revision(snapshot.revision.0 + 6), region: 1, choice: Choice::Hunks(vec![Document::B]) }).unwrap();
+    expect_delta(&client);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::ApplyAlignments { confirmed: false }).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else { panic!("expected a response") };
+    assert_eq!(response.id, id);
+    assert_eq!(response.result.unwrap_err().kind, ErrorKind::NeedsConfirmation);
+
+    let id = client.send(Command::ApplyAlignments { confirmed: true }).unwrap();
+    let snapshot = expect_snapshot(&client);
+    let statuses: Vec<RegionStatus> = snapshot.comparison.regions.iter().map(|region| region.status.clone()).collect();
+    assert_eq!(statuses, [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB), RegionStatus::Merge(MergeStatus::ChangedInC), RegionStatus::Merge(MergeStatus::Unchanged)]);
+    assert_eq!(snapshot.output.unwrap().text, "Bar\nFoo\nQux\nBaz\n");
+    assert!(!snapshot.alignments.changed);
+    assert!(snapshot.alignments.marks.iter().all(|mark| mark.status == MarkStatus::Applied));
+    expect_ok(&client, id);
+
+    let id = client.send(Command::ApplyAlignments { confirmed: false }).unwrap();
+    expect_ok(&client, id);
+
+    let id = client.send(Command::ClearAlignmentMarks).unwrap();
+    let delta = expect_delta(&client);
+    assert_eq!(delta.change, Change::AlignmentsChanged(Alignments { marks: Vec::new(), changed: true }));
+    expect_ok(&client, id);
+    let id = client.send(Command::ClearAlignmentMarks).unwrap();
     expect_ok(&client, id);
 
     drop(client);

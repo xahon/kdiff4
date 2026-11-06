@@ -81,6 +81,15 @@ impl Merge {
     }
 
 
+    /// Whether D differs from what auto-resolve builds: a region was edited by hand, or its choice is not the one auto-resolve makes for its status.
+    pub fn has_user_work(&self) -> bool {
+        self.regions
+            .iter()
+            .zip(&self.states)
+            .any(|(region, state)| state.merge.edited || state.merge.choice != auto_choice(&region.status))
+    }
+
+
     pub fn unresolved_count(&self) -> usize {
         self.states
             .iter()

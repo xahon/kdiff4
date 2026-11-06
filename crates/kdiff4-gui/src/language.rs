@@ -595,7 +595,7 @@ mod tests {
             .map(|((path, text), document)| source(document, path, text))
             .collect();
         let output = output_path.map(|path| OutputDocument { path: Some(PathBuf::from(path)), text: String::new(), modified: false });
-        let snapshot = Snapshot { revision: Revision(1), documents, output, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() };
+        let snapshot = Snapshot { revision: Revision(1), documents, output, comparison: Comparison::default(), engine: EngineCapabilities::default(), merge: Vec::new(), options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: kdiff4_protocol::Alignments::default() };
         Mirror::from_snapshot(snapshot, false)
     }
 

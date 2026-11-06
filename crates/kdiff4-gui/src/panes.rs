@@ -2,15 +2,16 @@ use std::ops::Range;
 use std::path::Path;
 
 use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
-use kdiff4_protocol::Document;
+use kdiff4_protocol::{AlignmentMark, Document};
 
+use crate::alignment_gutter::PaneMarks;
 use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::mirror::Mirror;
 use crate::overview;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
-use crate::text_view::{self, Caret, CharRuns, MarginKind, PointerAction, ViewStyle, Viewport, Wheel};
+use crate::text_view::{self, Caret, CharRuns, MarginKind, MenuAction, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
 
@@ -37,6 +38,13 @@ pub enum PaneAction {
     SelectLineText(Document, usize),
     /// A click on a gutter block of a region.
     SelectRegion(Document, usize),
+    /// Mark the selection in a source pane for alignment.
+    MarkSelection(Document),
+    /// Mark an anchor in a source pane before this line, which may be one past the last.
+    MarkAnchor(Document, usize),
+    RemoveAlignmentMark(Document, u32),
+    /// Give the mark `number` of a document the number `to`.
+    RenumberAlignmentMark(Document, u32, u32),
     /// Enter in a header path field, with the field's text.
     CommitPath(Document, String),
     Browse(Document),
@@ -129,6 +137,7 @@ pub struct PaneOptions {
     pub other_region_border_percent: u8,
     pub whitespace: WhitespaceConfig,
     pub overview_strip: bool,
+    pub alignment_color: Color32,
 }
 
 
@@ -164,8 +173,8 @@ fn strip_actions(ui: &mut Ui, mirror: &Mirror, state: &PaneState, style: &ViewSt
 /// Source panes side by side, then the overview strip when it is on; for a merge, the merge pane below them, behind a splitter. A lined-up D scrolls with the source panes.
 pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options: &PaneOptions) -> Vec<PaneAction> {
     let palette = &theme::palette_of(ui);
-    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, scroll_step_rows: options.scroll_step_rows, region_corner_radius: options.region_corner_radius, other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0, whitespace: options.whitespace.clone() };
-    let source_style = style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing });
+    let style = |margin: MarginKind| ViewStyle { palette, line_numbers: options.line_numbers, margin, current_region: mirror.current_region(), current_region_color: options.current_region_color, scroll_step_rows: options.scroll_step_rows, region_corner_radius: options.region_corner_radius, other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0, whitespace: options.whitespace.clone(), alignment_color: None };
+    let source_style = ViewStyle { alignment_color: Some(options.alignment_color), ..style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing }) };
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
     if let Some(region) = state.jump
@@ -375,7 +384,9 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
             let lines = Lines { text: &text.text, ranges: &text.lines };
             let rows = mirror.rows(text.document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
             let char_runs = mirror.char_diffs(text.document.clone()).map(|runs| CharRuns { document: text.document.clone(), lines: runs, sources: mirror.documents().len() });
-            scrolls.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, ScrollGroup::Sources, given.clone(), state, actions));
+            let marks: Vec<AlignmentMark> = mirror.alignments().of(text.document.clone()).cloned().collect();
+            let highest = mirror.alignments().marks.iter().map(|mark| mark.number).max().unwrap_or(0);
+            scrolls.push(pane(column, style, text.document.clone(), text.label.as_deref(), Some(&text.path), false, lines, rows, char_runs, PaneMarks { marks: &marks, highest }, ScrollGroup::Sources, given.clone(), state, actions));
         }
     });
 }
@@ -390,13 +401,13 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
             false => (ScrollGroup::Output, state.output_scroll.offset.clone()),
         };
         let rows = Rows::Mapped(mirror.output_rows());
-        scrolls.push(pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, group, given, state, actions));
+        scrolls.push(pane(ui, style, Document::D, None, output.path.as_deref(), output.modified, lines, rows, None, PaneMarks { marks: &[], highest: 0 }, group, given, state, actions));
     }
 }
 
 
 /// Shows one pane at the vertical scroll offset `given`, and reports how its scrolling went.
-fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, group: ScrollGroup, given: f32, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> PaneScroll {
+fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&str>, path: Option<&Path>, modified: bool, lines: Lines<'_>, rows: Rows<'_>, char_runs: Option<CharRuns<'_>>, marks: PaneMarks<'_>, group: ScrollGroup, given: f32, state: &mut PaneState, actions: &mut Vec<PaneAction>) -> PaneScroll {
     let palette = style.palette;
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
@@ -405,7 +416,7 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
-                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), Some(given.clone()), style);
+                    let response = text_view::show(ui, document.letter(), lines, rows, char_runs, caret, state.reveal_caret && caret.is_some(), Some(given.clone()), style, marks);
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
                     }
@@ -416,6 +427,13 @@ fn pane(ui: &mut Ui, style: &ViewStyle<'_>, document: Document, label: Option<&s
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
+                        None => {}
+                    }
+                    match response.menu {
+                        Some(MenuAction::MarkSelection) => actions.push(PaneAction::MarkSelection(document.clone())),
+                        Some(MenuAction::MarkAnchor(position)) => actions.push(PaneAction::MarkAnchor(document.clone(), position)),
+                        Some(MenuAction::RemoveMark(number)) => actions.push(PaneAction::RemoveAlignmentMark(document.clone(), number)),
+                        Some(MenuAction::RenumberMark(number, to)) => actions.push(PaneAction::RenumberAlignmentMark(document.clone(), number, to)),
                         None => {}
                     }
                     PaneScroll { group, given, after: response.viewport.offset, wheel: response.wheel, max: response.viewport.max_offset() }

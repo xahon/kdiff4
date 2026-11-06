@@ -238,6 +238,17 @@ pub fn line_text_at(lines: Lines<'_>, line: usize) -> Cursor {
 }
 
 
+/// The lines a selection touches, for marking them: the caret's line without a selection. A selection that ends at the start of a later line does not include that line. `None` when the text has no such line.
+pub fn selected_lines(cursor: Cursor, line_count: usize) -> Option<Range<usize>> {
+    let (start, end) = cursor.range();
+    if start.line >= line_count {
+        return None;
+    }
+    let last = if end.column == 0 && end.line > start.line { end.line - 1 } else { end.line };
+    Some(start.line..last.min(line_count - 1) + 1)
+}
+
+
 fn word_left(lines: Lines<'_>, position: Position) -> Position {
     if position.column == 0 {
         return move_caret(lines, position, Motion::Left);
@@ -764,6 +775,22 @@ mod tests {
         let lines = Lines { text: "", ranges: &[] };
         assert_eq!(move_caret(lines, at(3, 3), Motion::Down), at(0, 0));
         assert_eq!(clamp(lines, at(5, 5)), at(0, 0));
+    }
+
+
+    #[test]
+    fn a_selection_marks_the_lines_it_touches() {
+        let cursor = |anchor: Position, head: Position| Cursor { anchor, head };
+        assert_eq!(selected_lines(Cursor::at(at(3, 2)), 10), Some(3..4));
+        assert_eq!(selected_lines(cursor(at(3, 1), at(3, 4)), 10), Some(3..4));
+        assert_eq!(selected_lines(cursor(at(3, 1), at(5, 2)), 10), Some(3..6));
+        assert_eq!(selected_lines(cursor(at(5, 2), at(3, 1)), 10), Some(3..6), "backwards");
+        assert_eq!(selected_lines(cursor(at(3, 1), at(5, 0)), 10), Some(3..5), "ending at a line start leaves that line out");
+        assert_eq!(selected_lines(cursor(at(3, 0), at(4, 0)), 10), Some(3..4), "a triple-clicked line");
+        assert_eq!(selected_lines(cursor(at(3, 0), at(3, 0)), 10), Some(3..4));
+        assert_eq!(selected_lines(cursor(at(8, 0), at(30, 4)), 10), Some(8..10), "clamped to the text");
+        assert_eq!(selected_lines(Cursor::at(at(10, 0)), 10), None);
+        assert_eq!(selected_lines(Cursor::at(at(0, 0)), 0), None);
     }
 
 

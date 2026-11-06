@@ -188,6 +188,33 @@ fn edges_txt() {
 }
 
 
+/// B and C each add a different function at the same place of A, which conflicts.
+#[test]
+fn manual_alignment_rs() {
+    check_case("manual_alignment_rs", Counts { differences: 1, conflicts: 1, unresolved: 1 });
+}
+
+
+/// Marking B's function and C's function as the anchors and ranges of the Foo and Qux example, and applying, keeps both functions without a conflict.
+#[test]
+fn manual_alignment_separates_the_added_functions() {
+    let (mut client, host) = start();
+    open(&mut client, "manual_alignment_rs");
+    let marks = [(Document::A, 4..4), (Document::A, 4..4), (Document::B, 4..8), (Document::B, 8..8), (Document::C, 4..4), (Document::C, 4..8)];
+    for (document, lines) in marks {
+        run(&mut client, Command::MarkAlignment { document, lines });
+    }
+    let applied = run(&mut client, Command::ApplyAlignments { confirmed: false }).expect("Test: apply answers with a snapshot");
+    assert_eq!(counts(&applied), Counts { differences: 2, conflicts: 0, unresolved: 0 });
+    let expected_path = case_dir("manual_alignment_rs").join("aligned.rs");
+    let expected = fs::read_to_string(&expected_path).unwrap_or_else(|error| panic!("{}: {error}", expected_path.display()));
+    assert_eq!(applied.output.as_ref().unwrap().text, expected);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
 #[test]
 fn every_case_has_a_test() {
     let mut cases: Vec<String> = fs::read_dir(case_dir(""))
@@ -196,5 +223,5 @@ fn every_case_has_a_test() {
         .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_string()))
         .collect();
     cases.sort();
-    assert_eq!(cases, ["basic_txt", "conflict_txt", "edges_txt", "long_txt", "moved_and_changed_rs", "moved_functions_rs", "swapped_rs", "two_way_txt", "whitespace_rs"]);
+    assert_eq!(cases, ["basic_txt", "conflict_txt", "edges_txt", "long_txt", "manual_alignment_rs", "moved_and_changed_rs", "moved_functions_rs", "swapped_rs", "two_way_txt", "whitespace_rs"]);
 }

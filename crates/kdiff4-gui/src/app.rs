@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
-use kdiff4_protocol::{Change, Client, Command, Document, Event, HostMessage, Navigation, RequestId, Response};
+use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostMessage, Navigation, RequestId, Response};
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
@@ -26,8 +26,11 @@ const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND
 const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const UNDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
-const REDO_ALT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
+const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
+const MARK_LINES_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Space);
+const MARK_ANCHOR_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
+const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
@@ -51,6 +54,7 @@ const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
+const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
 const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
@@ -77,6 +81,9 @@ enum Pending {
 
     SelectRegion,
     ComparisonOptions,
+    /// A mark, anchor, renumbering, removal or clearing of alignment marks.
+    AlignmentEdit,
+    ApplyAlignments,
 }
 
 
@@ -433,6 +440,11 @@ impl KdiffApp {
                     Pending::Navigate(to) => Some(Status { text: format!("No {}", navigation_noun(to)), is_error: false }),
                     Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status { text: mirror.difference_summary(), is_error: false }),
                     Pending::SetOutputPath => None,
+                    Pending::AlignmentEdit => self.mirror
+                        .as_ref()
+                        .filter(|mirror| mirror.alignments().changed)
+                        .map(|_| Status { text: ALIGNMENTS_CHANGED_HINT.to_string(), is_error: false }),
+                    Pending::ApplyAlignments => self.mirror.as_ref().map(|mirror| Status { text: format!("Alignments applied. {}", mirror.difference_summary()), is_error: false }),
                 };
                 return;
             }
@@ -456,6 +468,13 @@ impl KdiffApp {
             Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
             Pending::SelectRegion => self.report_error(format!("Cannot select the region: {}", error.message)),
             Pending::ComparisonOptions => self.report_error(format!("Cannot apply the comparison options: {}", error.message)),
+            Pending::AlignmentEdit => self.report_error(format!("Cannot change the alignments: {}", error.message)),
+            Pending::ApplyAlignments if error.kind == ErrorKind::NeedsConfirmation => {
+                if open_dialog::confirm_apply_alignments() {
+                    self.send(Command::ApplyAlignments { confirmed: true }, Pending::ApplyAlignments);
+                }
+            }
+            Pending::ApplyAlignments => self.report_error(format!("Cannot apply the alignments: {}", error.message)),
         }
     }
 
@@ -584,6 +603,14 @@ impl KdiffApp {
                 if let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) {
                     self.send(Command::SetCurrentRegion { base, region: Some(region) }, Pending::SelectRegion);
                 }
+            }
+            PaneAction::MarkSelection(_) => self.mark_selected_lines(),
+            PaneAction::MarkAnchor(document, position) => self.mark_anchor(document, position),
+            PaneAction::RemoveAlignmentMark(document, number) => {
+                self.send(Command::RemoveAlignmentMark { document, number }, Pending::AlignmentEdit);
+            }
+            PaneAction::RenumberAlignmentMark(document, number, to) => {
+                self.send(Command::RenumberAlignmentMark { document, number, to }, Pending::AlignmentEdit);
             }
             PaneAction::CommitPath(document, text) => {
                 let path = paths::clean_path_text(&text).map(PathBuf::from);
@@ -776,7 +803,8 @@ impl KdiffApp {
     fn navigate(&mut self, to: Navigation) {
         let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) else { return };
         let from = self.caret_region();
-        self.send(Command::Navigate { base, from, to }, Pending::Navigate(to));
+        let include_alignments = self.view().alignment_stops;
+        self.send(Command::Navigate { base, from, to, include_alignments }, Pending::Navigate(to));
     }
 
 
@@ -800,6 +828,68 @@ impl KdiffApp {
     fn choose_for_unresolved(&mut self, document: Document) {
         let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
         self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose(None));
+    }
+
+
+    /// Marks the lines the selection touches in A, B or C.
+    fn mark_selected_lines(&mut self) {
+        let Some((document, cursor)) = self.panes.caret else {
+            self.report_error("Select lines in A, B or C to mark them for alignment".to_string());
+            return;
+        };
+        let count = self.mirror
+            .as_ref()
+            .and_then(|mirror| lines_of(mirror, document.clone()))
+            .map_or(0, |lines| lines.count());
+        let lines = if document == Document::D || self.panes.void_row.is_some() { None } else { editing::selected_lines(cursor, count) };
+        match lines {
+            Some(lines) => {
+                self.send(Command::MarkAlignment { document, lines }, Pending::AlignmentEdit);
+            }
+            None => self.report_error("Select lines in A, B or C to mark them for alignment".to_string()),
+        }
+    }
+
+
+    /// An anchor before the line with the caret in A, B or C; with the caret past the last line, at the end of the text.
+    fn mark_anchor_at_caret(&mut self) {
+        let Some((document, cursor)) = self.panes.caret else {
+            self.report_error("Put the caret in A, B or C to mark an anchor".to_string());
+            return;
+        };
+        if document == Document::D {
+            self.report_error("Put the caret in A, B or C to mark an anchor".to_string());
+            return;
+        }
+        let count = self.mirror
+            .as_ref()
+            .and_then(|mirror| lines_of(mirror, document.clone()))
+            .map_or(0, |lines| lines.count());
+        self.mark_anchor(document, cursor.head.line.min(count));
+    }
+
+
+    /// An anchor before line `position`: a position between two lines, which may be the end of the text.
+    fn mark_anchor(&mut self, document: Document, position: usize) {
+        self.send(Command::MarkAlignment { document, lines: position..position }, Pending::AlignmentEdit);
+    }
+
+
+    fn apply_alignments(&mut self) {
+        if self.mirror.as_ref().is_some_and(|mirror| mirror.alignments().changed) {
+            self.send(Command::ApplyAlignments { confirmed: false }, Pending::ApplyAlignments);
+        } else {
+            self.status = Some(Status { text: "The marks give the alignments already applied".to_string(), is_error: false });
+        }
+    }
+
+
+    fn clear_alignments(&mut self) {
+        if self.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()) {
+            self.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit);
+        } else {
+            self.status = Some(Status { text: "There are no alignment marks".to_string(), is_error: false });
+        }
     }
 
 
@@ -827,8 +917,22 @@ impl KdiffApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if !ctx.text_edit_focused() {
-            if ctx.input_mut(|input| input.consume_shortcut(&REDO_ALT_SHORTCUT) || input.consume_shortcut(&REDO_SHORTCUT)) {
+            if ctx.input_mut(|input| input.consume_shortcut(&REDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Redo);
+            }
+            if self.mirror.is_some() {
+                if ctx.input_mut(|input| input.consume_shortcut(&MARK_ANCHOR_SHORTCUT)) {
+                    self.mark_anchor_at_caret();
+                }
+                if ctx.input_mut(|input| input.consume_shortcut(&MARK_LINES_SHORTCUT)) {
+                    self.mark_selected_lines();
+                }
+                if ctx.input_mut(|input| input.consume_shortcut(&CLEAR_ALIGNMENTS_SHORTCUT)) {
+                    self.clear_alignments();
+                }
+                if ctx.input_mut(|input| input.consume_shortcut(&APPLY_ALIGNMENTS_SHORTCUT)) {
+                    self.apply_alignments();
+                }
             }
             if ctx.input_mut(|input| input.consume_shortcut(&UNDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Undo);
@@ -952,6 +1056,24 @@ impl KdiffApp {
                         }
                     }
                     ui.separator();
+                    let (marks, changed) = self.mirror.as_ref().map_or((0, false), |mirror| (mirror.alignments().marks.len(), mirror.alignments().changed));
+                    let mark_lines = egui::Button::new("Mark Selected Lines for Alignment").shortcut_text(ui.ctx().format_shortcut(&MARK_LINES_SHORTCUT));
+                    if ui.add_enabled(has_session, mark_lines).clicked() {
+                        self.mark_selected_lines();
+                    }
+                    let mark_anchor = egui::Button::new("Mark Alignment Anchor Before Line").shortcut_text(ui.ctx().format_shortcut(&MARK_ANCHOR_SHORTCUT));
+                    if ui.add_enabled(has_session, mark_anchor).clicked() {
+                        self.mark_anchor_at_caret();
+                    }
+                    let apply = egui::Button::new("Apply Alignments").shortcut_text(ui.ctx().format_shortcut(&APPLY_ALIGNMENTS_SHORTCUT));
+                    if ui.add_enabled(changed, apply).on_disabled_hover_text("The marks give the alignments already applied").clicked() {
+                        self.apply_alignments();
+                    }
+                    let clear = egui::Button::new("Clear All Alignments").shortcut_text(ui.ctx().format_shortcut(&CLEAR_ALIGNMENTS_SHORTCUT));
+                    if ui.add_enabled(marks > 0, clear).clicked() {
+                        self.clear_alignments();
+                    }
+                    ui.separator();
                     let mut void_space = self.view().align_output;
                     if ui.add_enabled(is_merge, egui::Checkbox::new(&mut void_space, VOID_TOGGLE_LABEL)).on_hover_text(VOID_TOGGLE_HINT).clicked() {
                         self.toggle_void_space();
@@ -1033,7 +1155,7 @@ impl KdiffApp {
     fn pane_options(&self) -> PaneOptions {
         let view = self.view();
         let [r, g, b, a] = view.current_region_color;
-        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_corner_radius: view.region_corner_radius, other_region_border_percent: view.other_region_border_percent, whitespace: view.whitespace.clone(), overview_strip: view.show_overview_strip }
+        PaneOptions { line_numbers: view.show_line_numbers, gutters: view.show_gutters, current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a), jump_context_rows: view.jump_context_lines as usize, scroll_step_rows: view.scroll_step_lines as usize, scroll_motion: ScrollMotion { smooth: view.smooth_scrolling, duration: view.smooth_scroll_ms as f32 / 1000.0 }, region_corner_radius: view.region_corner_radius, other_region_border_percent: view.other_region_border_percent, whitespace: view.whitespace.clone(), overview_strip: view.show_overview_strip, alignment_color: egui::Color32::from_rgba_unmultiplied(view.alignment_color[0], view.alignment_color[1], view.alignment_color[2], view.alignment_color[3]) }
     }
 
 
@@ -1337,7 +1459,138 @@ mod tests {
         let comparison = Comparison { regions: vec![region(0, RegionStatus::Diff(HunkChange::Modified)), region(1, RegionStatus::Diff(HunkChange::Unchanged))] };
         let merge = vec![RegionMerge { choice: Choice::Hunks(vec![Document::B]), edited: false, output_lines: 1 }, RegionMerge { choice: Choice::Hunks(vec![Document::A]), edited: false, output_lines: 1 }];
         let output = OutputDocument { path: None, text: "b\nx\n".to_string(), modified: false };
-        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a\nx\n"), source(Document::B, "b\nx\n")], output: Some(output), comparison, engine: EngineCapabilities::default(), merge, options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new() }, false)
+        Mirror::from_snapshot(Snapshot { revision: Revision(1), documents: vec![source(Document::A, "a\nx\n"), source(Document::B, "b\nx\n")], output: Some(output), comparison, engine: EngineCapabilities::default(), merge, options: ComparisonOptions::default(), current_region: None, char_diffs: Vec::new(), alignments: kdiff4_protocol::Alignments::default() }, false)
+    }
+
+
+    /// An app showing `resolved_mirror()` over an in-process transport, with the host end of it. The user's saved settings are not used.
+    fn app_with_session() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
+        let (client, host) = kdiff4_protocol::in_process();
+        let ctx = egui::Context::default();
+        let mut app = KdiffApp::new(&ctx, client, Startup::default());
+        app.config = GuiConfig::default();
+        app.mirror = Some(resolved_mirror());
+        (app, host, ctx)
+    }
+
+
+    fn press(app: &mut KdiffApp, ctx: &egui::Context, key: Key, modifiers: Modifiers) {
+        let events = vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers }];
+        ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| app.handle_shortcuts(ctx))
+            .drop_without_applying_deltas();
+    }
+
+
+    /// What the app sent to the engine, in order. Drops the app, which ends the transport.
+    fn sent(app: KdiffApp, host: kdiff4_protocol::HostEndpoint) -> Vec<Command> {
+        drop(app);
+        std::iter::from_fn(|| host.recv())
+            .map(|request| request.command)
+            .collect()
+    }
+
+
+    fn mark(document: Document, number: u32, lines: std::ops::Range<usize>) -> kdiff4_protocol::AlignmentMark {
+        kdiff4_protocol::AlignmentMark { document, number, lines, status: kdiff4_protocol::MarkStatus::Pending }
+    }
+
+
+    /// Gives the mirror these marks, the way a delta from the host does.
+    fn set_marks(app: &mut KdiffApp, marks: Vec<kdiff4_protocol::AlignmentMark>, changed: bool) {
+        let change = Change::AlignmentsChanged(kdiff4_protocol::Alignments { marks, changed });
+        let mirror = app.mirror.as_mut().unwrap();
+        let revision = mirror.revision();
+        mirror.apply_delta(kdiff4_protocol::Delta { revision: kdiff4_protocol::Revision(revision.0 + 1), cause: None, change });
+    }
+
+
+    #[test]
+    fn ctrl_space_marks_the_lines_of_the_selection() {
+        let (mut app, host, ctx) = app_with_session();
+        app.panes.set_caret(Document::B, Cursor { anchor: Position { line: 0, column: 0 }, head: Position { line: 1, column: 1 } }, None);
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
+        assert_eq!(sent(app, host), [Command::MarkAlignment { document: Document::B, lines: 0..2 }]);
+    }
+
+
+    #[test]
+    fn marking_needs_lines_of_a_source_document() {
+        let (mut app, host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
+        app.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), Some(1));
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
+        assert!(app.status.as_ref().is_some_and(|status| status.is_error));
+        assert_eq!(sent(app, host), []);
+    }
+
+
+    #[test]
+    fn ctrl_shift_space_marks_an_anchor_before_the_caret_line() {
+        let (mut app, host, ctx) = app_with_session();
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 1 }), None);
+        press(&mut app, &ctx, Key::Space, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(sent(app, host), [Command::MarkAlignment { document: Document::A, lines: 1..1 }]);
+    }
+
+
+    #[test]
+    fn ctrl_y_applies_the_alignments_instead_of_redoing() {
+        let (mut app, host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
+        assert!(app.status.as_ref().is_some_and(|status| !status.is_error), "nothing to apply says so");
+        set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
+        press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(sent(app, host), [Command::ApplyAlignments { confirmed: false }, Command::Redo]);
+    }
+
+
+    #[test]
+    fn ctrl_shift_y_clears_the_marks_and_is_not_apply() {
+        let (mut app, host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::Y, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
+        press(&mut app, &ctx, Key::Y, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(sent(app, host), [Command::ClearAlignmentMarks]);
+    }
+
+
+    #[test]
+    fn navigation_asks_for_alignment_stops_as_configured() {
+        let (mut app, host, ctx) = app_with_session();
+        app.navigate(Navigation::NextDifference);
+        let view = ViewConfig { alignment_stops: false, ..ViewConfig::default() };
+        app.apply_view(&ctx, &view);
+        app.navigate(Navigation::NextDifference);
+        let stops: Vec<bool> = sent(app, host)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Navigate { include_alignments, .. } => Some(include_alignments),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops, [true, false]);
+    }
+
+
+    #[test]
+    fn the_status_says_when_alignments_wait_for_apply() {
+        let (mut app, host, _ctx) = app_with_session();
+        set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
+        let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
+        app.handle_response(id, Ok(()));
+        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(ALIGNMENTS_CHANGED_HINT));
+        set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], false);
+        let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
+        app.handle_response(id, Ok(()));
+        assert!(app.status.is_none());
+        let id = app.send(Command::MarkAlignment { document: Document::A, lines: 5..6 }, Pending::AlignmentEdit).unwrap();
+        app.handle_response(id, Err(kdiff4_protocol::ProtocolError { kind: ErrorKind::InvalidRequest, message: "no".to_string() }));
+        assert!(app.status.as_ref().is_some_and(|status| status.is_error && status.text.contains("no")));
+        drop(sent(app, host));
     }
 
 

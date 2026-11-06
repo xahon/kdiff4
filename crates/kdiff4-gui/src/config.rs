@@ -25,6 +25,8 @@ pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
 pub const DEFAULT_REGION_CORNER_RADIUS: u8 = 2;
 pub const MAX_OTHER_REGION_BORDER_PERCENT: u8 = 100;
 pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
+/// Cyan, a color none of the documents, the red or the jumped-to region uses.
+pub const DEFAULT_ALIGNMENT_COLOR: [u8; 4] = [0, 188, 212, 255];
 
 
 #[derive(Debug, Error)]
@@ -91,6 +93,10 @@ pub struct ViewConfig {
     pub region_corner_radius: u8,
     /// Opacity of the borders of the regions other than the jumped-to one, in percent.
     pub other_region_border_percent: u8,
+    /// RGBA of the alignment marks in the gutters of the source panes.
+    pub alignment_color: [u8; 4],
+    /// Previous and Next Difference also stop at the first region of every applied alignment.
+    pub alignment_stops: bool,
     pub theme: ThemeChoice,
     pub light_colors: ThemeColors,
     pub dark_colors: ThemeColors,
@@ -100,7 +106,7 @@ pub struct ViewConfig {
 
 impl Default for ViewConfig {
     fn default() -> Self {
-        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
+        ViewConfig { font_family: None, font_size: DEFAULT_FONT_SIZE, font_hinting: true, subpixel_positioning: true, corner_radius: DEFAULT_CORNER_RADIUS, show_line_numbers: true, show_gutters: true, align_output: false, show_overview_strip: true, jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES, smooth_scrolling: true, smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS, scroll_step_lines: DEFAULT_SCROLL_STEP_LINES, current_region_color: DEFAULT_CURRENT_REGION_COLOR, region_corner_radius: DEFAULT_REGION_CORNER_RADIUS, other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT, alignment_color: DEFAULT_ALIGNMENT_COLOR, alignment_stops: true, theme: ThemeChoice::Light, light_colors: ThemeColors::default(), dark_colors: ThemeColors::default(), whitespace: WhitespaceConfig::default() }
     }
 }
 
@@ -301,7 +307,7 @@ mod tests {
         let path = dir.join("nested").join("gui.toml");
         let mut config = GuiConfig::default();
         config.recent.last_dir = Some(PathBuf::from("C:/some/dir"));
-        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None, document_a: Some([4, 5, 6]), document_b: None, document_c: Some([7, 8, 9]), red: Some([10, 11, 12]) }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]), document_a: None, document_b: Some([13, 14, 15]), document_c: None, red: None }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
+        config.view = ViewConfig { font_family: Some("Consolas".to_string()), font_size: 15.5, font_hinting: false, subpixel_positioning: false, corner_radius: 0, show_line_numbers: false, show_gutters: false, align_output: true, show_overview_strip: false, jump_context_lines: 7, smooth_scrolling: false, smooth_scroll_ms: 400, scroll_step_lines: 5, current_region_color: [1, 2, 3, 4], region_corner_radius: 4, other_region_border_percent: 30, alignment_color: [9, 8, 7, 6], alignment_stops: false, theme: ThemeChoice::System, light_colors: ThemeColors { ui_text: Some([1, 2, 3]), pane_text: None, document_a: Some([4, 5, 6]), document_b: None, document_c: Some([7, 8, 9]), red: Some([10, 11, 12]) }, dark_colors: ThemeColors { ui_text: None, pane_text: Some([250, 251, 252]), document_a: None, document_b: Some([13, 14, 15]), document_c: None, red: None }, whitespace: WhitespaceConfig { render: true, spaces: false, tabs: true, line_feeds: false, carriage_returns: true, other: false } };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
         assert!(!dir.join("nested").join("gui.toml.tmp").exists());
@@ -341,6 +347,19 @@ show_overview_strip = false
         let path = dir.join("gui.toml");
         fs::write(&path, "future_key = 3\n[recent]\n").unwrap();
         assert_eq!(load(&path).unwrap(), GuiConfig::default());
+    }
+
+
+    #[test]
+    fn alignment_keys_default_to_cyan_with_stops_and_load_from_toml() {
+        let defaults = ViewConfig::default();
+        assert_eq!(defaults.alignment_color, DEFAULT_ALIGNMENT_COLOR);
+        assert!(defaults.alignment_stops);
+        let dir = temp_dir("alignment");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "[view]\nalignment_color = [1, 2, 3, 4]\nalignment_stops = false\n").unwrap();
+        let view = load(&path).unwrap().view;
+        assert_eq!((view.alignment_color, view.alignment_stops), ([1, 2, 3, 4], false));
     }
 
 

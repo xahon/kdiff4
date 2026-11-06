@@ -227,6 +227,16 @@ impl SettingsDialog {
             ui.end_row();
         });
 
+        section(ui, "alignments", "Alignments: Gutter and navigation", |ui| {
+            ui.label("Gutter color:");
+            ui.color_edit_button_srgba_unmultiplied(&mut self.draft.alignment_color).on_hover_text("The color of the alignment marks in the gutters of the source panes.");
+            ui.end_row();
+
+            ui.label("Jump stops:");
+            ui.checkbox(&mut self.draft.alignment_stops, "Previous and Next Difference stop at alignments").on_hover_text("Also stop at the first region of every applied alignment, whether or not its documents differ there.");
+            ui.end_row();
+        });
+
         let dark = theme == Theme::Dark;
         let defaults = theme::palette(theme);
         section(ui, "document_colors", "Documents: Colors", |ui| {
@@ -462,6 +472,26 @@ mod tests {
         assert!(dialog.draft().show_overview_strip);
         dialog.set_show_overview_strip(false);
         assert!(!dialog.original().show_overview_strip && !dialog.draft().show_overview_strip);
+    }
+
+
+    #[test]
+    fn the_alignment_checkbox_edits_the_draft_and_reset_restores_it() {
+        use egui_kittest::kittest::Queryable;
+        let dialog = SettingsDialog::new(&ViewConfig::default(), None);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 3000.0))
+            .with_accessibility_check(false)
+            .build_ui_state(|ui, dialog: &mut SettingsDialog| { dialog.show(ui, Some(&[])); }, dialog);
+        harness.run_steps(3);
+        harness.get_by_label("Previous and Next Difference stop at alignments").scroll_to_me();
+        harness.run_steps(3);
+        harness.get_by_label("Previous and Next Difference stop at alignments").click();
+        harness.run_steps(3);
+        assert!(!harness.state().draft().alignment_stops);
+        harness.state_mut().reset_to_defaults();
+        assert!(harness.state().draft().alignment_stops);
+        assert_eq!(harness.state().draft().alignment_color, crate::config::DEFAULT_ALIGNMENT_COLOR);
     }
 
 

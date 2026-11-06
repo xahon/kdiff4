@@ -2,9 +2,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, MergeStatus, Progress, Region, RegionStatus, SourceLines, run_comparison};
-use kdiff4_protocol::{Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
+use kdiff4_protocol::engine::{CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, ManualAlignment, MergeStatus, Progress, Region, RegionStatus, SourceLines, run_comparison};
+use kdiff4_protocol::{Alignments, Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot};
 
+use crate::alignment_marks::AlignmentMarks;
 use crate::error::CoreError;
 use crate::merge::{self, Merge, MergeStep, RegionState};
 use crate::normalizer;
@@ -59,6 +60,8 @@ pub struct Session {
     current: Option<usize>,
     /// Per source document, the character-level diff of its lines; recomputed with the comparison.
     char_diffs: Vec<LineCharRuns>,
+    /// The alignment marks and the alignments the comparison was computed with.
+    alignments: AlignmentMarks,
 }
 
 
@@ -81,7 +84,7 @@ impl Session {
             sources.push(Source { document, path: path.to_path_buf(), label, text });
         }
         let options = ComparisonOptions::default();
-        let comparison = compare(&sources, engine, &options)?;
+        let comparison = compare(&sources, engine, &options, &[])?;
         let char_diffs = char_diffs(&sources, &comparison, engine, &options);
         let (merge, output) = if files.is_merge() {
             let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&sources));
@@ -89,7 +92,7 @@ impl Session {
         } else {
             (Merge::without_output(comparison.regions), None)
         };
-        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None, char_diffs })
+        Ok(Session { revision: 1, sources, output, options, merge, engine: engine.capabilities(), current: None, char_diffs, alignments: AlignmentMarks::default() })
     }
 
 
@@ -112,7 +115,7 @@ impl Session {
             .as_ref()
             .map(|output| OutputDocument { path: output.path.clone(), text: output.text.clone(), modified: output.history.is_modified() });
         let comparison = Comparison { regions: self.merge.regions().to_vec() };
-        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone(), char_diffs: self.char_diffs.clone() }
+        Snapshot { revision: self.revision(), documents, output, comparison, engine: self.engine.clone(), merge: self.merge.region_merges(), options: self.options.clone(), current_region: self.current.clone(), char_diffs: self.char_diffs.clone(), alignments: self.alignment_summary() }
     }
 
 
@@ -121,7 +124,7 @@ impl Session {
     }
 
 
-    /// Replaces A, B or C with the file at `path` and recomputes the regions and rows. D is rebuilt from them, its choices and edits are dropped and its undo history starts over. On failure the session is unchanged.
+    /// Replaces A, B or C with the file at `path` and recomputes the regions and rows. D is rebuilt from them, its choices and edits are dropped and its undo history starts over. The alignment marks and the applied alignments go too, since their lines moved. On failure the session is unchanged.
     pub fn load_source(&mut self, document: Document, path: &Path, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
         let index = self.sources
             .iter()
@@ -129,7 +132,7 @@ impl Session {
             .ok_or(CoreError::NoSuchDocument { document: document.clone() })?;
         let text = SourceText::load(path)?;
         let old_text = std::mem::replace(&mut self.sources[index].text, text);
-        let comparison = match compare(&self.sources, engine, &self.options) {
+        let comparison = match compare(&self.sources, engine, &self.options, &[]) {
             Ok(comparison) => comparison,
             Err(error) => {
                 self.sources[index].text = old_text;
@@ -137,22 +140,23 @@ impl Session {
             }
         };
         self.sources[index].path = path.to_path_buf();
+        self.alignments.reset();
         self.rebuild(comparison, engine);
         Ok(())
     }
 
 
-    /// Recomputes the regions and rows with `options` and rebuilds D from them, like a reload. On failure the session is unchanged.
+    /// Recomputes the regions and rows with `options` and the applied alignments, and rebuilds D from them, like a reload. On failure the session is unchanged.
     pub fn set_comparison_options(&mut self, options: ComparisonOptions, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
-        let comparison = compare(&self.sources, engine, &options)?;
+        let comparison = compare(&self.sources, engine, &options, self.alignments.applied())?;
         self.options = options;
         self.rebuild(comparison, engine);
         Ok(())
     }
 
 
-    /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. Differences include hand-edited regions, so a line split out of a stable region by an edit can be reached. `Ok(None)` when there is none; the current region stays.
-    pub fn navigate(&mut self, base: &Revision, from: Option<usize>, to: Navigation) -> Result<Option<usize>, CoreError> {
+    /// Moves the current region from `from` (the current region when `None`, the document's start or end when there is none either) to the next or previous region `to` looks for. Differences include hand-edited regions, so a line split out of a stable region by an edit can be reached, and, with `include_alignments`, the first region of every applied alignment. `Ok(None)` when there is none; the current region stays.
+    pub fn navigate(&mut self, base: &Revision, from: Option<usize>, to: Navigation, include_alignments: bool) -> Result<Option<usize>, CoreError> {
         self.check_base(base)?;
         let regions = self.merge.regions();
         let states = self.merge.states();
@@ -163,8 +167,9 @@ impl Session {
             return Err(CoreError::NoSuchRegion { index, count });
         }
         let from = from.or(self.current.clone()).filter(|index| *index < count);
+        let stops = if include_alignments { alignment_stops(regions, self.alignments.applied()) } else { Vec::new() };
         let wanted = |index: &usize| match to {
-            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states[*index].merge.edited,
+            Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states[*index].merge.edited || stops.contains(index),
             Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
         };
         let found = match to {
@@ -188,6 +193,73 @@ impl Session {
         }
         self.current = region;
         Ok(())
+    }
+
+
+    /// Marks `lines` of `document` for alignment under the lowest number the document has not used. An empty range is an anchor. The comparison does not change until the alignments are applied.
+    pub fn mark_alignment(&mut self, document: Document, lines: Range<usize>) -> Result<Change, CoreError> {
+        let number = self.alignments.mark(document.clone(), lines.clone(), &self.line_counts())?;
+        log::info!("alignment: marked lines {}..{} of {} as alignment {number}", lines.start, lines.end, document.letter());
+        Ok(self.marks_changed())
+    }
+
+
+    pub fn remove_alignment_mark(&mut self, document: Document, number: u32) -> Result<Change, CoreError> {
+        self.alignments.remove(document, number)?;
+        Ok(self.marks_changed())
+    }
+
+
+    /// Gives a mark another number; a mark of the same document that has it takes the old one.
+    pub fn renumber_alignment_mark(&mut self, document: Document, number: u32, to: u32) -> Result<Change, CoreError> {
+        self.alignments.renumber(document, number, to)?;
+        Ok(self.marks_changed())
+    }
+
+
+    /// Removes every mark; `None` when there were none. The applied alignments stay until the next apply.
+    pub fn clear_alignment_marks(&mut self) -> Option<Change> {
+        if self.alignments.summary(self.sources.len()).marks.is_empty() {
+            return None;
+        }
+        self.alignments.clear();
+        Some(self.marks_changed())
+    }
+
+
+    /// Compares again with the alignments the marks give (see `Command::ApplyAlignments`), rebuilding D like a reload. Returns whether anything changed: `false` when the marks give the alignments already applied. Without `confirmed`, a D that holds choices or edits is refused. On failure the session is unchanged.
+    pub fn apply_alignments(&mut self, confirmed: bool, engine: &dyn ComparisonEngine) -> Result<bool, CoreError> {
+        let alignments = self.alignments.to_apply(&self.line_counts())?;
+        if alignments == self.alignments.applied() {
+            return Ok(false);
+        }
+        if !confirmed && self.output.is_some() && self.merge.has_user_work() {
+            return Err(CoreError::NeedsConfirmation);
+        }
+        let comparison = compare(&self.sources, engine, &self.options, &alignments)?;
+        log::info!("alignment: applied {} alignments", alignments.len());
+        self.alignments.set_applied(alignments);
+        self.rebuild(comparison, engine);
+        Ok(true)
+    }
+
+
+    fn alignment_summary(&self) -> Alignments {
+        self.alignments.summary(self.sources.len())
+    }
+
+
+    fn marks_changed(&mut self) -> Change {
+        self.revision += 1;
+        Change::AlignmentsChanged(self.alignment_summary())
+    }
+
+
+    fn line_counts(&self) -> Vec<usize> {
+        self.sources
+            .iter()
+            .map(|source| source.text.lines.len())
+            .collect()
     }
 
 
@@ -461,6 +533,24 @@ impl Session {
 }
 
 
+/// For every alignment, the first region that has lines inside it. Regions joined across an alignment's edge still count.
+fn alignment_stops(regions: &[Region], alignments: &[ManualAlignment]) -> Vec<usize> {
+    alignments
+        .iter()
+        .filter_map(|alignment| {
+            let (document, part) = alignment
+                .parts
+                .iter()
+                .enumerate()
+                .find(|(_, part)| !part.is_empty())?;
+            regions
+                .iter()
+                .position(|region| region.hunks.get(document).is_some_and(|hunk| hunk.start < part.end && part.start < hunk.end))
+        })
+        .collect()
+}
+
+
 fn source_lines(sources: &[Source]) -> Vec<Vec<&str>> {
     sources
         .iter()
@@ -470,12 +560,12 @@ fn source_lines(sources: &[Source]) -> Vec<Vec<&str>> {
 
 
 /// Compares the source documents with `engine`. Runs to completion: cancelable worker jobs come later.
-fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &ComparisonOptions) -> Result<Comparison, CoreError> {
+fn compare(sources: &[Source], engine: &dyn ComparisonEngine, options: &ComparisonOptions, alignments: &[ManualAlignment]) -> Result<Comparison, CoreError> {
     let lines = source_lines(sources);
     let tokens = normalizer::tokenize(&lines);
     let input = CompareInput {
         sources: lines.iter().zip(&tokens).map(|(lines, tokens)| SourceLines { lines, tokens }).collect(),
-        alignments: &[],
+        alignments,
         options,
     };
     let cancel = AtomicBool::new(false);
@@ -538,7 +628,7 @@ mod tests {
     use std::fs;
 
     use kdiff4_protocol::engine::{CharDiff, EngineError, HunkChange, MergeStatus, RegionStatus, Row};
-    use kdiff4_protocol::{ErrorKind, Labels, ProtocolError};
+    use kdiff4_protocol::{ErrorKind, Labels, MarkStatus, ProtocolError};
 
     use super::*;
     use crate::builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
@@ -1106,14 +1196,14 @@ mod tests {
         let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
         let base = session.revision();
         assert_eq!(session.current_region(), None);
-        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), Some(1));
-        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), Some(3));
-        assert_eq!(session.navigate(&base, None, Navigation::NextDifference).unwrap(), None);
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), None);
         assert_eq!(session.current_region(), Some(3));
-        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference).unwrap(), Some(1));
-        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict).unwrap(), Some(3));
-        assert_eq!(session.navigate(&base, Some(3), Navigation::PreviousConflict).unwrap(), None);
-        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict).unwrap(), None);
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict, false).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, Some(3), Navigation::PreviousConflict, false).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict, false).unwrap(), None);
         assert_eq!(session.revision(), base);
     }
 
@@ -1127,10 +1217,10 @@ cc
 ");
         session.edit_output(&edit(&session, 4..4, "x"), &BuiltinEngine).unwrap();
         let base = session.revision();
-        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference).unwrap(), Some(1));
-        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousDifference).unwrap(), Some(1));
-        assert_eq!(session.navigate(&base, Some(1), Navigation::NextDifference).unwrap(), None);
-        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference, false).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousDifference, false).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(1), Navigation::NextDifference, false).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextConflict, false).unwrap(), None);
     }
 
 
@@ -1139,9 +1229,9 @@ cc
         let dir = temp_dir("navigate-ends");
         let mut session = merge_of(&dir, &["same", "base", "x", "keep", "a"], &["same", "left", "x", "keep", "b"], &["same", "base", "x", "keep", "c"]);
         let base = session.revision();
-        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), Some(3));
         session.set_current_region(&base, None).unwrap();
-        assert_eq!(session.navigate(&base, None, Navigation::PreviousConflict).unwrap(), Some(3));
+        assert_eq!(session.navigate(&base, None, Navigation::PreviousConflict, false).unwrap(), Some(3));
     }
 
 
@@ -1150,7 +1240,7 @@ cc
         let dir = temp_dir("navigate-resolved");
         let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
         session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
-        assert_eq!(session.navigate(&session.revision(), Some(0), Navigation::NextConflict).unwrap(), Some(1));
+        assert_eq!(session.navigate(&session.revision(), Some(0), Navigation::NextConflict, false).unwrap(), Some(1));
     }
 
 
@@ -1159,11 +1249,284 @@ cc
         let dir = temp_dir("navigate-bad");
         let mut session = merge_of(&dir, &["a"], &["b"], &["c"]);
         let base = session.revision();
-        assert!(matches!(session.navigate(&Revision(9), None, Navigation::NextConflict), Err(CoreError::StaleRevision { .. })));
-        assert!(matches!(session.navigate(&base, Some(4), Navigation::NextConflict), Err(CoreError::NoSuchRegion { index: 4, count: 1 })));
+        assert!(matches!(session.navigate(&Revision(9), None, Navigation::NextConflict, false), Err(CoreError::StaleRevision { .. })));
+        assert!(matches!(session.navigate(&base, Some(4), Navigation::NextConflict, false), Err(CoreError::NoSuchRegion { index: 4, count: 1 })));
         assert!(matches!(session.set_current_region(&base, Some(1)), Err(CoreError::NoSuchRegion { index: 1, count: 1 })));
         session.set_current_region(&base, Some(0)).unwrap();
         assert_eq!(session.current_region(), Some(0));
+    }
+
+
+    /// The Foo and Qux example of Manual alignment in ARCHITECTURE.md: B adds Foo and C adds Qux between Bar and Baz.
+    fn foo_and_qux(dir: &Path) -> Session {
+        merge_of(dir, &["Bar", "Baz"], &["Bar", "Foo", "Baz"], &["Bar", "Qux", "Baz"])
+    }
+
+
+    /// A gets two anchors before Baz; B gets Foo and an anchor after it; C gets an anchor before Qux, and Qux.
+    fn mark_foo_and_qux(session: &mut Session) {
+        for (document, lines) in [(Document::A, 1..1), (Document::A, 1..1), (Document::B, 1..2), (Document::B, 2..2), (Document::C, 1..1), (Document::C, 1..2)] {
+            session.mark_alignment(document, lines).unwrap();
+        }
+    }
+
+
+    fn alignment_of(session: &Session) -> Alignments {
+        session.snapshot().alignments
+    }
+
+
+    #[test]
+    fn marks_wait_for_apply_and_apply_separates_unrelated_insertions() {
+        let dir = temp_dir("alignment-apply");
+        let mut session = foo_and_qux(&dir);
+        let unaligned = [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::Conflict), RegionStatus::Merge(MergeStatus::Unchanged)];
+        assert_eq!(statuses(&session.snapshot().comparison), unaligned);
+        let revision = session.revision();
+        mark_foo_and_qux(&mut session);
+        assert_eq!(session.revision().0, revision.0 + 6);
+        assert_eq!(statuses(&session.snapshot().comparison), unaligned);
+        let summary = alignment_of(&session);
+        assert!(summary.changed);
+        assert_eq!(summary.marks.len(), 6);
+        assert!(summary.marks.iter().all(|mark| mark.status == MarkStatus::Pending));
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), true);
+        let snapshot = session.snapshot();
+        let aligned = [RegionStatus::Merge(MergeStatus::Unchanged), RegionStatus::Merge(MergeStatus::ChangedInB), RegionStatus::Merge(MergeStatus::ChangedInC), RegionStatus::Merge(MergeStatus::Unchanged)];
+        assert_eq!(statuses(&snapshot.comparison), aligned);
+        assert_eq!(snapshot.output.unwrap().text, "Bar\nFoo\nQux\nBaz\n");
+        assert!(!snapshot.alignments.changed);
+        assert!(snapshot.alignments.marks.iter().all(|mark| mark.status == MarkStatus::Applied));
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn applying_nothing_new_changes_nothing() {
+        let dir = temp_dir("alignment-noop");
+        let mut session = foo_and_qux(&dir);
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), false);
+        mark_foo_and_qux(&mut session);
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        let before = session.snapshot();
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), false);
+        assert_eq!(session.snapshot(), before);
+    }
+
+
+    #[test]
+    fn marks_of_an_incomplete_number_are_kept_and_ignored() {
+        let dir = temp_dir("alignment-incomplete");
+        let mut session = foo_and_qux(&dir);
+        session.mark_alignment(Document::B, 1..2).unwrap();
+        session.mark_alignment(Document::C, 1..2).unwrap();
+        assert!(alignment_of(&session).marks.iter().all(|mark| mark.status == MarkStatus::Unmatched));
+        assert!(!alignment_of(&session).changed);
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), false);
+        assert_eq!(alignment_of(&session).marks.len(), 2);
+    }
+
+
+    #[test]
+    fn bad_marks_are_rejected_without_a_change() {
+        let dir = temp_dir("alignment-bad-marks");
+        let mut session = foo_and_qux(&dir);
+        let before = session.snapshot();
+        assert!(matches!(session.mark_alignment(Document::D, 0..1), Err(CoreError::NoSuchDocument { .. })));
+        assert!(matches!(session.mark_alignment(Document::A, 1..3), Err(CoreError::InvalidMark { .. })));
+        assert_eq!(session.snapshot(), before);
+        session.mark_alignment(Document::A, 0..2).unwrap();
+        let error = session.mark_alignment(Document::A, 1..2).unwrap_err();
+        assert_eq!(ProtocolError::from(error).kind, ErrorKind::InvalidRequest);
+        assert!(matches!(session.remove_alignment_mark(Document::A, 4), Err(CoreError::InvalidMark { .. })));
+        assert!(matches!(session.renumber_alignment_mark(Document::A, 1, 0), Err(CoreError::InvalidMark { .. })));
+        assert_eq!(alignment_of(&session).marks.len(), 1);
+        assert_eq!(session.snapshot().comparison, before.comparison);
+    }
+
+
+    #[test]
+    fn marks_can_be_removed_renumbered_and_cleared() {
+        let dir = temp_dir("alignment-edit-marks");
+        let mut session = foo_and_qux(&dir);
+        session.mark_alignment(Document::A, 0..1).unwrap();
+        session.mark_alignment(Document::A, 1..2).unwrap();
+        session.renumber_alignment_mark(Document::A, 1, 2).unwrap();
+        let numbers = |session: &Session| -> Vec<(u32, Range<usize>)> {
+            alignment_of(session)
+                .marks
+                .iter()
+                .map(|mark| (mark.number, mark.lines.clone()))
+                .collect()
+        };
+        assert_eq!(numbers(&session), [(1, 1..2), (2, 0..1)]);
+        session.remove_alignment_mark(Document::A, 1).unwrap();
+        assert_eq!(numbers(&session), [(2, 0..1)]);
+        assert!(matches!(session.clear_alignment_marks(), Some(Change::AlignmentsChanged(_))));
+        assert!(numbers(&session).is_empty());
+        assert!(session.clear_alignment_marks().is_none());
+    }
+
+
+    #[test]
+    fn crossing_alignments_are_refused_and_keep_the_session() {
+        let dir = temp_dir("alignment-crossing");
+        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+        for (document, lines) in [(Document::A, 0..1), (Document::A, 1..2), (Document::B, 1..2), (Document::B, 0..1), (Document::C, 0..1), (Document::C, 1..2)] {
+            session.mark_alignment(document, lines).unwrap();
+        }
+        let before = session.snapshot();
+        let error = session.apply_alignments(true, &BuiltinEngine).unwrap_err();
+        assert_eq!(error.to_string(), "invalid manual alignment: alignments 1 and 2 cross in B");
+        assert_eq!(ProtocolError::from(error).kind, ErrorKind::InvalidRequest);
+        assert_eq!(session.snapshot(), before);
+    }
+
+
+    #[test]
+    fn numbers_may_run_against_the_positions() {
+        let dir = temp_dir("alignment-reversed-numbers");
+        let mut session = merge_of(&dir, &["a", "b"], &["a", "b"], &["a", "b"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document.clone(), 1..2).unwrap();
+            session.mark_alignment(document, 0..1).unwrap();
+        }
+        assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
+        assert!(alignment_of(&session).marks.iter().all(|mark| mark.status == MarkStatus::Applied));
+    }
+
+
+    #[test]
+    fn apply_asks_before_discarding_work() {
+        let dir = temp_dir("alignment-confirm");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 1..2).unwrap();
+        }
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        let before = session.snapshot();
+        let error = session.apply_alignments(false, &BuiltinEngine).unwrap_err();
+        assert_eq!(ProtocolError::from(error).kind, ErrorKind::NeedsConfirmation);
+        assert_eq!(session.snapshot(), before);
+        assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
+        assert_eq!(choices(&session)[1], Choice::Unresolved);
+        assert_eq!(session.undo().unwrap(), None);
+    }
+
+
+    #[test]
+    fn hand_edits_count_as_work_but_auto_resolved_regions_do_not() {
+        let dir = temp_dir("alignment-work");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 0..1).unwrap();
+        }
+        session.edit_output(&edit(&session, 0..0, "x"), &BuiltinEngine).unwrap();
+        assert!(matches!(session.apply_alignments(false, &BuiltinEngine), Err(CoreError::NeedsConfirmation)));
+        let mut untouched = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        for document in [Document::A, Document::B, Document::C] {
+            untouched.mark_alignment(document, 0..1).unwrap();
+        }
+        assert_eq!(untouched.apply_alignments(false, &BuiltinEngine).unwrap(), true);
+    }
+
+
+    #[test]
+    fn a_diff_without_d_applies_without_asking() {
+        let dir = temp_dir("alignment-diff");
+        let a = write(&dir, "a.txt", "x\ny\n");
+        let b = write(&dir, "b.txt", "y\nx\n");
+        let mut session = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap();
+        session.mark_alignment(Document::A, 1..2).unwrap();
+        session.mark_alignment(Document::B, 0..1).unwrap();
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), true);
+        assert_eq!(session.snapshot().comparison.regions.len(), 3);
+    }
+
+
+    #[test]
+    fn reloading_a_source_drops_marks_and_applied_alignments() {
+        let dir = temp_dir("alignment-reload");
+        let mut session = foo_and_qux(&dir);
+        mark_foo_and_qux(&mut session);
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        let path = write(&dir, "b2.txt", "Bar\nFoo\nBaz\n");
+        session.load_source(Document::B, &path, &BuiltinEngine).unwrap();
+        assert_eq!(alignment_of(&session), Alignments::default());
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 3);
+    }
+
+
+    #[test]
+    fn a_failed_reload_keeps_the_marks() {
+        let dir = temp_dir("alignment-reload-fails");
+        let mut session = foo_and_qux(&dir);
+        mark_foo_and_qux(&mut session);
+        assert!(session.load_source(Document::B, &dir.join("missing.txt"), &BuiltinEngine).is_err());
+        assert_eq!(alignment_of(&session).marks.len(), 6);
+    }
+
+
+    #[test]
+    fn comparison_options_keep_marks_and_applied_alignments() {
+        let dir = temp_dir("alignment-options");
+        let mut session = foo_and_qux(&dir);
+        mark_foo_and_qux(&mut session);
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        session.set_comparison_options(ComparisonOptions { try_hard: true, ..ComparisonOptions::default() }, &BuiltinEngine).unwrap();
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 4);
+        let summary = alignment_of(&session);
+        assert_eq!(summary.marks.len(), 6);
+        assert!(!summary.changed);
+    }
+
+
+    #[test]
+    fn clearing_the_marks_keeps_the_layout_until_apply() {
+        let dir = temp_dir("alignment-clear");
+        let mut session = foo_and_qux(&dir);
+        mark_foo_and_qux(&mut session);
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        session.clear_alignment_marks().unwrap();
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 4);
+        assert!(alignment_of(&session).changed);
+        assert_eq!(session.apply_alignments(false, &BuiltinEngine).unwrap(), true);
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 3);
+        assert!(!alignment_of(&session).changed);
+    }
+
+
+    #[test]
+    fn navigation_stops_at_alignments_only_when_asked() {
+        let dir = temp_dir("alignment-navigate");
+        let mut session = merge_of(&dir, &["x", "same", "y"], &["x", "same", "y"], &["x", "same", "y"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 1..2).unwrap();
+        }
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 3);
+        let base = session.revision();
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), None);
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, true).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, true).unwrap(), None);
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousDifference, true).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(2), Navigation::PreviousConflict, true).unwrap(), None);
+    }
+
+
+    #[test]
+    fn navigation_stops_at_the_first_region_of_an_alignment() {
+        let dir = temp_dir("alignment-navigate-first");
+        let mut session = merge_of(&dir, &["x", "s1", "s2", "s3", "y"], &["x", "s1", "b2", "s3", "y"], &["x", "s1", "s2", "s3", "y"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 1..4).unwrap();
+        }
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        assert_eq!(statuses(&session.snapshot().comparison).len(), 5);
+        let base = session.revision();
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference, true).unwrap(), Some(1));
+        assert_eq!(session.navigate(&base, Some(1), Navigation::NextDifference, true).unwrap(), Some(2));
+        assert_eq!(session.navigate(&base, Some(2), Navigation::NextDifference, true).unwrap(), None);
     }
 
 

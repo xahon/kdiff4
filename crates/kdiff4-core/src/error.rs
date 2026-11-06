@@ -36,6 +36,10 @@ pub enum CoreError {
     InvalidChoice { reason: String },
     #[error("{count} unresolved {} left; resolve them before saving", if *count == 1 { "conflict is" } else { "conflicts are" })]
     UnresolvedConflicts { count: usize },
+    #[error("invalid alignment mark: {reason}")]
+    InvalidMark { reason: String },
+    #[error("applying the alignments compares everything again and discards the choices and edits in D")]
+    NeedsConfirmation,
 }
 
 
@@ -46,7 +50,8 @@ impl From<CoreError> for ProtocolError {
         }
         let kind = match &error {
             CoreError::Read { .. } | CoreError::Write { .. } => ErrorKind::Io,
-            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::InvalidEditTarget { .. } | CoreError::UnresolvedConflicts { .. } => ErrorKind::InvalidRequest,
+            CoreError::Directory { .. } | CoreError::NoSession | CoreError::NoSuchDocument { .. } | CoreError::NotAMerge | CoreError::NoOutputPath | CoreError::StaleRevision { .. } | CoreError::InvalidRange { .. } | CoreError::NoSuchRegion { .. } | CoreError::InvalidChoice { .. } | CoreError::InvalidEditTarget { .. } | CoreError::UnresolvedConflicts { .. } | CoreError::InvalidMark { .. } => ErrorKind::InvalidRequest,
+            CoreError::NeedsConfirmation => ErrorKind::NeedsConfirmation,
             CoreError::Engine(_) => ErrorKind::Engine,
         };
         ProtocolError { kind, message: error.to_string() }

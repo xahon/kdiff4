@@ -459,7 +459,7 @@ mod tests {
     fn mirror_with_a3(a3: &str, current_region: Option<usize>) -> Mirror {
         let output = OutputDocument { path: None, text: "s0\ns1\nb2\ns3".to_string(), modified: false };
         let documents = vec![text(Document::A, &["s0", "s1", "a2", a3, "a4", "s3"]), text(Document::B, &["s0", "s1", "b2", "s3"])];
-        let snapshot = Snapshot { revision: Revision(1), documents, output: Some(output), comparison: comparison(), engine: EngineCapabilities::default(), merge: merge(), options: ComparisonOptions::default(), current_region, char_diffs: vec![char_runs(6), char_runs(4)] };
+        let snapshot = Snapshot { revision: Revision(1), documents, output: Some(output), comparison: comparison(), engine: EngineCapabilities::default(), merge: merge(), options: ComparisonOptions::default(), current_region, char_diffs: vec![char_runs(6), char_runs(4)], alignments: kdiff4_protocol::Alignments::default() };
         Mirror::from_snapshot(snapshot, false)
     }
 
@@ -568,7 +568,7 @@ mod tests {
             .with_step_dt(0.01)
             .build_ui_state(
                 |ui, test: &mut StripTest| {
-                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, whitespace: WhitespaceConfig::default() };
+                    let style = ViewStyle { palette: &LIGHT, line_numbers: true, margin: MarginKind::Nothing, current_region: None, current_region_color: Color32::TRANSPARENT, scroll_step_rows: 3, region_corner_radius: 0, other_region_border_opacity: 1.0, whitespace: WhitespaceConfig::default(), alignment_color: None };
                     let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
                     test.actions.extend(shown.inner);
                     test.rect = shown.response.rect;

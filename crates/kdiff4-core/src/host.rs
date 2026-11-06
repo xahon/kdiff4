@@ -69,9 +69,9 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
             return Ok(());
         }
-        Command::Navigate { base, from, to } => {
+        Command::Navigate { base, from, to, include_alignments } => {
             let active = active(session)?;
-            if let Some(region) = active.navigate(&base, from, to)? {
+            if let Some(region) = active.navigate(&base, from, to, include_alignments)? {
                 log::debug!("host: navigated {to:?} to region {region}");
                 send_current(endpoint, active, id);
             }
@@ -83,6 +83,21 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             send_current(endpoint, active, id);
             return Ok(());
         }
+        Command::ApplyAlignments { confirmed } => {
+            let active = active(session)?;
+            if active.apply_alignments(confirmed, registry.default_engine())? {
+                log::info!("host: alignments applied");
+                let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
+            }
+            return Ok(());
+        }
+        Command::MarkAlignment { document, lines } => active(session)?.mark_alignment(document, lines)?,
+        Command::RemoveAlignmentMark { document, number } => active(session)?.remove_alignment_mark(document, number)?,
+        Command::RenumberAlignmentMark { document, number, to } => active(session)?.renumber_alignment_mark(document, number, to)?,
+        Command::ClearAlignmentMarks => match active(session)?.clear_alignment_marks() {
+            Some(change) => change,
+            None => return Ok(()),
+        },
         Command::EditOutput(edit) => active(session)?.edit_output(&edit, registry.default_engine())?,
         Command::SetChoice { base, region, choice } => active(session)?.set_choice(&base, region, choice)?,
         Command::ChooseForUnresolved { base, document } => match active(session)?.choose_for_unresolved(&base, document)? {
@@ -97,6 +112,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
     match &change {
         Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
         Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
+        Change::AlignmentsChanged(alignments) => log::debug!("host: {} alignment marks, changed {}, revision {}", alignments.marks.len(), alignments.changed, revision.0),
         Change::OutputEdited { range, text, merge, .. } => log::debug!("host: output bytes {range:?} replaced by {} bytes, regions {}..{} by {}, revision {}", text.len(), merge.at, merge.at + merge.removed, merge.regions.len(), revision.0),
     }
     let _ = endpoint.send(HostMessage::Event(Event::Delta(Delta { revision, cause: Some(id), change })));
