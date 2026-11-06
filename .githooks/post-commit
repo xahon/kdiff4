@@ -1,0 +1,25 @@
+#!/bin/sh
+# Tags master with v<version> when a commit changes the version in Cargo.toml. The version is never changed here.
+# Enable once per clone: git config core.hooksPath .githooks
+# Push the tag together with the commit: git push --follow-tags
+
+[ "$(git symbolic-ref --short -q HEAD)" = "master" ] || exit 0
+
+workspace_version() {
+    awk '/^\[/ { in_package = ($0 == "[workspace.package]") } in_package && /^version[ ]*=/ { split($0, parts, "\""); print parts[2]; exit }'
+}
+
+new_version=$(git show HEAD:Cargo.toml 2>/dev/null | tr -d '\r' | workspace_version)
+[ -n "$new_version" ] || exit 0
+
+old_version=$(git show HEAD~1:Cargo.toml 2>/dev/null | tr -d '\r' | workspace_version)
+[ "$new_version" != "$old_version" ] || exit 0
+
+tag="v$new_version"
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    echo "post-commit: tag $tag already exists, not moving it" >&2
+    exit 0
+fi
+
+git tag -a "$tag" -m "Kdiff4 $new_version" && echo "post-commit: created tag $tag"
+exit 0

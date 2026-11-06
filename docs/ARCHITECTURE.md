@@ -557,7 +557,7 @@ The binary routes each override by its section to the engine (in the open comman
 
 ### Releasing
 
-Push a tag `vX.Y.Z` equal to the version in `Cargo.toml`. `.github/workflows/release.yml` tests and builds on Windows, Linux and macOS (Apple silicon and Intel), names the executables as above and opens a draft release with generated notes. Edit the notes and publish the draft; the update check sees it from then on.
+The owner changes the version in `Cargo.toml` by hand. A `post-commit` hook in `.githooks` then creates the annotated tag `vX.Y.Z` on `master` for the commit that changed the workspace version (it never edits the version and never moves an existing tag). Enable it once per clone with `git config core.hooksPath .githooks`, and `sh .githooks/test-post-commit.sh` tests it. Push the commit and its tag together with `git push --follow-tags`. The tag must equal the version in `Cargo.toml`. `.github/workflows/release.yml` tests and builds on Windows, Linux and macOS (Apple silicon and Intel), names the executables as above and opens a draft release with generated notes. Edit the notes and publish the draft; the update check sees it from then on.
 
 ## Binary and CLI
 

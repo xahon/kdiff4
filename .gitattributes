@@ -1,2 +1,5 @@
 # Test inputs are compared byte for byte; keep their line ends as written.
 test_data/** -text
+
+# Git hooks run under sh: keep their line ends as LF.
+.githooks/* text eol=lf
