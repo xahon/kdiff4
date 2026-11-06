@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
-use super::inset::Layout;
+use super::inset::{Layout, has_insets};
 use super::{CompareInput, Comparison, EngineError, ManualAlignment, Region, RegionStatus, document_letter};
 
-/// Checks that regions cover every line of every source document exactly once and in order, that rows pair exactly the lines of their region, and that every manual alignment starts and ends at a region boundary. Lifted parts are read in display order: the order is that of the document with them taken out of their place and put where their alignment is shown.
+/// Checks that regions cover every line of every source document exactly once and in order, that rows pair exactly the lines of their region, and that every manual alignment starts and ends at a region boundary. Alignments that a document holds in another order than the list are read in display order: the order of the document with the parts exchanged between their places.
 pub fn check_comparison(comparison: &Comparison, input: &CompareInput<'_>) -> Result<(), EngineError> {
     let line_counts = input.line_counts();
-    if input.alignments.iter().any(ManualAlignment::has_lifted) {
+    if has_insets(input.alignments) {
         let layout = Layout::new(input.alignments, &line_counts);
         return check_regions(&layout.to_display(&comparison.regions)?, &line_counts, &layout.alignments);
     }

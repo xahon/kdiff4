@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc e9a90b6c73b4b00af4a83edf526edd35862b8a1a94a02acf799621a00b4d6420 # shrinks to (lines, alignments) = ([[], ["a", "a", "c"], ["b", "b", "c"]], [ManualAlignment { parts: [0..0, 2..2, 1..2], lifted: [false, true, true] }, ManualAlignment { parts: [0..0, 0..1, 1..1], lifted: [false, false, true] }, ManualAlignment { parts: [0..0, 1..2, 1..1], lifted: [] }])

@@ -1,15 +1,73 @@
+use std::cmp::Reverse;
 use std::ops::Range;
 
 use super::{CompareInput, Comparison, ComparisonEngine, EngineCapabilities, EngineError, Job, ManualAlignment, Region, Row, SourceLines, Token, check_comparison, compare_aligned, document_letter};
 
 
-/// The source documents in display order: every lifted part is taken out of its place and put where its alignment is shown, so the alignments keep one order in every document. A lifted part goes into the stretch of text between the parts around it in the list. The text stays below parts that came from above and above parts that came from below; where those wishes meet, the parts keep the order of the list and the text goes before the first part that came from below.
+/// The alignment indices of the list in the order their parts have in `document`: `order[slot]` is the alignment whose part is the `slot`-th one. Parts at one position keep the order of the list.
+pub fn document_order(alignments: &[ManualAlignment], document: usize) -> Vec<usize> {
+    let position = |index: &usize| {
+        let part = alignments[*index].parts.get(document).cloned().unwrap_or(0..0);
+        (part.start, part.end, *index)
+    };
+    let mut order: Vec<usize> = (0..alignments.len()).collect();
+    order.sort_by_key(position);
+    order
+}
+
+
+/// Whether some document holds the alignments in another order than the list.
+pub(super) fn has_insets(alignments: &[ManualAlignment]) -> bool {
+    let documents = alignments.first().map_or(0, |alignment| alignment.parts.len());
+    (0..documents).any(|document| document_order(alignments, document).iter().enumerate().any(|(slot, index)| slot != *index))
+}
+
+
+/// Per alignment of the list, for a part that `document` shows away from its place: the index of the alignment whose part is shown in the place it had. The parts that stay are a longest run of the document that already has the order of the list, and of several the one with the alignments listed first; the others are the moved ones. The parts in between only follow along when the places are exchanged.
+pub fn moved_parts(alignments: &[ManualAlignment], document: usize) -> Vec<Option<usize>> {
+    let order = document_order(alignments, document);
+    let kept = longest_increasing(&order);
+    let mut moved = vec![None; alignments.len()];
+    for (slot, index) in order.iter().enumerate() {
+        if !kept[slot] {
+            moved[*index] = Some(slot);
+        }
+    }
+    moved
+}
+
+
+/// Which entries of the permutation `order` are in a longest increasing run of it. Of several, the run whose values are the smallest stays.
+fn longest_increasing(order: &[usize]) -> Vec<bool> {
+    let mut length = vec![1; order.len()];
+    let mut previous: Vec<Option<usize>> = vec![None; order.len()];
+    for end in 0..order.len() {
+        for before in (0..end).filter(|before| order[*before] < order[end]) {
+            let longer = length[before] + 1 > length[end];
+            let smaller = length[before] + 1 == length[end] && previous[end].is_some_and(|current| order[before] < order[current]);
+            if longer || smaller {
+                length[end] = length[before] + 1;
+                previous[end] = Some(before);
+            }
+        }
+    }
+    let mut kept = vec![false; order.len()];
+    let mut cursor = (0..order.len()).max_by_key(|end| (length[*end], Reverse(order[*end])));
+    while let Some(index) = cursor {
+        kept[index] = true;
+        cursor = previous[index];
+    }
+    kept
+}
+
+
+/// The source documents in display order. A document that holds its alignments in another order than the list keeps the text between its parts where it is and exchanges the parts between the places they have: the place of the `n`-th part in the document shows the part of the `n`-th alignment of the list. So every document has the alignments in the order of the list, and no text is added or lost between them.
 pub(super) struct Layout {
     /// Per document, the document line of every line in display order.
     lines: Vec<Vec<usize>>,
     /// Per document, the place in display order of every document line.
     positions: Vec<Vec<usize>>,
-    /// The alignments with their parts in display order. None is lifted.
+    /// The alignments with their parts in display order.
     pub alignments: Vec<ManualAlignment>,
 }
 
@@ -107,135 +165,67 @@ impl Layout {
             .collect()
     }
 
-    /// The regions of a comparison of display order, as regions of the documents. A region that reaches over a seam is split there and its parts are classified again.
-    fn to_documents(&self, regions: Vec<Region>, sources: &[SourceLines<'_>], engine: &dyn ComparisonEngine) -> Result<Vec<Region>, EngineError> {
+    /// The regions of a comparison of display order, as regions of the documents. The places where the next line is not the line after the previous one are the edges of alignment parts, so a region that passed the result check never reaches over one.
+    fn to_documents(&self, regions: Vec<Region>) -> Result<Vec<Region>, EngineError> {
         let seams: Vec<Vec<usize>> = (0..self.lines.len()).map(|document| self.seams(document)).collect();
         let mut documents = Vec::with_capacity(regions.len());
-        for region in regions {
-            let mut pieces = vec![region];
-            let mut index = 0;
-            let mut was_split = false;
-            while index < pieces.len() {
-                let Some((first, second)) = split_at_seam(&pieces[index], &seams) else {
-                    index += 1;
-                    continue;
-                };
-                pieces[index] = first;
-                pieces.insert(index + 1, second);
-                was_split = true;
+        for (index, region) in regions.into_iter().enumerate() {
+            if let Some(document) = (0..seams.len()).find(|document| seams[*document].iter().any(|seam| region.hunks[*document].start < *seam && *seam < region.hunks[*document].end)) {
+                return Err(EngineError::InvalidResult(format!(
+                    "region {}: hunk {} reaches over a place where the document was laid out in another order",
+                    index + 1,
+                    document_letter(document)
+                )));
             }
-            for mut piece in pieces {
-                if was_split {
-                    let hunks: Vec<SourceLines<'_>> = sources.iter().zip(&piece.hunks).map(|(source, hunk)| source.slice(hunk.clone())).collect();
-                    piece.status = engine.classify(&hunks)?;
-                }
-                let hunks = piece.hunks.iter().enumerate().map(|(document, hunk)| self.document_hunk(document, hunk)).collect();
-                let rows = piece
-                    .rows
-                    .iter()
-                    .map(|row| Row {
-                        lines: row.lines.iter().enumerate().map(|(document, line)| line.map(|line| self.lines[document][line])).collect(),
-                    })
-                    .collect();
-                documents.push(Region { hunks, status: piece.status, rows });
-            }
+            let hunks = region.hunks.iter().enumerate().map(|(document, hunk)| self.document_hunk(document, hunk)).collect();
+            let rows = region
+                .rows
+                .iter()
+                .map(|row| Row {
+                    lines: row.lines.iter().enumerate().map(|(document, line)| line.map(|line| self.lines[document][line])).collect(),
+                })
+                .collect();
+            documents.push(Region { hunks, status: region.status, rows });
         }
         Ok(documents)
     }
 }
 
 
-/// Compares documents whose alignments hold lifted parts: lays them out in display order, compares that like any documents with alignments, and brings the regions back to the documents.
+/// Compares documents that hold some alignments in another order than the list: lays them out in display order, compares that like any documents with alignments, and brings the regions back to the documents.
 pub(super) fn compare_with_insets(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, job: &Job<'_>, capabilities: &EngineCapabilities) -> Result<Comparison, EngineError> {
     let layout = Layout::new(input.alignments, &input.line_counts());
     let lines: Vec<Vec<&str>> = input.sources.iter().zip(&layout.lines).map(|(source, order)| order.iter().map(|line| source.lines[*line]).collect()).collect();
     let tokens: Vec<Vec<Token>> = input.sources.iter().zip(&layout.lines).map(|(source, order)| order.iter().map(|line| source.tokens[*line]).collect()).collect();
     let sources: Vec<SourceLines<'_>> = lines.iter().zip(&tokens).map(|(lines, tokens)| SourceLines { lines, tokens }).collect();
     let display = CompareInput {
-        sources: sources.clone(),
+        sources,
         alignments: &layout.alignments,
         options: input.options,
     };
     let comparison = compare_aligned(engine, &display, job, capabilities)?;
     check_comparison(&comparison, &display)?;
     job.check_canceled()?;
-    let regions = layout.to_documents(comparison.regions, &sources, engine)?;
+    let regions = layout.to_documents(comparison.regions)?;
     Ok(Comparison { regions })
 }
 
 
 /// One document's lines in display order, and the place of each alignment's part in them.
 fn document_layout(alignments: &[ManualAlignment], document: usize, count: usize) -> (Vec<usize>, Vec<Range<usize>>) {
-    let in_place: Vec<usize> = (0..alignments.len()).filter(|index| !alignments[*index].is_lifted(document)).collect();
-    let part = |index: usize| alignments[index].parts[document].clone();
-    let mut vacated: Vec<Range<usize>> = (0..alignments.len()).filter(|index| alignments[*index].is_lifted(document)).map(part).filter(|part| !part.is_empty()).collect();
-    vacated.sort_by_key(|range| range.start);
-    let gap = |index: usize| {
-        let start = if index == 0 { 0 } else { part(in_place[index - 1]).end };
-        let end = if index == in_place.len() { count } else { part(in_place[index]).start };
-        start..end
-    };
+    let part = |index: usize| alignments[index].parts.get(document).cloned().unwrap_or(0..0);
     let mut lines = Vec::with_capacity(count);
     let mut places = vec![0..0; alignments.len()];
-    let mut put = |lines: &mut Vec<usize>, index: usize| {
+    let mut cursor = 0;
+    for (shown, own) in document_order(alignments, document).into_iter().map(&part).enumerate() {
+        lines.extend(cursor..own.start);
         let start = lines.len();
-        lines.extend(part(index));
-        places[index] = start..lines.len();
-    };
-    let mut shown_in: Vec<Vec<(usize, bool)>> = vec![Vec::new(); in_place.len() + 1];
-    for lifted in (0..alignments.len()).filter(|index| alignments[*index].is_lifted(document)) {
-        let gap_index = in_place.iter().filter(|index| **index < lifted).count();
-        let (gap, part) = (gap(gap_index), part(lifted));
-        let came_from_below = part.start >= gap.end && !(part.is_empty() && part.start == gap.end);
-        shown_in[gap_index].push((lifted, came_from_below));
+        lines.extend(part(shown));
+        places[shown] = start..lines.len();
+        cursor = own.end;
     }
-    for gap_index in 0..=in_place.len() {
-        let text_after = shown_in[gap_index].iter().position(|(_, came_from_below)| *came_from_below).unwrap_or(shown_in[gap_index].len());
-        for (index, _) in shown_in[gap_index][..text_after].iter() {
-            put(&mut lines, *index);
-        }
-        let gap = gap(gap_index);
-        let mut cursor = gap.start;
-        for range in vacated.iter().filter(|range| gap.start <= range.start && range.end <= gap.end) {
-            lines.extend(cursor..range.start);
-            cursor = range.end;
-        }
-        lines.extend(cursor..gap.end);
-        for (index, _) in shown_in[gap_index][text_after..].iter() {
-            put(&mut lines, *index);
-        }
-        if let Some(index) = in_place.get(gap_index) {
-            put(&mut lines, *index);
-        }
-    }
+    lines.extend(cursor..count);
     (lines, places)
-}
-
-
-/// Splits the region at a seam inside one of its hunks, in the first document that has one.
-fn split_at_seam(region: &Region, seams: &[Vec<usize>]) -> Option<(Region, Region)> {
-    for (document, hunk) in region.hunks.iter().enumerate() {
-        let Some(seam) = seams[document].iter().find(|seam| hunk.start < **seam && **seam < hunk.end) else {
-            continue;
-        };
-        let at = region.rows.iter().position(|row| row.lines[document].is_some_and(|line| line >= *seam))?;
-        let (first_rows, second_rows) = region.rows.split_at(at);
-        let taken = |other: usize| first_rows.iter().filter(|row| row.lines[other].is_some()).count();
-        let first_hunks = region.hunks.iter().enumerate().map(|(other, hunk)| hunk.start..hunk.start + taken(other)).collect();
-        let second_hunks = region.hunks.iter().enumerate().map(|(other, hunk)| hunk.start + taken(other)..hunk.end).collect();
-        let first = Region {
-            hunks: first_hunks,
-            status: region.status,
-            rows: first_rows.to_vec(),
-        };
-        let second = Region {
-            hunks: second_hunks,
-            status: region.status,
-            rows: second_rows.to_vec(),
-        };
-        return Some((first, second));
-    }
-    None
 }
 
 
@@ -249,8 +239,8 @@ mod tests {
     use super::super::{HunkChange, MergeStatus, RegionStatus, run_comparison};
     use super::*;
 
-    fn lifted(parts: &[Range<usize>], lifted: &[bool]) -> ManualAlignment {
-        ManualAlignment::with_lifted(parts.to_vec(), lifted.to_vec())
+    fn alignment(parts: &[Range<usize>]) -> ManualAlignment {
+        ManualAlignment::new(parts.to_vec())
     }
 
     fn compare(fixture: &Fixture, alignments: &[ManualAlignment]) -> Comparison {
@@ -261,6 +251,8 @@ mod tests {
         comparison.regions.iter().map(|region| (region.hunks.clone(), region.status)).collect()
     }
 
+    const UNCHANGED: RegionStatus = RegionStatus::Merge(MergeStatus::Unchanged);
+
     const FUNCTIONS: [&[&str]; 3] = [
         &["pre", "f1a", "f1b", "mid", "f2a", "f2b", "post"],
         &["pre", "f2a", "f2b", "mid", "f1a", "f1b", "post"],
@@ -269,48 +261,69 @@ mod tests {
 
     // The example of Inset alignment in ARCHITECTURE.md: B has the functions in the other order than A and C.
     fn functions_shown_as_in_a() -> [ManualAlignment; 2] {
-        [lifted(&[1..3, 4..6, 1..3], &[false, false, false]), lifted(&[4..6, 1..3, 4..6], &[false, true, false])]
+        [alignment(&[1..3, 4..6, 1..3]), alignment(&[4..6, 1..3, 4..6])]
     }
 
     fn functions_shown_as_in_b() -> [ManualAlignment; 2] {
-        [lifted(&[4..6, 1..3, 4..6], &[true, false, true]), lifted(&[1..3, 4..6, 1..3], &[false, false, false])]
+        [alignment(&[4..6, 1..3, 4..6]), alignment(&[1..3, 4..6, 1..3])]
     }
 
     #[test]
-    fn a_lifted_part_leaves_its_place_and_joins_its_alignment() {
+    fn documents_are_ordered_by_the_positions_of_their_parts() {
+        let alignments = [alignment(&[4..6, 1..3]), alignment(&[1..3, 4..6]), alignment(&[0..0, 3..3]), alignment(&[0..0, 6..6])];
+        assert_eq!(document_order(&alignments, 0), [2, 3, 1, 0]);
+        assert_eq!(document_order(&alignments, 1), [0, 2, 1, 3]);
+        assert!(has_insets(&alignments));
+        assert!(!has_insets(&alignments[2..]));
+        assert!(!has_insets(&[]));
+    }
+
+    #[test]
+    fn moved_parts_are_the_ones_outside_the_longest_run_in_order() {
+        let starts = [10, 20, 50, 0, 30, 40, 60];
+        let alignments: Vec<ManualAlignment> = starts.iter().map(|start| alignment(&[*start..*start + 5])).collect();
+        assert_eq!(document_order(&alignments, 0), [3, 0, 1, 4, 5, 2, 6]);
+        assert_eq!(moved_parts(&alignments, 0), [None, None, Some(5), Some(0), None, None, None]);
+    }
+
+    #[test]
+    fn a_swap_moves_the_part_that_is_listed_last() {
+        let alignments = [alignment(&[3..5]), alignment(&[0..2])];
+        assert_eq!(moved_parts(&alignments, 0), [None, Some(0)]);
+    }
+
+    #[test]
+    fn documents_in_the_order_of_the_list_move_nothing() {
+        let alignments = [alignment(&[0..2, 5..6]), alignment(&[3..4, 0..1])];
+        assert_eq!(moved_parts(&alignments, 0), [None, None]);
+        assert_eq!(moved_parts(&alignments, 1), [None, Some(0)]);
+    }
+
+    #[test]
+    fn the_places_of_the_parts_are_exchanged_and_the_text_between_them_stays() {
         let layout = Layout::new(&functions_shown_as_in_a(), &[7, 7, 7]);
         assert_eq!(layout.lines[0], [0, 1, 2, 3, 4, 5, 6]);
-        assert_eq!(layout.lines[1], [0, 3, 4, 5, 1, 2, 6]);
-        assert_eq!(layout.alignments, [ManualAlignment::new(vec![1..3, 2..4, 1..3]), ManualAlignment::new(vec![4..6, 4..6, 4..6])]);
-        assert_eq!(layout.seams(1), [1, 4, 6]);
+        assert_eq!(layout.lines[1], [0, 4, 5, 3, 1, 2, 6]);
+        assert_eq!(layout.alignments, [alignment(&[1..3, 1..3, 1..3]), alignment(&[4..6, 4..6, 4..6])]);
+        assert_eq!(layout.seams(1), [1, 3, 4, 6]);
         assert!(layout.seams(0).is_empty());
     }
 
     #[test]
-    fn parts_lifted_in_the_other_documents_come_to_the_top_of_their_gap() {
+    fn the_other_display_order_exchanges_the_places_of_the_other_documents() {
         let layout = Layout::new(&functions_shown_as_in_b(), &[7, 7, 7]);
-        assert_eq!(layout.lines[0], [0, 4, 5, 1, 2, 3, 6]);
+        assert_eq!(layout.lines[0], [0, 4, 5, 3, 1, 2, 6]);
         assert_eq!(layout.lines[1], [0, 1, 2, 3, 4, 5, 6]);
         assert_eq!(layout.lines[2], layout.lines[0]);
     }
 
     #[test]
-    fn lifted_anchors_take_the_end_of_their_gap_from_below_and_the_start_from_above() {
-        let up = [lifted(&[0..1, 5..5], &[false, true]), lifted(&[2..3, 2..3], &[false, false])];
-        let layout = Layout::new(&up, &[4, 6]);
-        assert_eq!(layout.alignments[0], ManualAlignment::new(vec![0..1, 2..2]));
-        let down = [lifted(&[0..1, 0..1], &[false, false]), lifted(&[1..3, 5..5], &[false, true])];
-        let layout = Layout::new(&down, &[4, 6]);
-        assert_eq!(layout.alignments[1], ManualAlignment::new(vec![1..3, 1..1]));
-    }
-
-    // Found by the property test: an anchor that came from above and a range that came from below meet in one gap.
-    #[test]
-    fn lifted_parts_of_one_gap_keep_the_order_of_the_list() {
-        let alignments = [lifted(&[0..0, 1..2], &[false, true]), lifted(&[0..0, 0..0], &[false, true]), lifted(&[0..0, 1..1], &[false, false])];
-        let layout = Layout::new(&alignments, &[0, 3]);
-        assert_eq!(layout.alignments.iter().map(|alignment| alignment.parts[1].clone()).collect::<Vec<_>>(), [1..2, 2..2, 2..2]);
-        assert_eq!(layout.lines[1], [0, 1, 2]);
+    fn an_anchor_takes_the_place_of_the_part_it_is_exchanged_with() {
+        let alignments = [alignment(&[0..0, 4..5]), alignment(&[0..2, 1..1])];
+        let layout = Layout::new(&alignments, &[3, 6]);
+        assert_eq!(layout.lines[1], [0, 4, 1, 2, 3, 5]);
+        assert_eq!(layout.lines[0], [0, 1, 2]);
+        assert_eq!(layout.alignments, [alignment(&[0..0, 1..2]), alignment(&[0..2, 5..5])]);
     }
 
     #[test]
@@ -328,15 +341,12 @@ mod tests {
     fn insets_are_compared_in_display_order() {
         let fixture = Fixture::new(&FUNCTIONS);
         let comparison = compare(&fixture, &functions_shown_as_in_a());
-        let unchanged = RegionStatus::Merge(MergeStatus::Unchanged);
-        let changed_in_b = RegionStatus::Merge(MergeStatus::ChangedInB);
         let expected = [
-            (vec![0..1, 0..1, 0..1], unchanged),
-            (vec![1..1, 3..4, 1..1], changed_in_b),
-            (vec![1..3, 4..6, 1..3], unchanged),
-            (vec![3..4, 6..6, 3..4], changed_in_b),
-            (vec![4..6, 1..3, 4..6], unchanged),
-            (vec![6..7, 6..7, 6..7], unchanged),
+            (vec![0..1, 0..1, 0..1], UNCHANGED),
+            (vec![1..3, 4..6, 1..3], UNCHANGED),
+            (vec![3..4, 3..4, 3..4], UNCHANGED),
+            (vec![4..6, 1..3, 4..6], UNCHANGED),
+            (vec![6..7, 6..7, 6..7], UNCHANGED),
         ];
         assert_eq!(hunks(&comparison), expected);
     }
@@ -345,35 +355,81 @@ mod tests {
     fn the_other_display_order_moves_the_other_documents() {
         let fixture = Fixture::new(&FUNCTIONS);
         let comparison = compare(&fixture, &functions_shown_as_in_b());
-        let unchanged = RegionStatus::Merge(MergeStatus::Unchanged);
-        let shown = hunks(&comparison);
-        let first = shown.iter().position(|(hunks, _)| *hunks == vec![4..6, 1..3, 4..6]).unwrap();
-        let second = shown.iter().position(|(hunks, _)| *hunks == vec![1..3, 4..6, 1..3]).unwrap();
-        assert!(first < second);
-        assert_eq!(shown[first].1, unchanged);
-        assert_eq!(shown[second].1, unchanged);
+        let expected = [
+            (vec![0..1, 0..1, 0..1], UNCHANGED),
+            (vec![4..6, 1..3, 4..6], UNCHANGED),
+            (vec![3..4, 3..4, 3..4], UNCHANGED),
+            (vec![1..3, 4..6, 1..3], UNCHANGED),
+            (vec![6..7, 6..7, 6..7], UNCHANGED),
+        ];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    // A and B have 1 above 2, C has 2 above 1: swapping the two hunks in A and B gives C, with no lines left over.
+    fn swapped_hunks() -> [ManualAlignment; 2] {
+        [alignment(&[3..5, 3..5, 0..2]), alignment(&[0..2, 0..2, 3..5])]
     }
 
     #[test]
-    fn a_region_over_a_seam_is_split_and_classified_again() {
-        let fixture = Fixture::new(&[&["p", "G", "q", "F", "r"], &["P", "F", "q", "G", "r"]]);
-        let alignments = [lifted(&[1..2, 3..4], &[false, false]), lifted(&[3..4, 1..2], &[false, true])];
+    fn swapped_hunks_merge_without_changes_and_without_extra_lines() {
+        let fixture = Fixture::new(&[&["1", "1", "", "2", "2"], &["1", "1", "", "2", "2"], &["2", "2", "", "1", "1"]]);
+        let comparison = compare(&fixture, &swapped_hunks());
+        let expected = [(vec![3..5, 3..5, 0..2], UNCHANGED), (vec![2..3, 2..3, 2..3], UNCHANGED), (vec![0..2, 0..2, 3..5], UNCHANGED)];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    #[test]
+    fn a_change_in_a_swapped_hunk_stays_in_that_hunk() {
+        let fixture = Fixture::new(&[&["1", "1", "", "2", "2"], &["1", "1", "", "2", "22"], &["2", "2", "", "1", "1"]]);
+        let comparison = compare(&fixture, &swapped_hunks());
+        let expected = [
+            (vec![3..4, 3..4, 0..1], UNCHANGED),
+            (vec![4..5, 4..5, 1..2], RegionStatus::Merge(MergeStatus::ChangedInB)),
+            (vec![2..3, 2..3, 2..3], UNCHANGED),
+            (vec![0..2, 0..2, 3..5], UNCHANGED),
+        ];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    #[test]
+    fn a_change_in_the_text_between_the_hunks_is_found_between_them() {
+        let fixture = Fixture::new(&[&["1", "1", "", "2", "2"], &["1", "1", "x", "2", "2"], &["2", "2", "", "1", "1"]]);
+        let comparison = compare(&fixture, &swapped_hunks());
+        let expected = [
+            (vec![3..5, 3..5, 0..2], UNCHANGED),
+            (vec![2..3, 2..3, 2..3], RegionStatus::Merge(MergeStatus::ChangedInB)),
+            (vec![0..2, 0..2, 3..5], UNCHANGED),
+        ];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    #[test]
+    fn two_way_insets_swap_too() {
+        let fixture = Fixture::new(&[&["a", "", "b"], &["b", "", "a"]]);
+        let alignments = [alignment(&[0..1, 2..3]), alignment(&[2..3, 0..1])];
         let comparison = compare(&fixture, &alignments);
-        let shown = hunks(&comparison);
-        assert!(shown.contains(&(vec![0..1, 0..1], RegionStatus::Diff(HunkChange::Modified))));
-        assert!(shown.contains(&(vec![1..1, 2..3], RegionStatus::Diff(HunkChange::Added))));
-        assert!(shown.contains(&(vec![1..2, 3..4], RegionStatus::Diff(HunkChange::Unchanged))));
+        let unchanged = RegionStatus::Diff(HunkChange::Unchanged);
+        assert_eq!(hunks(&comparison), [(vec![0..1, 2..3], unchanged), (vec![1..2, 1..2], unchanged), (vec![2..3, 0..1], unchanged)]);
     }
 
     #[test]
-    fn lifted_parts_are_validated_like_the_others() {
+    fn a_region_over_a_seam_is_refused() {
+        let layout = Layout::new(&functions_shown_as_in_a(), &[7, 7, 7]);
+        let region = Region {
+            hunks: vec![0..7, 0..7, 0..7],
+            status: UNCHANGED,
+            rows: Vec::new(),
+        };
+        let error = layout.to_documents(vec![region]).unwrap_err();
+        assert!(matches!(error, EngineError::InvalidResult(_)), "{error:?}");
+    }
+
+    #[test]
+    fn crossing_parts_are_validated_like_the_others() {
         let fixture = Fixture::new(&[&["a", "b"], &["a", "b"]]);
-        let overlapping = [lifted(&[0..1, 0..2], &[false, true]), lifted(&[1..2, 1..2], &[false, false])];
+        let overlapping = [alignment(&[0..1, 0..2]), alignment(&[1..2, 1..2])];
         let error = with_job(|job| run_comparison(&SimpleEngine::default(), &fixture.input(&overlapping), job)).unwrap_err();
         assert_eq!(error, EngineError::InvalidAlignment("alignments 1 and 2 overlap in B".to_string()));
-        let wrong_flags = [ManualAlignment { parts: vec![0..1, 0..1], lifted: vec![true] }];
-        let error = with_job(|job| run_comparison(&SimpleEngine::default(), &fixture.input(&wrong_flags), job)).unwrap_err();
-        assert_eq!(error, EngineError::InvalidAlignment("alignment 1 has 1 lifted flags, expected 2".to_string()));
     }
 
     #[test]
@@ -383,7 +439,7 @@ mod tests {
         let comparison = compare(&fixture, &alignments);
         assert_eq!(check_comparison(&comparison, &fixture.input(&alignments)), Ok(()));
         let mut regions = comparison.regions.clone();
-        regions.swap(2, 3);
+        regions.swap(1, 3);
         let error = check_comparison(&Comparison { regions }, &fixture.input(&alignments)).unwrap_err();
         assert!(matches!(error, EngineError::InvalidResult(_)), "{error:?}");
     }
@@ -402,7 +458,7 @@ mod tests {
 
     const ALPHABET: [&str; 4] = ["a", "b", "c", "d"];
 
-    /// Random documents with two to four alignments that are shown in list order but sit in any order in every document. The parts that keep the list order in a document are the longest stretch of its parts that is already in order.
+    /// Random documents with two to four alignments that are listed in display order but sit in any order in every document.
     fn documents_with_insets() -> impl Strategy<Value = (Vec<Vec<&'static str>>, Vec<ManualAlignment>)> {
         (2usize..=3, 2usize..5)
             .prop_flat_map(|(documents, count)| {
@@ -415,32 +471,18 @@ mod tests {
             .prop_map(|(lines, mut cuts, orders)| {
                 cuts.iter_mut().for_each(|document| document.sort());
                 let count = cuts.first().map(|document| document.len() / 2).unwrap_or(0);
-                let in_order: Vec<Vec<bool>> = orders.iter().map(|order| longest_increasing(order)).collect();
                 let alignments = (0..count)
                     .map(|index| {
                         let parts = (0..cuts.len()).map(|document| {
                             let part = orders[document][index];
                             cuts[document][part * 2]..cuts[document][part * 2 + 1]
                         });
-                        ManualAlignment::with_lifted(parts.collect(), in_order.iter().map(|document| !document[index]).collect())
+                        ManualAlignment::new(parts.collect())
                     })
                     .filter(|alignment| alignment.parts.iter().any(|part| !part.is_empty()))
                     .collect();
                 (lines, alignments)
             })
-    }
-
-    /// Which entries of `order` are in a longest increasing subsequence.
-    fn longest_increasing(order: &[usize]) -> Vec<bool> {
-        let mut best: Vec<Vec<usize>> = Vec::new();
-        for (index, value) in order.iter().enumerate() {
-            let previous = (0..index).filter(|before| order[*before] < *value).map(|before| best[before].clone()).max_by_key(|chain| chain.len()).unwrap_or_default();
-            let mut chain = previous;
-            chain.push(index);
-            best.push(chain);
-        }
-        let chain = best.into_iter().max_by_key(|chain| chain.len()).unwrap_or_default();
-        (0..order.len()).map(|index| chain.contains(&index)).collect()
     }
 
     proptest! {
@@ -458,6 +500,20 @@ mod tests {
                     seen[line] += 1;
                 }
                 prop_assert!(seen.iter().all(|times| *times == 1), "document {document}: {seen:?}");
+            }
+        }
+
+        // The layout keeps every line of a document once, and the alignments in the order of the list in all documents.
+        #[test]
+        fn layouts_keep_every_line_once((lines, alignments) in documents_with_insets()) {
+            let counts: Vec<usize> = lines.iter().map(|document| document.len()).collect();
+            let layout = Layout::new(&alignments, &counts);
+            for (document, count) in counts.iter().enumerate() {
+                let mut shown = layout.lines[document].clone();
+                shown.sort();
+                prop_assert_eq!(shown, (0..*count).collect::<Vec<_>>());
+                let order = document_order(&layout.alignments, document);
+                prop_assert!(order.iter().enumerate().all(|(slot, index)| slot == *index), "document {document}: {order:?}");
             }
         }
     }

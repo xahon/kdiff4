@@ -13,7 +13,7 @@ pub fn parts_collide(first: &Range<usize>, second: &Range<usize>) -> bool {
 }
 
 
-/// Checks part counts, bounds and order. Alignments that hold only anchors are rejected, and so are parts that overlap. In every document the parts that are not lifted must keep the order of the list; lifted parts may be anywhere that is free.
+/// Checks part counts and bounds. Alignments that hold only anchors are rejected, and so are parts that overlap. A document may hold its parts in any order: alignments that cross are insets.
 pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]) -> Result<(), EngineError> {
     for (index, alignment) in alignments.iter().enumerate() {
         let number = index + 1;
@@ -22,13 +22,6 @@ pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]
                 "alignment {number} has {} parts, expected {}",
                 alignment.parts.len(),
                 line_counts.len()
-            )));
-        }
-        if !alignment.lifted.is_empty() && alignment.lifted.len() != alignment.parts.len() {
-            return Err(EngineError::InvalidAlignment(format!(
-                "alignment {number} has {} lifted flags, expected {}",
-                alignment.lifted.len(),
-                alignment.parts.len()
             )));
         }
         for (document, (part, count)) in alignment.parts.iter().zip(line_counts).enumerate() {
@@ -44,30 +37,10 @@ pub fn validate_alignments(alignments: &[ManualAlignment], line_counts: &[usize]
         }
     }
     for document in 0..line_counts.len() {
-        let in_place: Vec<usize> = (0..alignments.len()).filter(|index| !alignments[*index].is_lifted(document)).collect();
-        for pair in in_place.windows(2) {
-            let (previous, next) = (&alignments[pair[0]].parts[document], &alignments[pair[1]].parts[document]);
-            if previous.end <= next.start {
-                continue;
-            }
-            let overlap = previous.start.max(next.start) < previous.end.min(next.end);
-            let relation = if overlap { "overlap" } else { "cross" };
-            return Err(EngineError::InvalidAlignment(format!(
-                "alignments {} and {} {relation} in {}",
-                pair[0] + 1,
-                pair[1] + 1,
-                document_letter(document)
-            )));
-        }
-        for lifted in (0..alignments.len()).filter(|index| alignments[*index].is_lifted(document)) {
-            let collides = |other: &usize| *other != lifted && parts_collide(&alignments[lifted].parts[document], &alignments[*other].parts[document]);
-            if let Some(other) = (0..alignments.len()).find(collides) {
-                return Err(EngineError::InvalidAlignment(format!(
-                    "alignments {} and {} overlap in {}",
-                    lifted.min(other) + 1,
-                    lifted.max(other) + 1,
-                    document_letter(document)
-                )));
+        for first in 0..alignments.len() {
+            let collides = |second: &usize| parts_collide(&alignments[first].parts[document], &alignments[*second].parts[document]);
+            if let Some(second) = (first + 1..alignments.len()).find(collides) {
+                return Err(EngineError::InvalidAlignment(format!("alignments {} and {} overlap in {}", first + 1, second + 1, document_letter(document))));
             }
         }
     }
@@ -178,15 +151,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_crossing() {
+    fn accepts_crossing_alignments() {
         let alignments = [alignment(&[0..1, 2..3]), alignment(&[1..2, 0..1])];
-        assert_eq!(error_message(&alignments, &[3, 3]), "alignments 1 and 2 cross in B");
+        assert_eq!(validate_alignments(&alignments, &[3, 3]), Ok(()));
     }
 
     #[test]
     fn rejects_anchor_inside_range() {
         let alignments = [alignment(&[0..3, 0..1]), alignment(&[1..1, 1..2])];
-        assert_eq!(error_message(&alignments, &[3, 3]), "alignments 1 and 2 cross in A");
+        assert_eq!(error_message(&alignments, &[3, 3]), "alignments 1 and 2 overlap in A");
+    }
+
+    #[test]
+    fn rejects_overlap_of_alignments_that_are_not_next_to_each_other() {
+        let alignments = [alignment(&[0..2, 0..1]), alignment(&[2..3, 1..2]), alignment(&[1..2, 2..3])];
+        assert_eq!(error_message(&alignments, &[3, 3]), "alignments 1 and 3 overlap in A");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::messages::{Document, ErrorKind, ProtocolError};
 
 pub use alignment::{parts_collide, validate_alignments};
 pub use check::check_comparison;
+pub use inset::{document_order, moved_parts};
 
 /// Interned line key. Two lines are equal when their tokens are equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -73,32 +74,15 @@ impl Default for ComparisonOptions {
     }
 }
 
-/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line. Alignments are listed in display order. A lifted part is an inset: it is shown with the other parts of its alignment, away from its place in the document, which is left empty (see Inset alignment in `ARCHITECTURE.md`).
+/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line. Alignments are listed in display order. A document may hold its parts in another order than the list: they are exchanged between the places the parts have in the document (see Inset alignment in `ARCHITECTURE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManualAlignment {
     pub parts: Vec<Range<usize>>,
-    /// Per source document, whether its part is lifted. Empty when no part is.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lifted: Vec<bool>,
 }
 
 impl ManualAlignment {
     pub fn new(parts: Vec<Range<usize>>) -> ManualAlignment {
-        ManualAlignment { parts, lifted: Vec::new() }
-    }
-
-    /// `lifted` is dropped when it lifts nothing, so alignments that show the same compare equal.
-    pub fn with_lifted(parts: Vec<Range<usize>>, lifted: Vec<bool>) -> ManualAlignment {
-        let lifted = if lifted.iter().any(|lifted| *lifted) { lifted } else { Vec::new() };
-        ManualAlignment { parts, lifted }
-    }
-
-    pub fn is_lifted(&self, document: usize) -> bool {
-        self.lifted.get(document).cloned().unwrap_or(false)
-    }
-
-    pub fn has_lifted(&self) -> bool {
-        self.lifted.iter().any(|lifted| *lifted)
+        ManualAlignment { parts }
     }
 }
 
@@ -261,7 +245,7 @@ pub trait ComparisonEngine: Send + Sync {
 pub struct CompareInput<'a> {
     /// A, B and, in 3-way mode, C.
     pub sources: Vec<SourceLines<'a>>,
-    /// In display order, with line ranges relative to `sources`. Engines never see lifted parts: `run_comparison` lays the documents out in display order first.
+    /// In display order, with line ranges relative to `sources`. Engines never see alignments that a document holds in another order: `run_comparison` lays the documents out in display order first.
     pub alignments: &'a [ManualAlignment],
     pub options: &'a ComparisonOptions,
 }
@@ -277,7 +261,7 @@ pub fn run_comparison(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, j
     let capabilities = engine.capabilities();
     validate_input(input, &capabilities)?;
     job.check_canceled()?;
-    let comparison = if input.alignments.iter().any(ManualAlignment::has_lifted) {
+    let comparison = if inset::has_insets(input.alignments) {
         inset::compare_with_insets(engine, input, job, &capabilities)?
     } else {
         compare_aligned(engine, input, job, &capabilities)?

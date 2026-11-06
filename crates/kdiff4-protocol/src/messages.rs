@@ -100,7 +100,7 @@ pub enum Command {
         number: u32,
         to: u32,
     },
-    /// Shows the complete alignment `number` at `slot` of the display order of the other alignments, counting from 0 at the top. Where the documents disagree on the order, the alignment's hunks are lifted in the documents that don't agree with that place and shown there. Nothing is compared again until `ApplyAlignments`. Rejected when `number` is not a complete alignment, when `slot` is past the last alignment, or when no document keeps its order at that slot.
+    /// Shows the complete alignment `number` at `slot` of the display order of the other alignments, counting from 0 at the top. Where the documents disagree on the order, the documents that don't agree with that place exchange the hunk of the alignment with the one that has its place there. Nothing is compared again until `ApplyAlignments`. Rejected when `number` is not a complete alignment, when `slot` is past the last alignment, or when no document keeps its order at that slot.
     PlaceAlignment {
         number: u32,
         slot: usize,
@@ -257,14 +257,18 @@ pub struct AlignmentMark {
     /// The marked lines. An empty range is an anchor: the position before that line.
     pub lines: Range<usize>,
     pub status: MarkStatus,
-    /// Its alignment shows it away from its place in the document. Taken from the applied alignments when `status` is `Applied`, from where the alignment would be shown otherwise.
+    /// Set when its alignment shows the hunk away from its place in the document: the number of the alignment whose hunk is shown where this one was. Taken from the applied alignments when `status` is `Applied`, from where the alignment would be shown otherwise.
     #[serde(default)]
-    pub lifted: bool,
+    pub replaced_by: Option<u32>,
 }
 
 impl AlignmentMark {
     pub fn is_anchor(&self) -> bool {
         self.lines.is_empty()
+    }
+
+    pub fn is_moved(&self) -> bool {
+        self.replaced_by.is_some()
     }
 }
 
@@ -274,7 +278,7 @@ pub struct Alignments {
     pub marks: Vec<AlignmentMark>,
     /// The marks give other alignments than the comparison was computed with, so Apply would compare again.
     pub changed: bool,
-    /// Every complete alignment that is lifted in some document, with the places it could be shown at instead, ordered by number.
+    /// Every complete alignment that some document has in another place than the others, with the places it could be shown at, ordered by number.
     #[serde(default)]
     pub insets: Vec<InsetChoice>,
     /// Set only in the answer to a mark: the alignment that mark completed, when it is an inset and the user should say where to show it. It is shown at the option that fits the documents best until then.
@@ -288,7 +292,7 @@ pub struct InsetChoice {
     pub number: u32,
     /// The index in `options` of where it is shown now.
     pub current: usize,
-    /// Each way to lift it: one per set of documents that keep their order. The documents that don't are the ones whose hunk moves.
+    /// Each way to show it: one per set of documents that keep their order. The documents that don't are the ones whose hunk moves.
     pub options: Vec<InsetOption>,
 }
 
@@ -299,8 +303,8 @@ pub struct InsetOption {
     /// The alignments shown right above and right below that place.
     pub above: Option<u32>,
     pub below: Option<u32>,
-    /// The documents whose hunk is lifted there.
-    pub lifted: Vec<Document>,
+    /// The documents whose hunk is moved there.
+    pub moved: Vec<Document>,
 }
 
 impl Alignments {
@@ -502,7 +506,7 @@ mod tests {
             number,
             lines,
             status: MarkStatus::Pending,
-            lifted: false,
+            replaced_by: None,
         }
     }
 

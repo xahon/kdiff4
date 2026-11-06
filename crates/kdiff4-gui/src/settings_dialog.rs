@@ -3,8 +3,8 @@ use kdiff4_protocol::Document;
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
 use crate::config::{
-    MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES, MAX_SMOOTH_SCROLL_MS,
-    MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig,
+    MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_INSET_ARROW_GAP, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES,
+    MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig,
 };
 use crate::fonts::MonospaceFamily;
 use crate::theme;
@@ -293,6 +293,11 @@ impl SettingsDialog {
             ui.label("Gutter color:");
             ui.color_edit_button_srgba_unmultiplied(&mut self.draft.alignment_color)
                 .on_hover_text("The color of the alignment marks in the gutters of the source panes.");
+            ui.end_row();
+
+            ui.label("Inset arrow gap:");
+            ui.add(DragValue::new(&mut self.draft.inset_arrow_gap).range(0..=MAX_INSET_ARROW_GAP).speed(0.1).suffix(" px"))
+                .on_hover_text("Space between the lines of the arrows left of the line numbers that show where the hunks of an inset alignment were.");
             ui.end_row();
 
             ui.label("Jump stops:");

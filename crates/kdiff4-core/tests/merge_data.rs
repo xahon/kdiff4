@@ -219,6 +219,33 @@ fn moved_and_changed_rs() {
 }
 
 #[test]
+fn moved_functions_cpp() {
+    check_case(
+        "moved_functions_cpp",
+        Counts {
+            differences: 3,
+            conflicts: 2,
+            unresolved: 2,
+        },
+    );
+}
+
+
+/// Both sides move functions and change some of them, so the merge without alignments finds removals and insertions that conflict with the changes.
+#[test]
+fn moved_and_changed_cpp() {
+    check_case(
+        "moved_and_changed_cpp",
+        Counts {
+            differences: 8,
+            conflicts: 2,
+            unresolved: 2,
+        },
+    );
+}
+
+
+#[test]
 fn swapped_rs() {
     check_case(
         "swapped_rs",
@@ -301,6 +328,47 @@ fn manual_alignment_separates_the_added_functions() {
     host.join().unwrap();
 }
 
+/// The functions of `moved_and_changed_cpp`, marked in the order of the base. B and C hold them in other orders, so the alignments are insets: the functions are exchanged between the places they have in B and C, and the blank lines between them stay where they are. Every change of both sides merges except the one both made to `toLower`.
+#[test]
+fn insets_exchange_the_moved_functions_without_extra_blank_lines() {
+    let (mut client, host) = start();
+    open(&mut client, "moved_and_changed_cpp");
+    let base = [11..21, 23..40, 42..53, 55..60, 62..71, 73..89, 91..101];
+    let left = [18..28, 30..47, 78..89, 11..16, 49..58, 60..76, 91..101];
+    let right = [93..103, 11..28, 50..61, 30..37, 39..48, 63..79, 81..91];
+    for (document, functions) in [(Document::A, base), (Document::B, left), (Document::C, right)] {
+        for lines in functions {
+            run(&mut client, Command::MarkAlignment { document: document.clone(), lines });
+        }
+    }
+    let applied = run(&mut client, Command::ApplyAlignments { confirmed: false }).expect("Test: apply answers with a snapshot");
+    assert_eq!(
+        counts(&applied),
+        Counts {
+            differences: 7,
+            conflicts: 1,
+            unresolved: 1
+        }
+    );
+    run(
+        &mut client,
+        Command::ChooseForUnresolved {
+            base: applied.revision.clone(),
+            document: Document::B,
+        },
+    );
+    let merged = resync(&mut client);
+    let text = &merged.output.as_ref().unwrap().text;
+    let expected_path = case_dir("moved_and_changed_cpp").join("aligned.cpp");
+    let expected = fs::read_to_string(&expected_path).unwrap_or_else(|error| panic!("{}: {error}", expected_path.display()));
+    assert_eq!(*text, expected);
+    assert!(!text.contains("\n\n\n\n"), "no more than two blank lines in a row");
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
 #[test]
 fn every_case_has_a_test() {
     let mut cases: Vec<String> = fs::read_dir(case_dir(""))
@@ -317,7 +385,9 @@ fn every_case_has_a_test() {
             "edges_txt",
             "long_txt",
             "manual_alignment_rs",
+            "moved_and_changed_cpp",
             "moved_and_changed_rs",
+            "moved_functions_cpp",
             "moved_functions_rs",
             "swapped_rs",
             "two_way_txt",

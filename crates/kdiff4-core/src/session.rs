@@ -1537,14 +1537,14 @@ cc
             panic!("expected the marks to change")
         };
         assert_eq!(summary.ask, Some(2));
-        assert_eq!(summary.insets.len(), 1);
+        assert_eq!(summary.insets.len(), 2);
         assert_eq!(alignment_of(&session).ask, None);
         assert_eq!(session.apply_alignments(true, &BuiltinEngine).unwrap(), true);
         assert_eq!(hunks_of(&session), [vec![1..2, 0..1, 1..2], vec![0..1, 1..2, 0..1]]);
         assert_eq!(output_text(&session), "b\na\n");
         assert_consistent(&session);
-        let lifted: Vec<(Document, u32)> = alignment_of(&session).marks.iter().filter(|mark| mark.lifted).map(|mark| (mark.document.clone(), mark.number)).collect();
-        assert_eq!(lifted, [(Document::A, 2), (Document::C, 2)]);
+        let moved: Vec<(Document, u32, Option<u32>)> = alignment_of(&session).marks.iter().filter(|mark| mark.is_moved()).map(|mark| (mark.document.clone(), mark.number, mark.replaced_by)).collect();
+        assert_eq!(moved, [(Document::A, 1, Some(2)), (Document::C, 1, Some(2))]);
         assert!(alignment_of(&session).marks.iter().all(|mark| mark.status == MarkStatus::Applied));
     }
 
@@ -1567,8 +1567,8 @@ cc
         assert_eq!(hunks_of(&session), [vec![0..1, 1..2, 0..1], vec![1..2, 0..1, 1..2]]);
         assert_eq!(output_text(&session), "a\nb\n");
         assert_consistent(&session);
-        let lifted: Vec<(Document, u32)> = alignment_of(&session).marks.iter().filter(|mark| mark.lifted).map(|mark| (mark.document.clone(), mark.number)).collect();
-        assert_eq!(lifted, [(Document::B, 2)]);
+        let moved: Vec<(Document, u32, Option<u32>)> = alignment_of(&session).marks.iter().filter(|mark| mark.is_moved()).map(|mark| (mark.document.clone(), mark.number, mark.replaced_by)).collect();
+        assert_eq!(moved, [(Document::B, 2, Some(1))]);
     }
 
     #[test]

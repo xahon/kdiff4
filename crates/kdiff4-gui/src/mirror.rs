@@ -579,7 +579,7 @@ mod tests {
                 number: 1,
                 lines: 0..1,
                 status: kdiff4_protocol::MarkStatus::Pending,
-                lifted: false,
+                replaced_by: None,
             }],
             changed: false,
             ..Alignments::default()

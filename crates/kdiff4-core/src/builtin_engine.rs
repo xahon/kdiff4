@@ -690,7 +690,7 @@ mod tests {
 
     const ALPHABET: [&str; 4] = ["a", "b", "c", " c"];
 
-    /// Random documents with random alignments. Every document may hold them in another order than the list; the parts that keep the list order are a longest stretch of the document's parts that is already in order, and the others are lifted.
+    /// Random documents with random alignments. Every document may hold them in another order than the list.
     fn documents_with_alignments() -> impl Strategy<Value = (Vec<Vec<&'static str>>, Vec<ManualAlignment>)> {
         (2usize..=3, 0usize..4)
             .prop_flat_map(|(documents, count)| {
@@ -703,31 +703,18 @@ mod tests {
             .prop_map(|(lines, mut cuts, orders)| {
                 cuts.iter_mut().for_each(|document| document.sort());
                 let count = cuts.first().map(|document| document.len() / 2).unwrap_or(0);
-                let in_order: Vec<Vec<bool>> = orders.iter().map(|order| longest_increasing(order)).collect();
                 let alignments = (0..count)
                     .map(|index| {
                         let parts = (0..cuts.len()).map(|document| {
                             let part = orders[document][index];
                             cuts[document][part * 2]..cuts[document][part * 2 + 1]
                         });
-                        ManualAlignment::with_lifted(parts.collect(), in_order.iter().map(|document| !document[index]).collect())
+                        ManualAlignment::new(parts.collect())
                     })
                     .filter(|alignment| alignment.parts.iter().any(|part| !part.is_empty()))
                     .collect();
                 (lines, alignments)
             })
-    }
-
-    /// Which entries of `order` are in a longest increasing subsequence.
-    fn longest_increasing(order: &[usize]) -> Vec<bool> {
-        let mut best: Vec<Vec<usize>> = Vec::new();
-        for (index, value) in order.iter().enumerate() {
-            let mut chain = (0..index).filter(|before| order[*before] < *value).map(|before| best[before].clone()).max_by_key(|chain| chain.len()).unwrap_or_default();
-            chain.push(index);
-            best.push(chain);
-        }
-        let chain = best.into_iter().max_by_key(|chain| chain.len()).unwrap_or_default();
-        (0..order.len()).map(|index| chain.contains(&index)).collect()
     }
 
     proptest! {

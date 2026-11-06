@@ -158,6 +158,8 @@ pub struct PaneOptions {
     pub overview_strip: bool,
     pub minimap: bool,
     pub alignment_color: Color32,
+    /// Pixels between the lines of the arrows of moved hunks.
+    pub inset_arrow_gap: u8,
 }
 
 /// Which scroll offset a pane follows.
@@ -200,6 +202,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0,
         whitespace: options.whitespace.clone(),
         alignment_color: None,
+        inset_arrow_gap: f32::from(options.inset_arrow_gap),
     };
     let source_style = ViewStyle {
         alignment_color: Some(options.alignment_color),

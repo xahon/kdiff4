@@ -60,8 +60,10 @@ pub struct ViewStyle<'a> {
     /// Opacity of the borders of the regions other than the current one, from 0 to 1.
     pub other_region_border_opacity: f32,
     pub whitespace: WhitespaceConfig,
-    /// The color of the alignment marks. Only source panes have an alignment column; D and views without one have `None`.
+    /// The color of the alignment marks and of the arrows of moved hunks. Only source panes have an alignment column; D and views without one have `None`.
     pub alignment_color: Option<Color32>,
+    /// Pixels between the lines of the arrows of moved hunks.
+    pub inset_arrow_gap: f32,
 }
 
 /// The character-level diff of a source pane's lines; `sources` is how many source documents the rows have.
@@ -213,6 +215,8 @@ impl Viewport {
 /// Widths of the left margin's parts. The margin stays in place when the text scrolls sideways.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Margin {
+    /// The arrows of moved hunks, left of the line numbers.
+    arrows: f32,
     numbers: f32,
     /// The marks of manual alignments, between the line numbers and the gutter.
     alignment: f32,
@@ -221,7 +225,17 @@ struct Margin {
 
 impl Margin {
     fn total(&self) -> f32 {
-        self.numbers + self.alignment + self.column + TEXT_GAP
+        self.arrows + self.numbers + self.alignment + self.column + TEXT_GAP
+    }
+
+    /// Where the alignment column starts, from the left edge of the view.
+    fn alignment_left(&self) -> f32 {
+        self.arrows + self.numbers
+    }
+
+    /// Where the gutter starts, from the left edge of the view.
+    fn gutter_left(&self) -> f32 {
+        self.arrows + self.numbers + self.alignment
     }
 }
 
@@ -249,9 +263,14 @@ pub fn show(
         void_row: caret.void_row.filter(|row| rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none())),
     });
     let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id.clone(), palette.pane_text).size().x;
-    let margin = margin_widths(style, lines.count(), char_width, row_height);
     let places: Vec<Place> = marks.marks.iter().map(|mark| alignment_gutter::place(mark, rows, lines.count())).collect();
-    let arrows: Vec<alignment_gutter::Arrow> = marks.marks.iter().filter_map(|mark| alignment_gutter::arrow(mark, rows, lines.count())).collect();
+    let arrows: Vec<alignment_gutter::Arrow> = if style.alignment_color.is_some() {
+        marks.marks.iter().filter_map(|mark| alignment_gutter::arrow(mark, marks.marks, &places)).collect()
+    } else {
+        Vec::new()
+    };
+    let lanes = alignment_gutter::assign_lanes(&arrows);
+    let margin = margin_widths(style, lines.count(), char_width, row_height, lanes.iter().max().map_or(0, |lane| lane + 1));
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -304,6 +323,7 @@ pub fn show(
                 previous_region = pane_row.region;
                 paint_margin(ui, rows, row, &pane_row, viewport.left(), rect, margin, style, &font_id);
                 if let Some(color) = style.alignment_color {
+                    alignment_gutter::paint_arrows(ui.painter(), &arrows, &lanes, row, rows.len(), rect, viewport.left(), margin.arrows, style.inset_arrow_gap, color);
                     alignment_gutter::paint_row(
                         ui.painter(),
                         marks.marks,
@@ -311,12 +331,11 @@ pub fn show(
                         row,
                         rows.len(),
                         rect,
-                        viewport.left() + margin.numbers,
+                        viewport.left() + margin.alignment_left(),
                         margin.alignment,
                         color,
                         palette,
                         &font_id,
-                        &arrows,
                     );
                 }
                 let caret_on_void = caret.and_then(|caret| caret.void_row) == Some(row);
@@ -384,7 +403,7 @@ pub fn show(
     let hover_position = ui.input(|input| input.pointer.hover_pos());
     let alignment_hits = |pointer: Pos2| -> Vec<usize> {
         let x = pointer.x - output.inner_rect.min.x;
-        if style.alignment_color.is_none() || x < margin.numbers || x >= margin.numbers + margin.alignment {
+        if style.alignment_color.is_none() || x < margin.alignment_left() || x >= margin.gutter_left() {
             return Vec::new();
         }
         alignment_gutter::hits(&places, row_height, pointer.y - output.inner_rect.min.y + scroll.y)
@@ -584,7 +603,8 @@ pub fn wheel_pixels(unit: egui::MouseWheelUnit, lines: f32, row_height: f32, pag
     }
 }
 
-fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_height: f32) -> Margin {
+/// `arrow_lanes` is how many lanes the arrows of moved hunks need.
+fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_height: f32, arrow_lanes: usize) -> Margin {
     let numbers = if style.line_numbers {
         digits(line_count) as f32 * char_width + MARGIN_PADDING * 2.0
     } else {
@@ -596,12 +616,13 @@ fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_
         MarginKind::Marks => row_height.max(char_width + MARGIN_PADDING * 2.0),
     };
     let alignment = style.alignment_color.map_or(0.0, |_| row_height.max(char_width * 2.0 + MARGIN_PADDING));
-    Margin { numbers, alignment, column }
+    let arrows = alignment_gutter::arrows_width(arrow_lanes, style.inset_arrow_gap);
+    Margin { arrows, numbers, alignment, column }
 }
 
 /// The region of the gutter block under a point, given in pixels from the view's left edge and from the top of its content.
 fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, content_y: f32, row_height: f32) -> Option<usize> {
-    let left = margin.numbers + margin.alignment;
+    let left = margin.gutter_left();
     if kind == MarginKind::Nothing || x < left || x >= left + margin.column || content_y < 0.0 {
         return None;
     }
@@ -624,14 +645,14 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
         && let Some(line) = pane_row.line
     {
         painter.text(
-            pos2(left + margin.numbers - MARGIN_PADDING, rect.center().y),
+            pos2(left + margin.alignment_left() - MARGIN_PADDING, rect.center().y),
             Align2::RIGHT_CENTER,
             (line + 1).to_string(),
             font_id.clone(),
             palette.weak_text,
         );
     }
-    let column_left = left + margin.numbers + margin.alignment;
+    let column_left = left + margin.gutter_left();
     if style.margin != MarginKind::Nothing
         && let Some(block) = pane_row.block
     {
@@ -651,8 +672,8 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
             );
         }
     }
-    if margin.numbers + margin.alignment + margin.column > 0.0 {
-        let x = left + margin.numbers + margin.alignment + margin.column + TEXT_GAP / 2.0;
+    if margin.gutter_left() + margin.column > 0.0 {
+        let x = left + margin.gutter_left() + margin.column + TEXT_GAP / 2.0;
         painter.vline(x, rect.y_range(), Stroke::new(1.0, palette.void_hatch));
     }
 }
@@ -1090,6 +1111,7 @@ mod tests {
             other_region_border_opacity: 1.0,
             whitespace: WhitespaceConfig::default(),
             alignment_color: None,
+            inset_arrow_gap: 1.0,
         }
     }
 
@@ -1099,30 +1121,32 @@ mod tests {
         assert_eq!(digits(9), 1);
         assert_eq!(digits(10), 2);
         assert_eq!(digits(12345), 5);
-        let numbers = margin_widths(&style(true, MarginKind::Nothing), 120, 7.0, 16.0);
+        let numbers = margin_widths(&style(true, MarginKind::Nothing), 120, 7.0, 16.0, 0);
         assert_eq!(
             numbers,
             Margin {
+                arrows: 0.0,
                 numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
                 alignment: 0.0,
                 column: 0.0
             }
         );
-        assert_eq!(margin_widths(&style(false, MarginKind::Nothing), 1, 7.0, 16.0).total(), TEXT_GAP);
+        assert_eq!(margin_widths(&style(false, MarginKind::Nothing), 1, 7.0, 16.0, 0).total(), TEXT_GAP);
     }
 
     #[test]
     fn gutter_columns_are_one_row_wide() {
         assert_eq!(
-            margin_widths(&style(false, MarginKind::Gutters), 120, 7.0, 16.0),
+            margin_widths(&style(false, MarginKind::Gutters), 120, 7.0, 16.0, 0),
             Margin {
+                arrows: 0.0,
                 numbers: 0.0,
                 alignment: 0.0,
                 column: 16.0
             }
         );
-        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 7.0, 16.0).column, 16.0);
-        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 20.0, 16.0).column, 20.0 + MARGIN_PADDING * 2.0);
+        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 7.0, 16.0, 0).column, 16.0);
+        assert_eq!(margin_widths(&style(false, MarginKind::Marks), 1, 20.0, 16.0, 0).column, 20.0 + MARGIN_PADDING * 2.0);
     }
 
     #[test]
@@ -1131,10 +1155,11 @@ mod tests {
             alignment_color: Some(Color32::BLUE),
             ..style(true, MarginKind::Gutters)
         };
-        let margin = margin_widths(&aligned, 120, 7.0, 16.0);
+        let margin = margin_widths(&aligned, 120, 7.0, 16.0, 0);
         assert_eq!(
             margin,
             Margin {
+                arrows: 0.0,
                 numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
                 alignment: 18.0,
                 column: 16.0
@@ -1148,7 +1173,8 @@ mod tests {
                 },
                 1,
                 12.0,
-                16.0
+                16.0,
+                0
             )
             .alignment,
             12.0 * 2.0 + MARGIN_PADDING
@@ -1190,7 +1216,7 @@ mod tests {
             number: 1,
             lines: 1..3,
             status: kdiff4_protocol::MarkStatus::Pending,
-            lifted: false,
+            replaced_by: None,
         }];
         let test = MenuTest {
             marks,
@@ -1202,6 +1228,7 @@ mod tests {
             origin: Pos2::ZERO,
             row_height: 0.0,
             margin: Margin {
+                arrows: 0.0,
                 numbers: 0.0,
                 alignment: 0.0,
                 column: 0.0,
@@ -1220,7 +1247,7 @@ mod tests {
                 test.row_height = row_height(ui);
                 let font_id = TextStyle::Monospace.resolve(ui.style());
                 let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
-                test.margin = margin_widths(&style, lines.count(), char_width, test.row_height);
+                test.margin = margin_widths(&style, lines.count(), char_width, test.row_height, 0);
                 let marks = PaneMarks {
                     marks: &test.marks,
                     highest: test.highest,
@@ -1334,11 +1361,11 @@ mod tests {
     #[test]
     fn an_inset_can_be_shown_at_another_place_from_the_menu() {
         let mut harness = menu_harness(Some(Color32::BLUE), None);
-        let option = |slot, above, below, lifted: &[Document]| kdiff4_protocol::InsetOption {
+        let option = |slot, above, below, moved: &[Document]| kdiff4_protocol::InsetOption {
             slot,
             above,
             below,
-            lifted: lifted.to_vec(),
+            moved: moved.to_vec(),
         };
         harness.state_mut().insets = vec![kdiff4_protocol::InsetChoice {
             number: 1,
@@ -1413,6 +1440,7 @@ mod tests {
         ]);
         let rows = Rows::Mapped(&map);
         let margin = Margin {
+            arrows: 0.0,
             numbers: 20.0,
             alignment: 0.0,
             column: 16.0,

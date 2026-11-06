@@ -333,7 +333,7 @@ pub fn line_count(text: &str) -> usize {
     if text.is_empty() || text.ends_with('\n') { breaks } else { breaks + 1 }
 }
 
-/// One region spanning `regions`, which must be consecutive: their hunks and rows joined, its status classified again by `engine`. Where the regions don't follow each other in a document, because an inset was lifted there, the hunk covers all of them and the status is classified from the lines of the rows.
+/// One region spanning `regions`, which must be consecutive: their hunks and rows joined, its status classified again by `engine`. Where the regions don't follow each other in a document, because an inset exchanged the hunks there, the hunk covers all of them and the status is classified from the lines of the rows.
 pub fn join(regions: &[Region], sources: &[Vec<&str>], engine: &dyn ComparisonEngine) -> Result<Region, CoreError> {
     let (Some(first), Some(last)) = (regions.first(), regions.last()) else {
         return Err(CoreError::InvalidChoice {

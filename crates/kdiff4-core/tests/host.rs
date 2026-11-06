@@ -450,8 +450,8 @@ fn insets_ask_where_to_show_them_and_can_be_placed_again() {
         panic!("expected the marks")
     };
     assert_eq!(alignments.ask, None);
-    assert_eq!(alignments.insets.len(), 1);
-    assert_eq!(alignments.insets[0].current, 1);
+    assert_eq!(alignments.insets.len(), 2);
+    assert_eq!(alignments.insets.iter().find(|choice| choice.number == 2).unwrap().current, 1);
     assert!(alignments.changed);
     expect_ok(&client, id);
 
@@ -467,7 +467,7 @@ fn insets_ask_where_to_show_them_and_can_be_placed_again() {
     assert_eq!(snapshot.output.unwrap().text, "a\nb\n");
     let hunks: Vec<_> = snapshot.comparison.regions.iter().map(|region| region.hunks.clone()).collect();
     assert_eq!(hunks, [vec![0..1, 1..2, 0..1], vec![1..2, 0..1, 1..2]]);
-    assert!(snapshot.alignments.marks.iter().filter(|mark| mark.lifted).all(|mark| mark.document == Document::B));
+    assert!(snapshot.alignments.marks.iter().filter(|mark| mark.is_moved()).all(|mark| mark.document == Document::B));
     expect_ok(&client, id);
 
     drop(client);

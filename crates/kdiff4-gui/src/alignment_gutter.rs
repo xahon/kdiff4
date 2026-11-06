@@ -9,17 +9,17 @@ use crate::theme::{DocumentColors, Palette};
 
 /// How much of a row the chip of an anchor covers.
 const CHIP_HEIGHT_SHARE: f32 = 0.8;
-/// How far the line of the first arrow is from the right edge of the alignment column, and how far each further arrow is from the one before.
-const ARROW_LANE_INSET: f32 = 3.0;
-const ARROW_LANE_STEP: f32 = 3.0;
+/// The strip of arrows left of the line numbers: the padding before the first lane, the width of an arrow's line, and the run after the lanes where an arrow ends in a tip or a dot.
+const ARROW_EDGE: f32 = 2.0;
 const ARROW_WIDTH: f32 = 1.5;
+const ARROW_RUN: f32 = 6.5;
 const ARROW_HEAD_LENGTH: f32 = 4.5;
 const ARROW_HEAD_WIDTH: f32 = 5.0;
 const ARROW_DOT_RADIUS: f32 = 2.5;
 /// The border of a mark nothing in the other documents pairs with, as a share of the color's strength.
 const UNMATCHED_BORDER_SHARE: f32 = 0.45;
 
-/// The alignment marks of one source pane, and the highest number any document uses, so a mark can be renumbered to pair with a mark of another document. `insets` are the places the alignments that are lifted somewhere could be shown at instead.
+/// The alignment marks of one source pane, and the highest number any document uses, so a mark can be renumbered to pair with a mark of another document. `insets` are the places the alignments that some document has in another place could be shown at.
 #[derive(Debug, Clone, Copy)]
 pub struct PaneMarks<'a> {
     pub marks: &'a [AlignmentMark],
@@ -50,30 +50,58 @@ pub fn place(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Place {
     Place::Rows(first..last.max(first) + 1)
 }
 
-/// A hunk shown away from its place: the arrow runs from where it was in the document to the rows it is shown on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A hunk shown away from its place: the arrow runs from where the hunk was in the document to the rows it is shown on. Both ends are in rows, counted from the top of the text: a row's middle is its number plus a half, an edge between rows is a whole number.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Arrow {
-    /// The edge above this row is where the hunk was taken from; one past the last row is the end of the text.
-    pub from: usize,
+    /// Where the hunk was: the first row of the hunk that is shown there now.
+    pub from: f32,
     /// The first row of the hunk.
-    pub to: usize,
+    pub to: f32,
 }
 
-/// The arrow of a mark whose hunk the applied comparison shows elsewhere. Anchors have no lines to move, and a hunk that was not lifted in the comparison yet has no new place to point at.
-pub fn arrow(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Option<Arrow> {
-    if !mark.lifted || mark.status != MarkStatus::Applied || mark.is_anchor() {
+/// The arrow of a mark whose hunk the applied comparison shows elsewhere, given the marks of its pane and where they sit. The old place of the hunk shows the hunk of the mark `replaced_by` names. Anchors have no lines to move, and a mark that is not applied yet is not where the rows show it.
+pub fn arrow(mark: &AlignmentMark, marks: &[AlignmentMark], places: &[Place]) -> Option<Arrow> {
+    let replaced_by = mark.replaced_by?;
+    if mark.status != MarkStatus::Applied || mark.is_anchor() {
         return None;
     }
-    let from = if mark.lines.start > 0 {
-        rows.row_of_line(mark.lines.start - 1) + 1
-    } else if mark.lines.end < line_count {
-        rows.row_of_line(mark.lines.end)
-    } else {
-        0
+    let position_of = |number: u32| marks.iter().position(|other| other.number == number && other.status == MarkStatus::Applied);
+    let Some(Place::Rows(shown)) = position_of(mark.number).and_then(|index| places.get(index)) else {
+        return None;
     };
-    let to = rows.row_of_line(mark.lines.start);
-    let below_hunk = rows.row_of_line(mark.lines.end - 1) + 1;
-    (from != to && from != below_hunk).then_some(Arrow { from, to })
+    let from = match position_of(replaced_by).and_then(|index| places.get(index))? {
+        Place::Rows(rows) => rows.start as f32 + 0.5,
+        Place::Edge(edge) => *edge as f32,
+    };
+    let to = shown.start as f32 + 0.5;
+    ((from - to).abs() >= 1.0).then_some(Arrow { from, to })
+}
+
+/// The lane of every arrow, counting from 0 next to the line numbers: arrows that overlap in height take different lanes, the others share one. The arrows that begin higher up take the lower lanes.
+pub fn assign_lanes(arrows: &[Arrow]) -> Vec<usize> {
+    let span = |arrow: &Arrow| (arrow.from.min(arrow.to), arrow.from.max(arrow.to));
+    let mut order: Vec<usize> = (0..arrows.len()).collect();
+    order.sort_by(|first, second| span(&arrows[*first]).0.total_cmp(&span(&arrows[*second]).0));
+    let mut lanes = vec![0; arrows.len()];
+    let mut ends: Vec<f32> = Vec::new();
+    for index in order {
+        let (start, end) = span(&arrows[index]);
+        let lane = ends.iter().position(|lane_end| *lane_end < start).unwrap_or(ends.len());
+        match ends.get_mut(lane) {
+            Some(lane_end) => *lane_end = end,
+            None => ends.push(end),
+        }
+        lanes[index] = lane;
+    }
+    lanes
+}
+
+/// The width of the strip left of the line numbers that holds `lanes` arrows with `gap` pixels between their lines; nothing when there are no arrows.
+pub fn arrows_width(lanes: usize, gap: f32) -> f32 {
+    if lanes == 0 {
+        return 0.0;
+    }
+    ARROW_EDGE + lanes as f32 * ARROW_WIDTH + (lanes - 1) as f32 * gap.max(0.0) + ARROW_RUN
 }
 
 /// The marks under a point of the alignment column, given in pixels from the top of the content: the ranges that cover its row and the anchors whose chip it touches.
@@ -106,7 +134,7 @@ pub fn describe(mark: &AlignmentMark) -> String {
         MarkStatus::Pending => "waits for Apply Alignments",
         MarkStatus::Unmatched => "has no effect: not every document has a mark with this number",
     };
-    let moved = if mark.lifted { ". It is moved: shown with the other documents' parts of this alignment, away from its place here." } else { "" };
+    let moved = if mark.is_moved() { ". It is moved: shown with the other documents' parts of this alignment, away from its place here." } else { "" };
     format!("Alignment {}, {what}: {state}{moved}", mark.number)
 }
 
@@ -118,7 +146,7 @@ pub fn option_label(option: &InsetOption) -> String {
         (Some(above), Some(below)) => format!("Between alignments {above} and {below}"),
         (None, None) => "Here".to_string(),
     };
-    let letters: Vec<&str> = option.lifted.iter().map(Document::letter).collect();
+    let letters: Vec<&str> = option.moved.iter().map(Document::letter).collect();
     let moves = match letters.as_slice() {
         [] => return place,
         [only] => only.to_string(),
@@ -165,7 +193,6 @@ pub fn paint_row(
     color: Color32,
     palette: &Palette,
     font_id: &FontId,
-    arrows: &[Arrow],
 ) {
     for (mark, place) in marks.iter().zip(places) {
         let Place::Rows(rows) = place else { continue };
@@ -212,29 +239,33 @@ pub fn paint_row(
             Place::Edge(row_count),
         );
     }
-    paint_arrows(painter, arrows, row, row_count, rect, column_left, column_width, palette);
 }
 
-/// The part of every arrow on `row`: its line down the right of the column, a dot where the hunk was taken from, and the tip pointing at the first row of the hunk.
-fn paint_arrows(painter: &Painter, arrows: &[Arrow], row: usize, row_count: usize, rect: Rect, column_left: f32, column_width: f32, palette: &Palette) {
+/// The part of every arrow on `row`, in the strip from `left` to `left + width`, like a branch in a graph: a line down its lane, a dot at the right end of the strip, next to the line numbers, where the hunk was taken from, and a tip there pointing at the first row of the hunk. `lanes` has the lane of every arrow, and `gap` is the space between lanes.
+pub fn paint_arrows(painter: &Painter, arrows: &[Arrow], lanes: &[usize], row: usize, row_count: usize, rect: Rect, left: f32, width: f32, gap: f32, color: Color32) {
+    let lane_count = lanes.iter().max().map_or(0, |lane| lane + 1);
+    let pitch = ARROW_WIDTH + gap.max(0.0);
+    let end_x = left + width - 1.0;
     let screen_y = |position: f32| rect.top() + (position - row as f32) * rect.height();
     let on_row = |y: f32| y >= rect.top() && (y < rect.bottom() || (row + 1 == row_count && y <= rect.bottom()));
-    let stroke = Stroke::new(ARROW_WIDTH, palette.text);
-    for (index, arrow) in arrows.iter().enumerate() {
-        let x = (column_left + column_width - ARROW_LANE_INSET - index as f32 * ARROW_LANE_STEP).max(column_left + 1.0);
-        let (from_y, to_y) = (screen_y(arrow.from as f32), screen_y(arrow.to as f32 + 0.5));
+    let stroke = Stroke::new(ARROW_WIDTH, color);
+    for (arrow, lane) in arrows.iter().zip(lanes) {
+        let x = left + ARROW_EDGE + ARROW_WIDTH / 2.0 + (lane_count - 1 - lane) as f32 * pitch;
+        let (from_y, to_y) = (screen_y(arrow.from), screen_y(arrow.to));
         let (top, bottom) = (from_y.min(to_y).max(rect.top()), from_y.max(to_y).min(rect.bottom()));
         if top < bottom {
             painter.line_segment([pos2(x, top), pos2(x, bottom)], stroke);
         }
         if on_row(from_y) {
-            painter.circle_filled(pos2(x, from_y), ARROW_DOT_RADIUS, palette.text);
+            let dot = pos2(end_x - ARROW_DOT_RADIUS, from_y);
+            painter.line_segment([pos2(x, from_y), dot], stroke);
+            painter.circle_filled(dot, ARROW_DOT_RADIUS, color);
         }
         if on_row(to_y) {
-            let tip = pos2(column_left + 1.0, to_y);
-            painter.line_segment([pos2(x, to_y), tip], stroke);
-            let head = vec![tip, pos2(tip.x + ARROW_HEAD_LENGTH, to_y - ARROW_HEAD_WIDTH / 2.0), pos2(tip.x + ARROW_HEAD_LENGTH, to_y + ARROW_HEAD_WIDTH / 2.0)];
-            painter.add(Shape::convex_polygon(head, palette.text, Stroke::NONE));
+            let base = end_x - ARROW_HEAD_LENGTH;
+            painter.line_segment([pos2(x, to_y), pos2(base, to_y)], stroke);
+            let head = vec![pos2(end_x, to_y), pos2(base, to_y - ARROW_HEAD_WIDTH / 2.0), pos2(base, to_y + ARROW_HEAD_WIDTH / 2.0)];
+            painter.add(Shape::convex_polygon(head, color, Stroke::NONE));
         }
     }
 }
@@ -284,7 +315,7 @@ mod tests {
             number,
             lines,
             status,
-            lifted: false,
+            replaced_by: None,
         }
     }
 
@@ -361,57 +392,133 @@ mod tests {
             "Alignment 1, anchor before line 4: waits for Apply Alignments"
         );
         assert!(describe(&mark(1, 0..1, MarkStatus::Unmatched)).contains("has no effect"));
-        let lifted = AlignmentMark {
-            lifted: true,
+        let moved = AlignmentMark {
+            replaced_by: Some(1),
             ..mark(2, 4..7, MarkStatus::Applied)
         };
-        assert!(describe(&lifted).starts_with("Alignment 2, lines 5 to 7: applied. It is moved"));
+        assert!(describe(&moved).starts_with("Alignment 2, lines 5 to 7: applied. It is moved"));
     }
 
-    fn lifted(number: u32, lines: Range<usize>, status: MarkStatus) -> AlignmentMark {
+    fn moved(number: u32, lines: Range<usize>, replaced_by: u32, status: MarkStatus) -> AlignmentMark {
         AlignmentMark {
-            lifted: true,
+            replaced_by: Some(replaced_by),
             ..mark(number, lines, status)
         }
     }
 
-    /// Lines 0 to 4 shown as 3, 4, 0, 1, 2: the hunk of lines 3 and 4 came from the end of the text to the top.
-    fn rows_with_a_hunk_from_the_end() -> RowMap {
-        RowMap::from_rows([3, 4, 0, 1, 2].into_iter().map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect())
+    /// Lines 0 to 4 shown as 3, 4, 2, 0, 1: the hunks of lines 0 and 1 and of lines 3 and 4 swapped places, and the line between them stayed.
+    fn rows_with_swapped_hunks() -> RowMap {
+        RowMap::from_rows([3, 4, 2, 0, 1].into_iter().map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect())
+    }
+
+    fn places_of(marks: &[AlignmentMark], rows: Rows<'_>) -> Vec<Place> {
+        marks.iter().map(|mark| place(mark, rows, 5)).collect()
     }
 
     #[test]
-    fn the_arrow_runs_from_the_edge_the_hunk_left_to_its_first_row() {
-        let map = rows_with_a_hunk_from_the_end();
+    fn the_arrow_runs_from_where_the_hunk_was_to_its_first_row() {
+        let map = rows_with_swapped_hunks();
         let rows = Rows::Mapped(&map);
-        assert_eq!(arrow(&lifted(1, 3..5, MarkStatus::Applied), rows, 5), Some(Arrow { from: 5, to: 0 }));
-    }
-
-    #[test]
-    fn a_hunk_taken_from_the_start_points_from_the_line_after_it() {
-        let rows = Rows::PerLine(5);
-        assert_eq!(arrow(&lifted(1, 0..2, MarkStatus::Applied), rows, 5), None);
-        let map = RowMap::from_rows([2, 3, 4, 0, 1].into_iter().map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect());
-        let rows = Rows::Mapped(&map);
-        assert_eq!(arrow(&lifted(1, 0..2, MarkStatus::Applied), rows, 5), Some(Arrow { from: 0, to: 3 }));
+        let marks = [moved(1, 0..2, 2, MarkStatus::Applied), mark(2, 3..5, MarkStatus::Applied)];
+        let places = places_of(&marks, rows);
+        assert_eq!(arrow(&marks[0], &marks, &places), Some(Arrow { from: 0.5, to: 3.5 }));
+        assert_eq!(arrow(&marks[1], &marks, &places), None);
     }
 
     #[test]
     fn only_applied_ranges_that_moved_get_an_arrow() {
-        let map = rows_with_a_hunk_from_the_end();
+        let map = rows_with_swapped_hunks();
         let rows = Rows::Mapped(&map);
-        assert_eq!(arrow(&lifted(1, 3..5, MarkStatus::Pending), rows, 5), None);
-        assert_eq!(arrow(&lifted(1, 3..3, MarkStatus::Applied), rows, 5), None);
-        assert_eq!(arrow(&mark(1, 3..5, MarkStatus::Applied), rows, 5), None);
+        let pending = [moved(1, 0..2, 2, MarkStatus::Pending), mark(2, 3..5, MarkStatus::Applied)];
+        assert_eq!(arrow(&pending[0], &pending, &places_of(&pending, rows)), None);
+        let anchor = [moved(1, 0..0, 2, MarkStatus::Applied), mark(2, 3..5, MarkStatus::Applied)];
+        assert_eq!(arrow(&anchor[0], &anchor, &places_of(&anchor, rows)), None);
+        let unmoved = [mark(1, 0..2, MarkStatus::Applied), mark(2, 3..5, MarkStatus::Applied)];
+        assert_eq!(arrow(&unmoved[0], &unmoved, &places_of(&unmoved, rows)), None);
+        let unpaired = [moved(1, 0..2, 2, MarkStatus::Applied)];
+        assert_eq!(arrow(&unpaired[0], &unpaired, &places_of(&unpaired, rows)), None);
+    }
+
+    #[test]
+    fn a_hunk_whose_old_place_shows_an_anchor_points_from_its_edge() {
+        let marks = [moved(1, 0..1, 2, MarkStatus::Applied), mark(2, 0..0, MarkStatus::Applied)];
+        let places = [Place::Rows(2..3), Place::Edge(0)];
+        assert_eq!(arrow(&marks[0], &marks, &places), Some(Arrow { from: 0.0, to: 2.5 }));
+        let near = [Place::Rows(0..1), Place::Edge(0)];
+        assert_eq!(arrow(&marks[0], &marks, &near), None);
+    }
+
+    #[test]
+    fn arrows_that_overlap_in_height_take_different_lanes() {
+        let arrows = [Arrow { from: 0.5, to: 3.5 }, Arrow { from: 6.5, to: 2.5 }, Arrow { from: 4.5, to: 8.5 }];
+        assert_eq!(assign_lanes(&arrows), [0, 1, 0]);
+        assert_eq!(assign_lanes(&[]), Vec::<usize>::new());
+        assert_eq!(assign_lanes(&[Arrow { from: 1.5, to: 3.5 }, Arrow { from: 3.5, to: 1.5 }]), [0, 1]);
+    }
+
+    #[test]
+    fn the_strip_of_arrows_grows_with_the_lanes_and_the_gap() {
+        assert_eq!(arrows_width(0, 1.0), 0.0);
+        assert_eq!(arrows_width(1, 1.0), ARROW_EDGE + ARROW_WIDTH + ARROW_RUN);
+        assert_eq!(arrows_width(3, 1.0), ARROW_EDGE + 3.0 * ARROW_WIDTH + 2.0 + ARROW_RUN);
+        assert_eq!(arrows_width(3, 0.0), ARROW_EDGE + 3.0 * ARROW_WIDTH + ARROW_RUN);
+        assert_eq!(arrows_width(3, -4.0), arrows_width(3, 0.0));
+    }
+
+    /// The shapes `paint_arrows` draws on rows 0 to 5, each 10 pixels high, for a strip from 4 to 24.
+    fn painted(arrows: &[Arrow], gap: f32) -> Vec<Shape> {
+        let lanes = assign_lanes(arrows);
+        let context = egui::Context::default();
+        let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.ctx().layer_painter(egui::LayerId::background());
+            for row in 0..6 {
+                let rect = Rect::from_min_size(pos2(0.0, row as f32 * 10.0), egui::vec2(100.0, 10.0));
+                paint_arrows(&painter, arrows, &lanes, row, 6, rect, 4.0, 20.0, gap, Color32::BLUE);
+            }
+        });
+        output.textures_delta.clear();
+        output.shapes.into_iter().map(|clipped| clipped.shape).collect()
+    }
+
+    #[test]
+    fn an_arrow_is_drawn_like_a_branch_with_both_ends_next_to_the_line_numbers() {
+        let shapes = painted(&[Arrow { from: 0.5, to: 3.5 }], 1.0);
+        let dots: Vec<&egui::epaint::CircleShape> = shapes.iter().filter_map(|shape| if let Shape::Circle(circle) = shape { Some(circle) } else { None }).collect();
+        assert_eq!(dots.len(), 1);
+        assert_eq!((dots[0].center.x + ARROW_DOT_RADIUS, dots[0].center.y), (23.0, 5.0));
+        let heads: Vec<&egui::epaint::PathShape> = shapes.iter().filter_map(|shape| if let Shape::Path(path) = shape { Some(path) } else { None }).collect();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].points[0], pos2(23.0, 35.0));
+        let lines: Vec<[egui::Pos2; 2]> = shapes.iter().filter_map(|shape| if let Shape::LineSegment { points, .. } = shape { Some(*points) } else { None }).collect();
+        let lane_x = 4.0 + ARROW_EDGE + ARROW_WIDTH / 2.0;
+        let vertical: f32 = lines.iter().filter(|points| points[0].x == lane_x && points[1].x == lane_x).map(|points| (points[1].y - points[0].y).abs()).sum();
+        assert_eq!(vertical, 30.0);
+        assert!(lines.iter().any(|points| points[0] == pos2(lane_x, 5.0) && points[1].y == 5.0 && points[1].x > lane_x));
+        assert!(lines.iter().any(|points| points[0] == pos2(lane_x, 35.0) && points[1] == pos2(23.0 - ARROW_HEAD_LENGTH, 35.0)));
+    }
+
+    #[test]
+    fn further_lanes_are_a_line_and_a_gap_further_left() {
+        let arrows = [Arrow { from: 0.5, to: 3.5 }, Arrow { from: 2.5, to: 5.5 }];
+        let shapes = painted(&arrows, 3.0);
+        let xs: Vec<f32> = shapes
+            .iter()
+            .filter_map(|shape| if let Shape::LineSegment { points, .. } = shape { Some(*points) } else { None })
+            .filter(|points| points[0].x == points[1].x)
+            .map(|points| points[0].x)
+            .collect();
+        let near_numbers = 4.0 + ARROW_EDGE + ARROW_WIDTH / 2.0 + (ARROW_WIDTH + 3.0);
+        assert!(xs.contains(&near_numbers));
+        assert!(xs.contains(&(near_numbers - (ARROW_WIDTH + 3.0))));
     }
 
     #[test]
     fn options_say_where_they_show_the_alignment_and_who_moves() {
-        let option = |above, below, lifted: &[Document]| InsetOption {
+        let option = |above, below, moved: &[Document]| InsetOption {
             slot: 0,
             above,
             below,
-            lifted: lifted.to_vec(),
+            moved: moved.to_vec(),
         };
         assert_eq!(option_label(&option(None, Some(1), &[Document::A, Document::C])), "Above alignment 1 (moves A and C)");
         assert_eq!(option_label(&option(Some(1), None, &[Document::B])), "Below alignment 1 (moves B)");

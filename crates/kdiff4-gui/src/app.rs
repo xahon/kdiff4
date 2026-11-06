@@ -1591,6 +1591,7 @@ impl KdiffApp {
             overview_strip: view.show_overview_strip,
             minimap: view.show_minimap,
             alignment_color: egui::Color32::from_rgba_unmultiplied(view.alignment_color[0], view.alignment_color[1], view.alignment_color[2], view.alignment_color[3]),
+            inset_arrow_gap: view.inset_arrow_gap,
         }
     }
 
@@ -2006,7 +2007,7 @@ mod tests {
             number,
             lines,
             status: kdiff4_protocol::MarkStatus::Pending,
-            lifted: false,
+            replaced_by: None,
         }
     }
 
@@ -2082,11 +2083,11 @@ mod tests {
     }
 
     fn inset_choice() -> InsetChoice {
-        let option = |slot, above, below, lifted: &[Document]| kdiff4_protocol::InsetOption {
+        let option = |slot, above, below, moved: &[Document]| kdiff4_protocol::InsetOption {
             slot,
             above,
             below,
-            lifted: lifted.to_vec(),
+            moved: moved.to_vec(),
         };
         InsetChoice {
             number: 2,

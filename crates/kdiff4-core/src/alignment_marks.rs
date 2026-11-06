@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use kdiff4_protocol::engine::{EngineError, ManualAlignment, validate_alignments};
+use kdiff4_protocol::engine::{EngineError, ManualAlignment, document_order, moved_parts, validate_alignments};
 use kdiff4_protocol::{AlignmentMark, Alignments, Document, InsetChoice, InsetOption, MarkStatus};
 
 use crate::error::CoreError;
@@ -18,17 +18,16 @@ struct Mark {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Placed {
     number: u32,
-    /// Its parts, and the documents it is lifted in.
     alignment: ManualAlignment,
 }
 
 
-/// Where an alignment could be shown among the others: the documents that don't keep their order there lift their hunk.
+/// Where an alignment could be shown among the others: the documents that don't keep their order there move their hunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Candidate {
     slot: usize,
-    lifted: Vec<bool>,
-    /// How many alignments it would be shown on the wrong side of by their numbers. Of several places that lift the same documents, the least disordered one is the candidate.
+    moved: Vec<bool>,
+    /// How many alignments it would be shown on the wrong side of by their numbers. Of several places that move the same documents, the least disordered one is the candidate.
     disorder: usize,
 }
 
@@ -100,7 +99,7 @@ impl AlignmentMarks {
         Ok(())
     }
 
-    /// Shows the alignment `number` at `slot` among the other alignments, counting from 0 at the top. The documents whose order disagrees with that place lift its hunk.
+    /// Shows the alignment `number` at `slot` among the other alignments, counting from 0 at the top. The documents whose order disagrees with that place move its hunk.
     pub fn place(&mut self, number: u32, slot: usize) -> Result<(), CoreError> {
         let mut list = self.arranged(self.documents);
         let Some(index) = list.iter().position(|placed| placed.number == number) else {
@@ -110,24 +109,20 @@ impl AlignmentMarks {
         if slot > list.len() {
             return Err(invalid(format!("there is no place {slot} among the {} other alignments", list.len())));
         }
-        let lifted = lifted_at(&list, &placed.alignment.parts, slot);
-        if lifted.iter().all(|lifted| *lifted) {
+        let moved = moved_at(&list, &placed.alignment.parts, slot);
+        if moved.iter().all(|moved| *moved) {
             return Err(invalid(format!("no document keeps its order when alignment {number} is shown there")));
         }
-        list.insert(
-            slot,
-            Placed {
-                number,
-                alignment: ManualAlignment::with_lifted(placed.alignment.parts, lifted),
-            },
-        );
+        list.insert(slot, placed);
         self.placed = list;
         Ok(())
     }
 
-    /// Whether the alignment `number` is lifted in some document, so the user has a place to choose.
+    /// Whether some document has the alignment `number` in another place than the others, so the user has a place to choose.
     pub fn is_inset(&self, number: u32, source_count: usize) -> bool {
-        self.arranged(source_count).iter().any(|placed| placed.number == number && placed.alignment.has_lifted())
+        let placed = self.arranged(source_count);
+        let orders = document_orders(&placed, source_count);
+        placed.iter().position(|placed| placed.number == number).is_some_and(|index| disagrees(&orders, index))
     }
 
     /// Removes every mark. The applied alignments stay, since the comparison still has them.
@@ -180,6 +175,9 @@ impl AlignmentMarks {
     /// Every mark with its status, the alignments that are insets with the places they could be shown at, and whether applying would change the comparison.
     pub fn summary(&self, source_count: usize) -> Alignments {
         let placed = self.arranged(source_count);
+        let wanted: Vec<ManualAlignment> = placed.iter().map(|placed| placed.alignment.clone()).collect();
+        let moved_wanted: Vec<Vec<Option<usize>>> = (0..source_count).map(|document| moved_parts(&wanted, document)).collect();
+        let moved_applied: Vec<Vec<Option<usize>>> = (0..source_count).map(|document| moved_parts(&self.applied, document)).collect();
         let marks = self
             .marks
             .iter()
@@ -191,18 +189,27 @@ impl AlignmentMarks {
                     Some(entry) if self.applied.contains(&entry.alignment) => MarkStatus::Applied,
                     Some(_) => MarkStatus::Pending,
                 };
+                let replaced_by = entry.and_then(|entry| {
+                    let (alignments, moved) = match status {
+                        MarkStatus::Applied => (&self.applied, &moved_applied),
+                        _ => (&wanted, &moved_wanted),
+                    };
+                    let index = alignments.iter().position(|alignment| *alignment == entry.alignment)?;
+                    let occupant = alignments.get(moved.get(mark.document)?.get(index).cloned()??)?;
+                    placed.iter().find(|placed| placed.alignment == *occupant).map(|placed| placed.number)
+                });
                 Some(AlignmentMark {
                     document,
                     number: mark.number,
                     lines: mark.lines.clone(),
                     status,
-                    lifted: entry.is_some_and(|entry| entry.alignment.is_lifted(mark.document)),
+                    replaced_by,
                 })
             })
             .collect();
-        let mut insets: Vec<InsetChoice> = placed.iter().filter(|entry| entry.alignment.has_lifted()).map(|entry| inset_choice(&placed, entry)).collect();
+        let orders = document_orders(&placed, source_count);
+        let mut insets: Vec<InsetChoice> = (0..placed.len()).filter(|index| disagrees(&orders, *index)).map(|index| inset_choice(&placed, &placed[index])).collect();
         insets.sort_by_key(|choice| choice.number);
-        let wanted: Vec<ManualAlignment> = placed.into_iter().map(|placed| placed.alignment).collect();
         Alignments {
             marks,
             changed: wanted != self.applied,
@@ -262,66 +269,68 @@ impl AlignmentMarks {
                 continue;
             }
             let candidates = candidates(&list, *number, parts);
-            let (slot, lifted) = match preferred(&candidates).map(|index| &candidates[index]) {
-                Some(candidate) => (candidate.slot, candidate.lifted.clone()),
-                None => (list.len(), Vec::new()),
-            };
-            let alignment = ManualAlignment::with_lifted(parts.clone(), lifted);
-            list.insert(slot, Placed { number: *number, alignment });
+            let slot = preferred(&candidates).map_or(list.len(), |index| candidates[index].slot);
+            list.insert(
+                slot,
+                Placed {
+                    number: *number,
+                    alignment: ManualAlignment::new(parts.clone()),
+                },
+            );
         }
         list
     }
 }
 
 
-/// For each document, whether alignment parts `parts` would be lifted when shown at `slot` among `others`: it is when the document's own order of the parts that are not lifted in it puts `parts` elsewhere.
-fn lifted_at(others: &[Placed], parts: &[Range<usize>], slot: usize) -> Vec<bool> {
-    (0..parts.len())
-        .map(|document| {
-            let in_place = || others.iter().enumerate().filter(|(_, other)| !other.alignment.is_lifted(document));
-            let before = in_place().filter(|(index, _)| *index < slot).last();
-            let after = in_place().find(|(index, _)| *index >= slot);
-            let fits_after = before.is_none_or(|(_, other)| may_precede(&other.alignment.parts[document], &parts[document]));
-            let fits_before = after.is_none_or(|(_, other)| may_precede(&parts[document], &other.alignment.parts[document]));
-            !(fits_after && fits_before)
-        })
-        .collect()
+/// The order of the parts of each of `source_count` documents, for the alignments in the order they are shown.
+fn document_orders(placed: &[Placed], source_count: usize) -> Vec<Vec<usize>> {
+    let alignments: Vec<ManualAlignment> = placed.iter().map(|placed| placed.alignment.clone()).collect();
+    (0..source_count).map(|document| document_order(&alignments, document)).collect()
 }
 
 
-/// Whether `first` can come before `second` in a document: the same as being next to each other in a list of alignments.
-fn may_precede(first: &Range<usize>, second: &Range<usize>) -> bool {
-    first.end <= second.start
+/// Whether the alignment at `index` of the list is not at the place in some document's order that it has in the list.
+fn disagrees(orders: &[Vec<usize>], index: usize) -> bool {
+    orders.iter().any(|order| order.get(index).is_some_and(|alignment| *alignment != index))
 }
 
 
-/// The places the alignment `number` with `parts` could be shown at among `others`, one per set of documents that would lift it, in the order of their slots. A place where no document keeps its order is never one.
+/// For each document, whether alignment parts `parts` would be in another place of the document than their place in the list when shown at `slot` among `others`.
+fn moved_at(others: &[Placed], parts: &[Range<usize>], slot: usize) -> Vec<bool> {
+    let mut alignments: Vec<ManualAlignment> = others.iter().map(|other| other.alignment.clone()).collect();
+    alignments.insert(slot, ManualAlignment::new(parts.to_vec()));
+    (0..parts.len()).map(|document| document_order(&alignments, document)[slot] != slot).collect()
+}
+
+
+/// The places the alignment `number` with `parts` could be shown at among `others`, one per set of documents that would move it, in the order of their slots. A place where every document moves it is never one.
 fn candidates(others: &[Placed], number: u32, parts: &[Range<usize>]) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Vec::new();
     for slot in 0..=others.len() {
-        let lifted = lifted_at(others, parts, slot);
-        if lifted.iter().all(|lifted| *lifted) {
+        let moved = moved_at(others, parts, slot);
+        if moved.iter().all(|moved| *moved) {
             continue;
         }
         let disorder = others[..slot].iter().filter(|other| other.number > number).count() + others[slot..].iter().filter(|other| other.number < number).count();
-        match candidates.iter_mut().find(|candidate| candidate.lifted == lifted) {
+        match candidates.iter_mut().find(|candidate| candidate.moved == moved) {
             Some(candidate) if disorder < candidate.disorder => {
                 candidate.slot = slot;
                 candidate.disorder = disorder;
             }
             Some(_) => {}
-            None => candidates.push(Candidate { slot, lifted, disorder }),
+            None => candidates.push(Candidate { slot, moved, disorder }),
         }
     }
     candidates
 }
 
 
-/// The index of the candidate to show an alignment at when the user has not chosen: the one that lifts nothing, else the one the fewest documents keep their order at, the first documents winning ties.
+/// The index of the candidate to show an alignment at when the user has not chosen: the one that moves nothing, else the one the fewest documents keep their order at, the first documents winning ties.
 fn preferred(candidates: &[Candidate]) -> Option<usize> {
     let key = |candidate: &Candidate| {
-        let natural: Vec<usize> = (0..candidate.lifted.len()).filter(|document| !candidate.lifted[*document]).collect();
-        (natural.len() < candidate.lifted.len(), natural.len(), natural)
+        let natural: Vec<usize> = (0..candidate.moved.len()).filter(|document| !candidate.moved[*document]).collect();
+        (natural.len() < candidate.moved.len(), natural.len(), natural)
     };
     (0..candidates.len()).min_by_key(|index| key(&candidates[*index]))
 }
@@ -331,14 +340,16 @@ fn preferred(candidates: &[Candidate]) -> Option<usize> {
 fn inset_choice(placed: &[Placed], entry: &Placed) -> InsetChoice {
     let others: Vec<Placed> = placed.iter().filter(|other| other.number != entry.number).cloned().collect();
     let options = candidates(&others, entry.number, &entry.alignment.parts);
-    let current = options.iter().position(|option| ManualAlignment::with_lifted(Vec::new(), option.lifted.clone()).lifted == entry.alignment.lifted).unwrap_or(0);
+    let slot = placed.iter().position(|other| other.number == entry.number).unwrap_or(0);
+    let moved_now = moved_at(&others, &entry.alignment.parts, slot);
+    let current = options.iter().position(|option| option.moved == moved_now).unwrap_or(0);
     let options = options
         .iter()
         .map(|option| InsetOption {
             slot: option.slot,
             above: option.slot.checked_sub(1).and_then(|index| others.get(index)).map(|other| other.number),
             below: others.get(option.slot).map(|other| other.number),
-            lifted: option.lifted.iter().enumerate().filter(|(_, lifted)| **lifted).filter_map(|(document, _)| Document::ALL.get(document).cloned()).collect(),
+            moved: option.moved.iter().enumerate().filter(|(_, moved)| **moved).filter_map(|(document, _)| Document::ALL.get(document).cloned()).collect(),
         })
         .collect();
     InsetChoice {
@@ -556,19 +567,22 @@ mod tests {
         ])
     }
 
-    fn lifted_in(alignment: &ManualAlignment) -> Vec<usize> {
-        (0..alignment.parts.len()).filter(|document| alignment.is_lifted(*document)).collect()
+    /// The documents that don't have the alignment at `index` of the list at the place it has in the list.
+    fn displaced_in(alignments: &[ManualAlignment], index: usize) -> Vec<usize> {
+        (0..alignments[0].parts.len()).filter(|document| document_order(alignments, *document)[index] != index).collect()
     }
 
     #[test]
-    fn a_document_that_differs_in_order_keeps_its_order_and_the_others_lift() {
+    fn a_document_that_differs_in_order_keeps_its_order_and_the_others_move() {
         let marks = functions_with_b_reversed();
         let alignments = marks.to_apply(&COUNTS).unwrap();
         assert_eq!(alignments.len(), 2);
         assert_eq!(alignments[0].parts, [2..3, 1..2, 2..3]);
-        assert_eq!(lifted_in(&alignments[0]), [0, 2]);
         assert_eq!(alignments[1].parts, [0..1, 4..5, 0..1]);
-        assert!(!alignments[1].has_lifted());
+        assert_eq!(displaced_in(&alignments, 0), [0, 2]);
+        assert_eq!(displaced_in(&alignments, 1), [0, 2]);
+        assert_eq!(moved_parts(&alignments, 0), [None, Some(0)]);
+        assert_eq!(moved_parts(&alignments, 1), [None, None]);
     }
 
     #[test]
@@ -577,40 +591,59 @@ mod tests {
         let alignments = marks.to_apply(&[10, 10]).unwrap();
         assert_eq!(alignments[0].parts, [0..1, 4..5]);
         assert_eq!(alignments[1].parts, [2..3, 1..2]);
-        assert_eq!(lifted_in(&alignments[1]), [1]);
+        assert_eq!(displaced_in(&alignments, 1), [1]);
     }
 
     #[test]
     fn the_summary_lists_where_an_inset_could_be_shown() {
         let summary = functions_with_b_reversed().summary(3);
-        let lifted: Vec<(Document, u32)> = summary.marks.iter().filter(|mark| mark.lifted).map(|mark| (mark.document.clone(), mark.number)).collect();
-        assert_eq!(lifted, [(Document::A, 2), (Document::C, 2)]);
-        let option = |slot, above, below, lifted: &[Document]| InsetOption {
+        let moved: Vec<(Document, u32, Option<u32>)> = summary.marks.iter().filter(|mark| mark.is_moved()).map(|mark| (mark.document.clone(), mark.number, mark.replaced_by)).collect();
+        assert_eq!(moved, [(Document::A, 1, Some(2)), (Document::C, 1, Some(2))]);
+        let option = |slot, above, below, moved: &[Document]| InsetOption {
             slot,
             above,
             below,
-            lifted: lifted.to_vec(),
+            moved: moved.to_vec(),
         };
-        let expected = InsetChoice {
+        let first = InsetChoice {
+            number: 1,
+            current: 1,
+            options: vec![option(0, None, Some(2), &[Document::B]), option(1, Some(2), None, &[Document::A, Document::C])],
+        };
+        let second = InsetChoice {
             number: 2,
             current: 0,
             options: vec![option(0, None, Some(1), &[Document::A, Document::C]), option(1, Some(1), None, &[Document::B])],
         };
-        assert_eq!(summary.insets, [expected]);
+        assert_eq!(summary.insets, [first, second]);
         assert_eq!(summary.ask, None);
     }
 
     #[test]
-    fn placing_an_alignment_elsewhere_lifts_the_other_documents() {
+    fn applied_marks_keep_naming_the_hunk_that_took_their_place_until_the_new_place_is_applied() {
+        let mut marks = functions_with_b_reversed();
+        marks.set_applied(marks.to_apply(&COUNTS).unwrap());
+        let replaced = |marks: &AlignmentMarks| -> Vec<(Document, u32, Option<u32>)> {
+            marks.summary(3).marks.iter().filter(|mark| mark.is_moved()).map(|mark| (mark.document.clone(), mark.number, mark.replaced_by)).collect()
+        };
+        marks.place(2, 1).unwrap();
+        assert!(marks.summary(3).changed);
+        assert_eq!(replaced(&marks), [(Document::A, 1, Some(2)), (Document::C, 1, Some(2))]);
+        marks.set_applied(marks.to_apply(&COUNTS).unwrap());
+        assert_eq!(replaced(&marks), [(Document::B, 2, Some(1))]);
+    }
+
+    #[test]
+    fn placing_an_alignment_elsewhere_moves_the_other_documents() {
         let mut marks = functions_with_b_reversed();
         marks.place(2, 1).unwrap();
         let alignments = marks.to_apply(&COUNTS).unwrap();
         assert_eq!(alignments[0].parts, [0..1, 4..5, 0..1]);
         assert_eq!(alignments[1].parts, [2..3, 1..2, 2..3]);
-        assert_eq!(lifted_in(&alignments[1]), [1]);
-        assert_eq!(marks.summary(3).insets[0].current, 1);
+        assert_eq!(displaced_in(&alignments, 1), [1]);
+        assert_eq!(marks.summary(3).insets[1].current, 1);
         marks.place(2, 0).unwrap();
-        assert_eq!(lifted_in(&marks.to_apply(&COUNTS).unwrap()[0]), [0, 2]);
+        assert_eq!(displaced_in(&marks.to_apply(&COUNTS).unwrap(), 0), [0, 2]);
     }
 
     #[test]
@@ -622,7 +655,7 @@ mod tests {
         marks.mark(Document::C, 6..7, &COUNTS).unwrap();
         let alignments = marks.to_apply(&COUNTS).unwrap();
         assert_eq!(alignments.iter().map(|alignment| alignment.parts[0].clone()).collect::<Vec<_>>(), [0..1, 2..3, 6..7]);
-        assert_eq!(lifted_in(&alignments[1]), [1]);
+        assert_eq!(displaced_in(&alignments, 1), [1]);
         marks.remove(Document::B, 3).unwrap();
         assert_eq!(marks.to_apply(&COUNTS).unwrap().len(), 2);
     }
@@ -633,7 +666,7 @@ mod tests {
         marks.place(2, 1).unwrap();
         marks.remove(Document::B, 2).unwrap();
         marks.mark(Document::B, 1..2, &COUNTS).unwrap();
-        assert_eq!(lifted_in(&marks.to_apply(&COUNTS).unwrap()[0]), [0, 2]);
+        assert_eq!(displaced_in(&marks.to_apply(&COUNTS).unwrap(), 0), [0, 2]);
     }
 
     #[test]
@@ -652,12 +685,13 @@ mod tests {
         marks.mark(Document::A, 6..7, &COUNTS).unwrap();
         marks.mark(Document::B, 3..4, &COUNTS).unwrap();
         marks.mark(Document::C, 6..7, &COUNTS).unwrap();
-        let choice = &marks.summary(3).insets[0];
-        assert_eq!(choice.number, 4);
+        let summary = marks.summary(3);
+        let choice = summary.insets.iter().find(|choice| choice.number == 4).unwrap();
         assert_eq!(choice.options.iter().map(|option| (option.slot, option.above, option.below)).collect::<Vec<_>>(), [(2, Some(2), Some(3)), (3, Some(3), None)]);
         assert_eq!(choice.current, 0);
         marks.place(4, 3).unwrap();
-        assert_eq!(marks.summary(3).insets[0].current, 1);
+        let summary = marks.summary(3);
+        assert_eq!(summary.insets.iter().find(|choice| choice.number == 4).unwrap().current, 1);
     }
 
     #[test]
@@ -675,7 +709,8 @@ mod tests {
         assert!(!marks.is_inset(1, 2) && !marks.is_inset(2, 2));
         assert!(marks.summary(2).insets.is_empty());
         let reversed = functions_with_b_reversed();
-        assert!(reversed.is_inset(2, 3) && !reversed.is_inset(1, 3));
+        assert!(reversed.is_inset(2, 3) && reversed.is_inset(1, 3));
+        assert!(!reversed.is_inset(3, 3));
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub fn show(ui: &mut Ui, choice: &InsetChoice) -> Option<InsetAnswer> {
     ui.heading(format!("Where Should Alignment {} Be Shown?", choice.number));
     ui.add_space(4.0);
     ui.label(format!(
-        "The documents don't agree on the order of alignment {}. It is shown in one place, and the documents that have it elsewhere move their hunk there. Apply Alignments does the move; an arrow then shows where each hunk came from.",
+        "The documents don't agree on the order of alignment {}. It is shown in one place, and the documents that have it elsewhere exchange its hunk with the one that has its place there. Apply Alignments does the exchange; an arrow then shows where each moved hunk was.",
         choice.number
     ));
     ui.add_space(6.0);
@@ -60,13 +60,13 @@ mod tests {
                     slot: 0,
                     above: None,
                     below: Some(1),
-                    lifted: vec![Document::A, Document::C],
+                    moved: vec![Document::A, Document::C],
                 },
                 InsetOption {
                     slot: 1,
                     above: Some(1),
                     below: None,
-                    lifted: vec![Document::B],
+                    moved: vec![Document::B],
                 },
             ],
         }

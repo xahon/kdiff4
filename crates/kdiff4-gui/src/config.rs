@@ -26,6 +26,8 @@ pub const MAX_OTHER_REGION_BORDER_PERCENT: u8 = 100;
 pub const DEFAULT_OTHER_REGION_BORDER_PERCENT: u8 = 45;
 /// Cyan, a color none of the documents, the red or the jumped-to region uses.
 pub const DEFAULT_ALIGNMENT_COLOR: [u8; 4] = [0, 188, 212, 255];
+pub const MAX_INSET_ARROW_GAP: u8 = 8;
+pub const DEFAULT_INSET_ARROW_GAP: u8 = 1;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -98,6 +100,8 @@ pub struct ViewConfig {
     pub other_region_border_percent: u8,
     /// RGBA of the alignment marks in the gutters of the source panes.
     pub alignment_color: [u8; 4],
+    /// Pixels between the lines of the arrows that show where the hunks of an inset alignment were, left of the line numbers.
+    pub inset_arrow_gap: u8,
     /// Previous and Next Difference also stop at the first region of every applied alignment.
     pub alignment_stops: bool,
     pub theme: ThemeChoice,
@@ -127,6 +131,7 @@ impl Default for ViewConfig {
             region_corner_radius: DEFAULT_REGION_CORNER_RADIUS,
             other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT,
             alignment_color: DEFAULT_ALIGNMENT_COLOR,
+            inset_arrow_gap: DEFAULT_INSET_ARROW_GAP,
             alignment_stops: true,
             theme: ThemeChoice::Light,
             light_colors: ThemeColors::default(),
@@ -150,6 +155,7 @@ impl ViewConfig {
         self.scroll_step_lines = self.scroll_step_lines.clamp(MIN_SCROLL_STEP_LINES, MAX_SCROLL_STEP_LINES);
         self.region_corner_radius = self.region_corner_radius.min(MAX_REGION_CORNER_RADIUS);
         self.other_region_border_percent = self.other_region_border_percent.min(MAX_OTHER_REGION_BORDER_PERCENT);
+        self.inset_arrow_gap = self.inset_arrow_gap.min(MAX_INSET_ARROW_GAP);
         if self.font_family.as_deref().is_some_and(|family| family.trim().is_empty()) {
             self.font_family = None;
         }
@@ -405,6 +411,7 @@ last_dir = \"x\"
             region_corner_radius: 4,
             other_region_border_percent: 30,
             alignment_color: [9, 8, 7, 6],
+            inset_arrow_gap: 3,
             alignment_stops: false,
             theme: ThemeChoice::System,
             light_colors: ThemeColors {
@@ -483,6 +490,7 @@ show_overview_strip = false
         let defaults = ViewConfig::default();
         assert_eq!(defaults.alignment_color, DEFAULT_ALIGNMENT_COLOR);
         assert!(defaults.alignment_stops);
+        assert_eq!(defaults.inset_arrow_gap, DEFAULT_INSET_ARROW_GAP);
         let dir = temp_dir("alignment");
         let path = dir.join("gui.toml");
         fs::write(&path, "[view]\nalignment_color = [1, 2, 3, 4]\nalignment_stops = false\n").unwrap();
@@ -494,11 +502,12 @@ show_overview_strip = false
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\nregion_corner_radius = 50\nother_region_border_percent = 250\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\nregion_corner_radius = 50\nother_region_border_percent = 250\ninset_arrow_gap = 99\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
         assert_eq!(view.region_corner_radius, MAX_REGION_CORNER_RADIUS);
         assert_eq!(view.other_region_border_percent, MAX_OTHER_REGION_BORDER_PERCENT);
+        assert_eq!(view.inset_arrow_gap, MAX_INSET_ARROW_GAP);
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
         assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!((view.smooth_scroll_ms, view.scroll_step_lines), (MAX_SMOOTH_SCROLL_MS, MIN_SCROLL_STEP_LINES));

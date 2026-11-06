@@ -699,6 +699,7 @@ mod tests {
                     other_region_border_opacity: 1.0,
                     whitespace: WhitespaceConfig::default(),
                     alignment_color: None,
+                    inset_arrow_gap: 1.0,
                 };
                 let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
                 test.actions.extend(shown.inner);
