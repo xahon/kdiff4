@@ -112,6 +112,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             None => return Ok(()),
         },
         Command::SetOutputPath(path) => active(session)?.set_output_path(path)?,
+        Command::SetOutputEol(eol) => active(session)?.set_output_eol(eol)?,
         Command::Save => active(session)?.save()?,
         Command::SaveAs(path) => active(session)?.save_as(&path)?,
     };
@@ -119,6 +120,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
     match &change {
         Change::OutputPathChanged(path) => log::info!("host: output path set to {}", describe(path.as_deref())),
         Change::OutputSaved(path) => log::info!("host: saved output to {}", path.display()),
+        Change::OutputEolChanged(eol) => log::info!("host: output line ending set to {eol:?}"),
         Change::AlignmentsChanged(alignments) => log::debug!("host: {} alignment marks, changed {}, revision {}", alignments.marks.len(), alignments.changed, revision.0),
         Change::OutputEdited { range, text, merge, .. } => log::debug!(
             "host: output bytes {range:?} replaced by {} bytes, regions {}..{} by {}, revision {}",

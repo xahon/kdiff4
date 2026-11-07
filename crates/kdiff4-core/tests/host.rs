@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use kdiff4_protocol::engine::{ComparisonOptions, MergeStatus, RegionStatus};
 use kdiff4_protocol::{
-    Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response,
+    Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, EolChoice, EolStyle, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response,
     Revision, Snapshot, in_process,
 };
 
@@ -140,8 +140,8 @@ fn commands_before_open_are_rejected() {
 fn edit_save_and_reload_go_through_deltas() {
     let dir = temp_dir("round-trip");
     let a = write(&dir, "a.txt", "a\r\n");
-    let b = write(&dir, "b.txt", "b\n");
-    let c = write(&dir, "c.txt", "c\n");
+    let b = write(&dir, "b.txt", "b\r\n");
+    let c = write(&dir, "c.txt", "c\r\n");
     let (mut client, host) = start();
 
     let id = client
@@ -254,6 +254,51 @@ fn edit_save_and_reload_go_through_deltas() {
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.revision, Revision(7));
     expect_ok(&client, id);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+#[test]
+fn a_line_ending_conflict_is_settled_by_choosing_a_style_before_saving() {
+    let dir = temp_dir("eol-conflict");
+    let a = write(&dir, "a.txt", "a\r\n");
+    let b = write(&dir, "b.txt", "a\n");
+    let c = write(&dir, "c.txt", "a\n");
+    let target = dir.join("out.txt");
+    let (mut client, host) = start();
+
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            output: Some(target.clone()),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+    assert_eq!(snapshot.documents.iter().map(|document| document.eol).collect::<Vec<_>>(), [Some(EolStyle::CrLf), Some(EolStyle::Lf), Some(EolStyle::Lf)]);
+    assert_eq!(snapshot.output.as_ref().unwrap().eol, EolChoice::Conflict);
+
+    let id = client.send(Command::Save).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response");
+    };
+    assert_eq!(response.id, id);
+    assert_eq!(response.result.unwrap_err().kind, ErrorKind::EolConflict);
+    assert!(!target.exists());
+
+    let id = client.send(Command::SetOutputEol(EolStyle::CrLf)).unwrap();
+    let delta = expect_delta(&client);
+    assert_eq!((delta.revision.clone(), delta.cause.clone(), delta.change), (Revision(2), Some(id.clone()), Change::OutputEolChanged(EolChoice::Style(EolStyle::CrLf))));
+    expect_ok(&client, id);
+
+    let id = client.send(Command::Save).unwrap();
+    assert_eq!(expect_delta(&client).change, Change::OutputSaved(target.clone()));
+    expect_ok(&client, id);
+    assert_eq!(fs::read(&target).unwrap(), b"a\r\n");
 
     drop(client);
     host.join().unwrap();

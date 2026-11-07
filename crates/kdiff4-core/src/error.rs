@@ -35,6 +35,8 @@ pub enum CoreError {
     InvalidChoice { reason: String },
     #[error("{count} unresolved {} left; resolve them before saving", if *count == 1 { "conflict is" } else { "conflicts are" })]
     UnresolvedConflicts { count: usize },
+    #[error("the sources disagree on the line ending style; choose one for the output before saving")]
+    EolConflict,
     #[error("invalid alignment mark: {reason}")]
     InvalidMark { reason: String },
     #[error("applying the alignments compares everything again and discards the choices and edits in D")]
@@ -61,6 +63,7 @@ impl From<CoreError> for ProtocolError {
             | CoreError::UnresolvedConflicts { .. }
             | CoreError::InvalidMark { .. } => ErrorKind::InvalidRequest,
             CoreError::NeedsConfirmation => ErrorKind::NeedsConfirmation,
+            CoreError::EolConflict => ErrorKind::EolConflict,
             CoreError::Engine(_) => ErrorKind::Engine,
         };
         ProtocolError { kind, message: error.to_string() }

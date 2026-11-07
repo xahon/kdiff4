@@ -7,7 +7,7 @@ use kdiff4_protocol::engine::{
     run_comparison,
 };
 use kdiff4_protocol::{
-    Alignments, Change, Choice, Document, DocumentText, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot,
+    Alignments, Change, Choice, Document, DocumentText, EolChoice, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot,
 };
 
 use crate::alignment_marks::AlignmentMarks;
@@ -47,6 +47,8 @@ impl Source {
 struct Output {
     path: Option<PathBuf>,
     text: String,
+    /// What the sources give, or what the user chose over it.
+    eol: EolChoice,
     history: History<MergeStep>,
 }
 
@@ -100,6 +102,7 @@ impl Session {
                 Some(Output {
                     path: files.output.clone(),
                     text,
+                    eol: auto_eol(&sources),
                     history: History::new_saved(),
                 }),
             )
@@ -133,6 +136,7 @@ impl Session {
             path: output.path.clone(),
             text: output.text.clone(),
             modified: output.history.is_modified(),
+            eol: output.eol.clone(),
         });
         let comparison = Comparison {
             regions: self.merge.regions().to_vec(),
@@ -174,6 +178,10 @@ impl Session {
         self.sources[index].path = path.to_path_buf();
         self.alignments.reset();
         self.rebuild(comparison, engine);
+        let eol = auto_eol(&self.sources);
+        if let Some(output) = self.output.as_mut() {
+            output.eol = eol;
+        }
         Ok(())
     }
 
@@ -523,6 +531,14 @@ impl Session {
         Ok(Change::OutputPathChanged(path))
     }
 
+    /// Chooses the line ending style D is saved with, which settles a conflict between the sources. It stays until a source is loaded again.
+    pub fn set_output_eol(&mut self, eol: EolStyle) -> Result<Change, CoreError> {
+        let output = self.output.as_mut().ok_or(CoreError::NotAMerge)?;
+        output.eol = EolChoice::Style(eol);
+        self.revision += 1;
+        Ok(Change::OutputEolChanged(EolChoice::Style(eol)))
+    }
+
     pub fn save(&mut self) -> Result<Change, CoreError> {
         let path = self.output.as_ref().ok_or(CoreError::NotAMerge)?.path.clone().ok_or(CoreError::NoOutputPath)?;
         self.write_output(&path)
@@ -533,7 +549,7 @@ impl Session {
         self.write_output(path)
     }
 
-    /// Writes D with the EOL style and BOM of A, the output reference. Refused while unresolved conflicts remain.
+    /// Writes D with the EOL style chosen for it, and the BOM and final line break of A, the output reference. Refused while unresolved conflicts remain or the line ending style is in conflict.
     fn write_output(&mut self, path: &Path) -> Result<Change, CoreError> {
         if path.is_dir() {
             return Err(CoreError::Directory { path: path.to_path_buf() });
@@ -543,13 +559,16 @@ impl Session {
         if unresolved > 0 {
             return Err(CoreError::UnresolvedConflicts { count: unresolved });
         }
-        let (eol, bom) = self
+        let (bom, final_eol) = self
             .sources
             .first()
-            .map(|source| (source.text.eol.clone(), source.text.bom.clone()))
-            .unwrap_or((EolStyle::Lf, false));
+            .map(|source| (source.text.bom.clone(), source.text.final_eol.clone()))
+            .unwrap_or((false, true));
         let output = self.output.as_mut().ok_or(CoreError::NotAMerge)?;
-        let bytes = text::encode_output(&output.text, eol, bom);
+        let EolChoice::Style(eol) = output.eol.clone() else {
+            return Err(CoreError::EolConflict);
+        };
+        let bytes = text::encode_output(&output.text, eol, bom, final_eol);
         text::write_atomic(path, &bytes).map_err(|source| CoreError::Write { path: path.to_path_buf(), source })?;
         output.path = Some(path.to_path_buf());
         output.history.mark_saved();
@@ -627,6 +646,15 @@ fn alignment_stops(regions: &[Region], alignments: &[ManualAlignment]) -> Vec<us
                 .position(|region| region.hunks.get(document).is_some_and(|hunk| hunk.start < part.end && part.start < hunk.end))
         })
         .collect()
+}
+
+/// The style all sources with a line terminator share; LF when none has one. A conflict when two of them differ, even if a third agrees with one: kdiff3 takes the odd one out then.
+fn auto_eol(sources: &[Source]) -> EolChoice {
+    let mut styles = sources.iter().filter_map(|source| source.text.eol.clone());
+    let Some(first) = styles.next() else {
+        return EolChoice::Style(EolStyle::Lf);
+    };
+    if styles.all(|style| style == first) { EolChoice::Style(first) } else { EolChoice::Conflict }
 }
 
 fn source_lines(sources: &[Source]) -> Vec<Vec<&str>> {
@@ -999,7 +1027,8 @@ mod tests {
             OutputDocument {
                 path: None,
                 text: "a\n".to_string(),
-                modified: false
+                modified: false,
+                eol: EolChoice::Style(EolStyle::Lf)
             }
         );
     }
@@ -1178,6 +1207,102 @@ mod tests {
         assert_eq!(session.save().unwrap(), Change::OutputSaved(dir.join("out.txt")));
         assert_eq!(fs::read(dir.join("out.txt")).unwrap(), "\u{FEFF}x\r\ny\r\none\r\ntwo\r\n".as_bytes());
         assert!(!session.snapshot().output.unwrap().modified);
+    }
+
+    /// A 3-way merge of the texts as written, with the output at `out.txt`.
+    fn merge_of_texts(dir: &Path, a: &str, b: &str, c: &str) -> Session {
+        let (a, b, c) = (write(dir, "a.txt", a), write(dir, "b.txt", b), write(dir, "c.txt", c));
+        Session::open(&files(a, b, Some(c), Some(dir.join("out.txt"))), &BuiltinEngine).unwrap()
+    }
+
+    fn output_eol(session: &Session) -> EolChoice {
+        session.snapshot().output.unwrap().eol
+    }
+
+    #[test]
+    fn output_eol_is_the_style_the_sources_share() {
+        let dir = temp_dir("eol-shared");
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\r\n", "a\r\n", "a\r\n")), EolChoice::Style(EolStyle::CrLf));
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\r", "a\r", "a\r")), EolChoice::Style(EolStyle::Cr));
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a", "a", "a")), EolChoice::Style(EolStyle::Lf));
+    }
+
+    #[test]
+    fn sources_without_a_terminator_do_not_conflict() {
+        let dir = temp_dir("eol-undefined");
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\r\nb", "a\r\nb", "single")), EolChoice::Style(EolStyle::CrLf));
+        assert_eq!(output_eol(&merge_of_texts(&dir, "", "a\n", "b")), EolChoice::Style(EolStyle::Lf));
+    }
+
+    #[test]
+    fn output_eol_conflicts_when_any_two_sources_differ() {
+        let dir = temp_dir("eol-conflict");
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\r\n", "a\n", "a\n")), EolChoice::Conflict);
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\n", "a\n", "a\r\n")), EolChoice::Conflict);
+        assert_eq!(output_eol(&merge_of_texts(&dir, "a\n", "a\r", "a\r\n")), EolChoice::Conflict);
+    }
+
+    #[test]
+    fn save_is_refused_while_the_line_ending_is_in_conflict() {
+        let dir = temp_dir("eol-save-refused");
+        let mut session = merge_of_texts(&dir, "a\r\n", "a\n", "a\n");
+        assert!(matches!(session.save(), Err(CoreError::EolConflict)));
+        assert!(!dir.join("out.txt").exists());
+    }
+
+    #[test]
+    fn chosen_output_eol_settles_the_conflict_and_is_saved() {
+        let dir = temp_dir("eol-chosen");
+        let mut session = merge_of_texts(&dir, "a\r\nb\r\n", "a\nb\n", "a\nb\n");
+        let revision = session.revision();
+        assert_eq!(session.set_output_eol(EolStyle::Cr).unwrap(), Change::OutputEolChanged(EolChoice::Style(EolStyle::Cr)));
+        assert_ne!(session.revision(), revision);
+        assert_eq!(output_eol(&session), EolChoice::Style(EolStyle::Cr));
+        session.save().unwrap();
+        assert_eq!(fs::read(dir.join("out.txt")).unwrap(), b"a\rb\r");
+    }
+
+    #[test]
+    fn chosen_output_eol_overrides_what_the_sources_share() {
+        let dir = temp_dir("eol-override");
+        let mut session = merge_of_texts(&dir, "a\r\n", "a\r\n", "a\r\n");
+        session.set_output_eol(EolStyle::Lf).unwrap();
+        session.save().unwrap();
+        assert_eq!(fs::read(dir.join("out.txt")).unwrap(), b"a\n");
+    }
+
+    #[test]
+    fn loading_a_source_again_recomputes_the_output_eol() {
+        let dir = temp_dir("eol-reload");
+        let mut session = merge_of_texts(&dir, "a\r\n", "a\r\n", "a\r\n");
+        session.set_output_eol(EolStyle::Cr).unwrap();
+        let other = write(&dir, "other.txt", "a\n");
+        session.load_source(Document::B, &other, &BuiltinEngine).unwrap();
+        assert_eq!(output_eol(&session), EolChoice::Conflict);
+    }
+
+    #[test]
+    fn setting_the_output_eol_needs_a_merge() {
+        let dir = temp_dir("eol-two-way");
+        let (a, b) = (write(&dir, "a.txt", "a\n"), write(&dir, "b.txt", "b\n"));
+        let mut session = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap();
+        assert!(matches!(session.set_output_eol(EolStyle::Lf), Err(CoreError::NotAMerge)));
+    }
+
+    #[test]
+    fn save_keeps_a_missing_final_line_break_of_a() {
+        let dir = temp_dir("final-eol-missing");
+        let mut session = merge_of_texts(&dir, "11111\r\n\r\n22222", "11111\r\n\r\n22222", "11111\r\n\r\n22222");
+        session.save().unwrap();
+        assert_eq!(fs::read(dir.join("out.txt")).unwrap(), b"11111\r\n\r\n22222");
+    }
+
+    #[test]
+    fn save_ends_with_a_line_break_when_a_does() {
+        let dir = temp_dir("final-eol-present");
+        let mut session = merge_of_texts(&dir, "one\ntwo\n", "one\ntwo", "one\ntwo");
+        session.save().unwrap();
+        assert_eq!(fs::read(dir.join("out.txt")).unwrap(), b"one\ntwo\n");
     }
 
     #[test]

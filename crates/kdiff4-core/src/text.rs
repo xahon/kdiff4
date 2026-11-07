@@ -14,8 +14,11 @@ pub struct SourceText {
     pub text: String,
     /// Byte ranges into `text`, without line terminators.
     pub lines: Vec<Range<usize>>,
-    pub eol: EolStyle,
+    /// `None` when the text has no line terminator, so it has no style to tell.
+    pub eol: Option<EolStyle>,
     pub bom: bool,
+    /// The last line ends with a terminator; true for an empty text.
+    pub final_eol: bool,
 }
 
 impl SourceText {
@@ -26,7 +29,8 @@ impl SourceText {
         let text = String::from_utf8_lossy(bytes).into_owned();
         let lines = split_lines(&text);
         let eol = detect_eol(&text);
-        SourceText { text, lines, eol, bom }
+        let final_eol = text.is_empty() || text.ends_with(['\n', '\r']);
+        SourceText { text, lines, eol, bom, final_eol }
     }
 
     pub fn load(path: &Path) -> Result<SourceText, CoreError> {
@@ -65,8 +69,8 @@ pub fn split_lines(text: &str) -> Vec<Range<usize>> {
     lines
 }
 
-/// The most frequent line terminator; LF when there is none or on a tie with LF.
-pub fn detect_eol(text: &str) -> EolStyle {
+/// The most frequent line terminator; LF on a tie with LF. `None` when there is no terminator at all.
+pub fn detect_eol(text: &str) -> Option<EolStyle> {
     let bytes = text.as_bytes();
     let (mut lf, mut crlf, mut cr) = (0usize, 0usize, 0usize);
     let mut index = 0;
@@ -82,12 +86,14 @@ pub fn detect_eol(text: &str) -> EolStyle {
         }
         index += 1;
     }
-    if crlf > lf && crlf >= cr {
-        EolStyle::CrLf
+    if lf + crlf + cr == 0 {
+        None
+    } else if crlf > lf && crlf >= cr {
+        Some(EolStyle::CrLf)
     } else if cr > lf && cr > crlf {
-        EolStyle::Cr
+        Some(EolStyle::Cr)
     } else {
-        EolStyle::Lf
+        Some(EolStyle::Lf)
     }
 }
 
@@ -96,8 +102,9 @@ pub fn normalize_to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// The bytes D is saved as: UTF-8, its `\n` line ends replaced by `eol`, with a BOM if `bom`.
-pub fn encode_output(text: &str, eol: EolStyle, bom: bool) -> Vec<u8> {
+/// The bytes D is saved as: UTF-8, its `\n` line ends replaced by `eol`, with a BOM if `bom`. Without `final_eol` the last line gets no terminator.
+pub fn encode_output(text: &str, eol: EolStyle, bom: bool, final_eol: bool) -> Vec<u8> {
+    let text = if final_eol { text } else { text.strip_suffix('\n').unwrap_or(text) };
     let body = match eol {
         EolStyle::Lf => text.to_string(),
         EolStyle::CrLf | EolStyle::Cr => text.replace('\n', eol.terminator()),
@@ -182,12 +189,28 @@ mod tests {
 
     #[test]
     fn eol_is_the_majority_style() {
-        assert_eq!(detect_eol(""), EolStyle::Lf);
-        assert_eq!(detect_eol("no terminator"), EolStyle::Lf);
-        assert_eq!(detect_eol("a\r\nb\r\nc\n"), EolStyle::CrLf);
-        assert_eq!(detect_eol("a\rb\rc\n"), EolStyle::Cr);
-        assert_eq!(detect_eol("a\nb\r\n"), EolStyle::Lf);
-        assert_eq!(detect_eol("a\r\n\r\n"), EolStyle::CrLf);
+        assert_eq!(detect_eol("a\r\nb\r\nc\n"), Some(EolStyle::CrLf));
+        assert_eq!(detect_eol("a\rb\rc\n"), Some(EolStyle::Cr));
+        assert_eq!(detect_eol("a\nb\r\n"), Some(EolStyle::Lf));
+        assert_eq!(detect_eol("a\r\n\r\n"), Some(EolStyle::CrLf));
+    }
+
+    #[test]
+    fn text_without_terminator_has_no_eol_style() {
+        assert_eq!(detect_eol(""), None);
+        assert_eq!(detect_eol("no terminator"), None);
+        assert_eq!(SourceText::decode(b"one").eol, None);
+        assert_eq!(SourceText::decode(b"one\r\ntwo").eol, Some(EolStyle::CrLf));
+    }
+
+    #[test]
+    fn final_eol_is_whether_the_last_line_is_terminated() {
+        assert!(SourceText::decode(b"").final_eol);
+        assert!(SourceText::decode(b"one\n").final_eol);
+        assert!(SourceText::decode(b"one\r\n").final_eol);
+        assert!(SourceText::decode(b"one\r").final_eol);
+        assert!(!SourceText::decode(b"one").final_eol);
+        assert!(!SourceText::decode(b"one\r\ntwo").final_eol);
     }
 
     #[test]
@@ -198,10 +221,18 @@ mod tests {
 
     #[test]
     fn encode_output_applies_eol_and_bom() {
-        assert_eq!(encode_output("a\nb\n", EolStyle::Lf, false), b"a\nb\n");
-        assert_eq!(encode_output("a\nb\n", EolStyle::CrLf, false), b"a\r\nb\r\n");
-        assert_eq!(encode_output("a\nb", EolStyle::Cr, false), b"a\rb");
-        assert_eq!(encode_output("é", EolStyle::Lf, true), "\u{FEFF}é".as_bytes());
+        assert_eq!(encode_output("a\nb\n", EolStyle::Lf, false, true), b"a\nb\n");
+        assert_eq!(encode_output("a\nb\n", EolStyle::CrLf, false, true), b"a\r\nb\r\n");
+        assert_eq!(encode_output("a\nb", EolStyle::Cr, false, true), b"a\rb");
+        assert_eq!(encode_output("é", EolStyle::Lf, true, true), "\u{FEFF}é".as_bytes());
+    }
+
+    #[test]
+    fn encode_output_leaves_the_last_line_unterminated_without_final_eol() {
+        assert_eq!(encode_output("a\nb\n", EolStyle::CrLf, false, false), b"a\r\nb");
+        assert_eq!(encode_output("a\nb\n\n", EolStyle::Lf, false, false), b"a\nb\n");
+        assert_eq!(encode_output("a\nb", EolStyle::Lf, false, false), b"a\nb");
+        assert_eq!(encode_output("", EolStyle::Lf, false, false), b"");
     }
 
     #[test]

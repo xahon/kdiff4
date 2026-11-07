@@ -34,6 +34,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 - Updates (see Updates in `ARCHITECTURE.md`): the program checks GitHub for a newer release, shows its notes and can replace its own executable and restart. kdiff3 has no update check.
 - Previous and Next Difference can also stop at the first region of every applied manual alignment (setting `alignment_stops`), and the alignment marks have a configurable color (`alignment_color`, cyan by default). kdiff3 has neither.
 - Language selector in the status bar (see GUI in `ARCHITECTURE.md`): the language of the documents is detected from their paths and first lines and can be picked from a list, each with its logo. kdiff3 has no notion of a document's language. For now it is a label only; nothing is highlighted.
+- Output EOL selector in the status bar and a window at save time (see GUI in `ARCHITECTURE.md`): each source header shows its EOL style, the status bar shows and sets the style D is saved with (LF, CR or CRLF), and saving while the sources disagree and none was chosen asks for one in a window. kdiff3 offers only Unix and DOS in a selector above the merge result, and refuses to save with an error until one is picked. The sources disagree as soon as two of them with an EOL style differ; kdiff3 takes the odd one out of three. A source without any line terminator has no style and never causes a conflict.
 
 ### Merge result
 
@@ -41,6 +42,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 - A hand edit inside a region whose hunks are all equal splits each touched line into an edited region of its own, boxed with a gutter block in every pane and reached by Previous and Next Difference; choosing A, B or C for it joins it back with the regions around it (see Merge model in `ARCHITECTURE.md`). kdiff3 keeps the edited lines inside the unchanged block, which navigation skips.
 - Toggling off the last chosen hunk of a region (Ctrl+1, Ctrl+2, Ctrl+3) makes it an unresolved conflict again, so D can't be saved until it is resolved. kdiff3 keeps such a region with no lines, shown as "<No src line>", which counts as resolved.
 - A region that differs but has no lines in D is shown as a hatched void row, without kdiff3's "<No src line>" text, so D has a region box wherever the source panes have one. Typing on it gives the region the typed lines and marks it hand-edited, as typing over "<No src line>" does in kdiff3.
+- D is saved without a final line break when the output reference (A) has none, and with one otherwise. kdiff3 records whether a file ends with a line break but does not carry it into the saved result.
 - Typing on an unresolved conflict's placeholder line is not possible yet; kdiff3 lets the user type over its "<Merge Conflict>" line. Choose a hunk first, then edit it.
 
 ### Manual alignment

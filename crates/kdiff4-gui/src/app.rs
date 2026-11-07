@@ -4,11 +4,12 @@ use std::path::{Path, PathBuf};
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use semver::Version;
-use kdiff4_protocol::{Change, Client, Command, Document, ErrorKind, Event, HostMessage, InsetChoice, Navigation, RequestId, Response};
+use kdiff4_protocol::{Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HostMessage, InsetChoice, Navigation, RequestId, Response};
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
+use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
 use crate::fonts::{self, FontScan};
 use crate::language::{self, Language, LanguageState};
@@ -77,6 +78,13 @@ pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
 const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
 
+/// A save held back until the user chooses the output's line ending style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingSave {
+    Save,
+    SaveAs(PathBuf),
+}
+
 /// What a request in flight was for, so its response can be reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Pending {
@@ -84,6 +92,7 @@ enum Pending {
     Edit,
     LoadSource(Document),
     SetOutputPath,
+    SetOutputEol,
     Save,
     Resync,
     /// Undo or redo; its delta moves the caret to the changed text.
@@ -149,6 +158,9 @@ pub struct KdiffApp {
     /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
     inset_prompt: Option<InsetChoice>,
     inset_modal_id: egui::Id,
+    /// The save waiting for the user to choose the output's line ending style.
+    eol_prompt: Option<PendingSave>,
+    eol_modal_id: egui::Id,
 }
 
 impl KdiffApp {
@@ -207,6 +219,8 @@ impl KdiffApp {
             update_modal_id: egui::Id::unique("update_window"),
             inset_prompt: None,
             inset_modal_id: egui::Id::unique("inset_prompt"),
+            eol_prompt: None,
+            eol_modal_id: egui::Id::unique("eol_prompt"),
         };
         app.apply_view(ctx, &view);
         app
@@ -651,7 +665,7 @@ impl KdiffApp {
                             is_error: false,
                         }
                     }),
-                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion => self.status.take(),
+                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion | Pending::SetOutputEol => self.status.take(),
                     Pending::Navigate(to) => Some(Status {
                         text: format!("No {}", navigation_noun(to)),
                         is_error: false,
@@ -685,6 +699,7 @@ impl KdiffApp {
             }
             Pending::LoadSource(document) => self.report_error(format!("Cannot load {}: {}", document.letter(), error.message)),
             Pending::SetOutputPath => self.report_error(format!("Cannot change the output path: {}", error.message)),
+            Pending::SetOutputEol => self.report_error(format!("Cannot change the line ending style: {}", error.message)),
             Pending::Save => self.report_error(format!("Cannot save: {}", error.message)),
             Pending::Choose(_) => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
@@ -824,13 +839,20 @@ impl KdiffApp {
         self.mirror.as_ref().is_some_and(Mirror::is_merge)
     }
 
+    /// The sources disagree on the line ending style and nobody has chosen one for the output.
+    fn eol_conflicts(&self) -> bool {
+        self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.eol == EolChoice::Conflict)
+    }
+
     /// Without an output path, Save asks for one like Save As.
     fn save(&mut self) {
         let has_path = self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.path.is_some());
-        if has_path {
-            self.send(Command::Save, Pending::Save);
-        } else {
+        if !has_path {
             self.save_as();
+        } else if self.eol_conflicts() {
+            self.eol_prompt = Some(PendingSave::Save);
+        } else {
+            self.send(Command::Save, Pending::Save);
         }
     }
 
@@ -841,7 +863,11 @@ impl KdiffApp {
         }
         if let Some(path) = open_dialog::pick_file(Document::D, self.config.recent.last_dir.as_deref()) {
             self.remember_dir(&path);
-            self.send(Command::SaveAs(path), Pending::Save);
+            if self.eol_conflicts() {
+                self.eol_prompt = Some(PendingSave::SaveAs(path));
+            } else {
+                self.send(Command::SaveAs(path), Pending::Save);
+            }
         }
     }
 
@@ -956,7 +982,7 @@ impl KdiffApp {
             Some((document, _)) => document,
             None => return,
         };
-        if self.mirror.is_none() || self.settings.is_some() || self.update_window.is_some() || self.form_open || ctx.text_edit_focused() {
+        if self.mirror.is_none() || self.settings.is_some() || self.update_window.is_some() || self.eol_prompt.is_some() || self.form_open || ctx.text_edit_focused() {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
@@ -1330,6 +1356,31 @@ impl KdiffApp {
         }
     }
 
+    /// Asks for the output's line ending style when the user saved while the sources disagree. A style sets it and then saves; closing the window saves nothing.
+    fn show_eol_prompt(&mut self, ctx: &egui::Context) {
+        if self.eol_prompt.is_none() {
+            return;
+        }
+        let mut answer = None;
+        let modal = egui::Modal::new(self.eol_modal_id).show(ctx, |ui| answer = eol::show_dialog(ui));
+        if answer.is_none() && modal.should_close() {
+            answer = Some(EolAnswer::Cancel);
+        }
+        if let Some(answer) = answer {
+            self.answer_eol_prompt(answer);
+        }
+    }
+
+    fn answer_eol_prompt(&mut self, answer: EolAnswer) {
+        let Some(save) = self.eol_prompt.take() else { return };
+        let EolAnswer::Use(style) = answer else { return };
+        self.send(Command::SetOutputEol(style), Pending::SetOutputEol);
+        match save {
+            PendingSave::Save => self.send(Command::Save, Pending::Save),
+            PendingSave::SaveAs(path) => self.send(Command::SaveAs(path), Pending::Save),
+        };
+    }
+
     fn show_settings(&mut self, ctx: &egui::Context) {
         let families = self.font_scan.families();
         let dialog = match self.settings.as_mut() {
@@ -1595,9 +1646,10 @@ impl KdiffApp {
         }
     }
 
-    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip. The language selector sits at the right end; returns the language picked in it.
-    fn show_status(&self, ui: &mut egui::Ui) -> Option<Language> {
-        status_bar(ui, self.status.as_ref(), self.language.current())
+    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip. The language selector sits at the right end, with the output's line ending selector left of it; returns what was picked in them.
+    fn show_status(&self, ui: &mut egui::Ui) -> StatusPicks {
+        let eol = self.mirror.as_ref().and_then(Mirror::output).map(|output| output.eol.clone());
+        status_bar(ui, self.status.as_ref(), self.language.current(), eol.as_ref())
     }
 
     /// egui sets the window theme on the first frame, before the window has focus, and Windows then keeps the old title bar colors until focus changes. Sending the theme again once the window has focus repaints the title bar.
@@ -1631,7 +1683,7 @@ impl eframe::App for KdiffApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.update_window.is_none() {
+        if self.update_window.is_none() && self.eol_prompt.is_none() {
             self.handle_shortcuts(&ctx);
         }
         self.handle_pane_keys(&ctx);
@@ -1650,6 +1702,7 @@ impl eframe::App for KdiffApp {
         let mut form_action = None;
         let mut pane_actions = Vec::new();
         let mut find_events = Vec::new();
+        let mut eol_pick = None;
         match self.mirror.as_ref() {
             None => {
                 egui::CentralPanel::default().show(ui, |ui| {
@@ -1657,9 +1710,11 @@ impl eframe::App for KdiffApp {
                 });
             }
             Some(mirror) => {
-                if let Some(picked) = self.show_status(ui) {
+                let picks = self.show_status(ui);
+                if let Some(picked) = picks.language {
                     self.language.pick(picked, mirror);
                 }
+                eol_pick = picks.eol;
                 let find_corner = ui.available_rect_before_wrap().right_top() + egui::vec2(-FIND_BAR_MARGIN.x, FIND_BAR_MARGIN.y);
                 pane_actions = panes::show_session(ui, mirror, &mut self.panes, &pane_options);
                 self.panes.reveal_caret = false;
@@ -1686,7 +1741,11 @@ impl eframe::App for KdiffApp {
         if let Some(action) = form_action {
             self.handle_form_action(action);
         }
+        if let Some(style) = eol_pick {
+            self.send(Command::SetOutputEol(style), Pending::SetOutputEol);
+        }
         self.show_inset_prompt(&ctx);
+        self.show_eol_prompt(&ctx);
         self.show_settings(&ctx);
         self.show_update_window(&ctx);
         self.update_window_frame(frame);
@@ -1751,9 +1810,16 @@ fn navigation_noun(to: Navigation) -> &'static str {
     }
 }
 
-/// The message at the left, cut to what fits beside the language selector at the right.
-fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language) -> Option<Language> {
-    let mut picked = None;
+/// What the user picked in the status bar this frame.
+#[derive(Default)]
+struct StatusPicks {
+    language: Option<Language>,
+    eol: Option<EolStyle>,
+}
+
+/// The message at the left, cut to what fits beside the selectors at the right: the language, and the output's line ending style when there is an output.
+fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>) -> StatusPicks {
+    let mut picks = StatusPicks::default();
     egui::Panel::bottom("status_bar").show(ui, |ui| {
         let (text, color) = match status {
             Some(status) if status.is_error => (status.text.as_str(), ui.visuals().error_fg_color),
@@ -1761,13 +1827,16 @@ fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language) -
             None => ("Ready", theme::palette_of(ui).weak_text),
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            picked = language::show_selector(ui, language);
+            picks.language = language::show_selector(ui, language);
+            if let Some(eol) = eol {
+                picks.eol = eol::show_selector(ui, eol);
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
             });
         });
     });
-    picked
+    picks
 }
 
 /// The size of a toolbar button: room for the icon above the label, plus the button padding.
@@ -1922,7 +1991,7 @@ mod tests {
             document: document.clone(),
             path: PathBuf::from(format!("{}.txt", document.letter())),
             label: None,
-            eol: EolStyle::Lf,
+            eol: Some(EolStyle::Lf),
             text: text.to_string(),
             lines: vec![0..1, 2..3],
         };
@@ -1952,6 +2021,7 @@ mod tests {
             path: None,
             text: "b\nx\n".to_string(),
             modified: false,
+            eol: EolChoice::default(),
         };
         Mirror::from_snapshot(
             Snapshot {
@@ -2001,6 +2071,23 @@ mod tests {
         std::iter::from_fn(|| host.recv()).map(|request| request.command).collect()
     }
 
+    /// Gives the mirror this change, the way a delta from the host does.
+    fn apply_change(app: &mut KdiffApp, change: Change) {
+        let mirror = app.mirror.as_mut().unwrap();
+        let revision = mirror.revision();
+        mirror.apply_delta(kdiff4_protocol::Delta {
+            revision: kdiff4_protocol::Revision(revision.0 + 1),
+            cause: None,
+            change,
+        });
+    }
+
+    /// The app's output gets a path, and the line ending style `eol`.
+    fn name_output(app: &mut KdiffApp, eol: EolChoice) {
+        apply_change(app, Change::OutputPathChanged(Some(PathBuf::from("out.txt"))));
+        apply_change(app, Change::OutputEolChanged(eol));
+    }
+
     fn mark(document: Document, number: u32, lines: std::ops::Range<usize>) -> kdiff4_protocol::AlignmentMark {
         kdiff4_protocol::AlignmentMark {
             document,
@@ -2021,6 +2108,68 @@ mod tests {
             cause: None,
             change,
         });
+    }
+
+    #[test]
+    fn saving_without_a_line_ending_conflict_saves_at_once() {
+        let (mut app, host, ctx) = app_with_session();
+        name_output(&mut app, EolChoice::Style(EolStyle::CrLf));
+        press(&mut app, &ctx, Key::S, Modifiers::COMMAND);
+        assert!(app.eol_prompt.is_none());
+        assert_eq!(sent(app, host), [Command::Save]);
+    }
+
+    #[test]
+    fn saving_in_a_line_ending_conflict_asks_for_the_style_instead() {
+        let (mut app, host, ctx) = app_with_session();
+        name_output(&mut app, EolChoice::Conflict);
+        press(&mut app, &ctx, Key::S, Modifiers::COMMAND);
+        assert_eq!(app.eol_prompt, Some(PendingSave::Save));
+        assert_eq!(sent(app, host), []);
+    }
+
+    #[test]
+    fn choosing_a_style_sets_it_and_then_saves() {
+        let (mut app, host, _ctx) = app_with_session();
+        name_output(&mut app, EolChoice::Conflict);
+        app.eol_prompt = Some(PendingSave::Save);
+        app.answer_eol_prompt(EolAnswer::Use(EolStyle::CrLf));
+        assert!(app.eol_prompt.is_none());
+        assert_eq!(sent(app, host), [Command::SetOutputEol(EolStyle::CrLf), Command::Save]);
+    }
+
+    #[test]
+    fn choosing_a_style_for_save_as_saves_to_the_picked_path() {
+        let (mut app, host, _ctx) = app_with_session();
+        app.eol_prompt = Some(PendingSave::SaveAs(PathBuf::from("elsewhere.txt")));
+        app.answer_eol_prompt(EolAnswer::Use(EolStyle::Cr));
+        assert_eq!(sent(app, host), [Command::SetOutputEol(EolStyle::Cr), Command::SaveAs(PathBuf::from("elsewhere.txt"))]);
+    }
+
+    #[test]
+    fn cancelling_the_line_ending_question_saves_nothing() {
+        let (mut app, host, _ctx) = app_with_session();
+        app.eol_prompt = Some(PendingSave::Save);
+        app.answer_eol_prompt(EolAnswer::Cancel);
+        assert!(app.eol_prompt.is_none());
+        assert_eq!(sent(app, host), []);
+    }
+
+    #[test]
+    fn the_line_ending_question_closes_with_the_window() {
+        let (mut app, host, ctx) = app_with_session();
+        app.eol_prompt = Some(PendingSave::Save);
+        ctx.run_pass(egui::RawInput::default(), |ctx| app.show_eol_prompt(ctx)).drop_without_applying_deltas();
+        let events = vec![egui::Event::Key {
+            key: Key::Escape,
+            physical_key: Some(Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }];
+        ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| app.show_eol_prompt(ctx)).drop_without_applying_deltas();
+        assert!(app.eol_prompt.is_none());
+        assert_eq!(sent(app, host), []);
     }
 
     #[test]
@@ -2387,7 +2536,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, status.as_ref(), &Language::plain_text());
+            status_bar(ui, status.as_ref(), &Language::plain_text(), None);
         });
         harness.run();
         let selector = harness.get_by_label("Language of the documents").rect();
@@ -2405,6 +2554,47 @@ mod tests {
         assert_eq!(long_height, height, "the bar keeps its height");
         assert_eq!(long_selector_right, selector_right, "a long message doesn't move the selector");
         assert!(long_right <= selector_right - 100.0, "the message stops before the selector, not at {long_right}");
+    }
+
+    /// The status bar drawn in a window 500 wide with an output whose line ending style is `eol`.
+    fn eol_status_bar(eol: EolChoice) -> egui_kittest::Harness<'static> {
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
+            egui_extras::install_image_loaders(ui.ctx());
+            theme::apply_style(ui.ctx(), &config::ViewConfig::default());
+            status_bar(ui, None, &Language::plain_text(), Some(&eol));
+        });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn the_status_bar_shows_the_output_line_ending_left_of_the_language() {
+        use egui_kittest::kittest::Queryable;
+        let harness = eol_status_bar(EolChoice::Style(EolStyle::CrLf));
+        let eol = harness.get_by_label(eol::SELECTOR_HINT).rect();
+        let language = harness.get_by_label("Language of the documents").rect();
+        assert!(eol.right() <= language.left(), "the line ending selector sits left of the language selector");
+        assert!(language.left() - eol.right() < 20.0, "and right beside it, not {} away", language.left() - eol.right());
+    }
+
+    #[test]
+    fn a_line_ending_conflict_is_named_in_the_status_bar() {
+        use egui_kittest::kittest::Queryable;
+        let harness = eol_status_bar(EolChoice::Conflict);
+        harness.get_by_label(eol::CONFLICT_HINT);
+    }
+
+    #[test]
+    fn without_an_output_the_status_bar_has_no_line_ending_selector() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(|ui| {
+            egui_extras::install_image_loaders(ui.ctx());
+            theme::apply_style(ui.ctx(), &config::ViewConfig::default());
+            status_bar(ui, None, &Language::plain_text(), None);
+        });
+        harness.run();
+        assert!(harness.query_by_label(eol::SELECTOR_HINT).is_none());
+        assert!(harness.query_by_label(eol::CONFLICT_HINT).is_none());
     }
 
     #[test]

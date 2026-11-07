@@ -3,6 +3,7 @@ mod app;
 mod char_diff;
 mod config;
 mod editing;
+mod eol;
 mod find;
 mod fonts;
 mod inset_dialog;

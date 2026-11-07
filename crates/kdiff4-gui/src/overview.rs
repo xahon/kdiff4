@@ -402,7 +402,7 @@ mod tests {
     use std::path::PathBuf;
 
     use kdiff4_protocol::engine::{CharRun, Comparison, ComparisonOptions, EngineCapabilities, HunkChange, Region, RegionStatus, Row};
-    use kdiff4_protocol::{Choice, DocumentText, EolStyle, OutputDocument, RegionMerge, Revision, Snapshot};
+    use kdiff4_protocol::{Choice, DocumentText, EolChoice, EolStyle, OutputDocument, RegionMerge, Revision, Snapshot};
 
     use egui::{Color32, Event, Modifiers, PointerButton};
     use egui_kittest::Harness;
@@ -516,7 +516,7 @@ mod tests {
             document,
             path: PathBuf::from(format!("{}.txt", document.letter())),
             label: None,
-            eol: EolStyle::Lf,
+            eol: Some(EolStyle::Lf),
             text,
             lines: ranges,
         }
@@ -544,6 +544,7 @@ mod tests {
             path: None,
             text: "s0\ns1\nb2\ns3".to_string(),
             modified: false,
+            eol: EolChoice::default(),
         };
         let documents = vec![text(Document::A, &["s0", "s1", "a2", a3, "a4", "s3"]), text(Document::B, &["s0", "s1", "b2", "s3"])];
         let snapshot = Snapshot {

@@ -63,6 +63,8 @@ pub enum Command {
     SetOutputPath(Option<PathBuf>),
     Save,
     SaveAs(PathBuf),
+    /// Chooses the line ending style D is saved with, replacing what the sources gave. Stays until a source is loaded again or the session is reopened.
+    SetOutputEol(EolStyle),
     /// Undoes the last undo step of D. Does nothing when there is none.
     Undo,
     /// Redoes the last undone step of D. Does nothing when there is none.
@@ -207,6 +209,7 @@ pub enum Change {
     },
     OutputPathChanged(Option<PathBuf>),
     OutputSaved(PathBuf),
+    OutputEolChanged(EolChoice),
     /// The alignment marks changed. The comparison did not, so regions and rows stay as they were.
     AlignmentsChanged(Alignments),
 }
@@ -366,6 +369,21 @@ pub struct OutputDocument {
     pub text: String,
     /// Changed since it was loaded or last saved.
     pub modified: bool,
+    /// The line ending style D is saved with.
+    pub eol: EolChoice,
+}
+
+/// The line ending style of D. It is a conflict while the source documents disagree and nobody has chosen; D can't be saved then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EolChoice {
+    Style(EolStyle),
+    Conflict,
+}
+
+impl Default for EolChoice {
+    fn default() -> Self {
+        EolChoice::Style(EolStyle::Lf)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,7 +409,8 @@ pub struct DocumentText {
     pub document: Document,
     pub path: PathBuf,
     pub label: Option<String>,
-    pub eol: EolStyle,
+    /// The most frequent line terminator; `None` when the text has none, so it has no style to tell.
+    pub eol: Option<EolStyle>,
     pub text: String,
     /// Byte ranges into `text`, without line terminators.
     pub lines: Vec<Range<usize>>,
@@ -417,6 +436,8 @@ pub enum ErrorKind {
     Engine,
     /// The command would discard work in D. Send it again with `confirmed` set once the user agreed.
     NeedsConfirmation,
+    /// The source documents disagree on the line ending style and none was chosen for D. Send `SetOutputEol` first.
+    EolConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -435,7 +456,7 @@ mod tests {
             document: Document::A,
             path: PathBuf::from("a.txt"),
             label: None,
-            eol: EolStyle::Lf,
+            eol: Some(EolStyle::Lf),
             text: text.to_string(),
             lines,
         }

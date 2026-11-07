@@ -2,11 +2,12 @@ use std::ops::Range;
 use std::path::Path;
 
 use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
-use kdiff4_protocol::{AlignmentMark, Document};
+use kdiff4_protocol::{AlignmentMark, Document, EolStyle};
 
 use crate::alignment_gutter::PaneMarks;
 use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
+use crate::eol;
 use crate::find::FindState;
 use crate::minimap;
 use crate::mirror::Mirror;
@@ -421,6 +422,7 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
                 text.document.clone(),
                 text.label.as_deref(),
                 Some(&text.path),
+                text.eol.clone(),
                 false,
                 lines,
                 rows,
@@ -454,6 +456,7 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
             Document::D,
             None,
             output.path.as_deref(),
+            None,
             output.modified,
             lines,
             rows,
@@ -478,6 +481,7 @@ fn pane(
     document: Document,
     label: Option<&str>,
     path: Option<&Path>,
+    eol: Option<EolStyle>,
     modified: bool,
     lines: Lines<'_>,
     rows: Rows<'_>,
@@ -492,7 +496,7 @@ fn pane(
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
         .show(ui, |ui| {
-            header(ui, palette, radius, document.clone(), label, path, modified, state, actions);
+            header(ui, palette, radius, document.clone(), label, path, eol, modified, state, actions);
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
@@ -562,6 +566,7 @@ fn header(
     document: Document,
     label: Option<&str>,
     path: Option<&Path>,
+    eol: Option<EolStyle>,
     modified: bool,
     state: &mut PaneState,
     actions: &mut Vec<PaneAction>,
@@ -580,6 +585,9 @@ fn header(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.small_button("Browse...").clicked() {
                     actions.push(PaneAction::Browse(document.clone()));
+                }
+                if let Some(eol) = eol {
+                    ui.label(RichText::new(eol::name(eol)).color(palette.weak_text)).on_hover_text("Line ending style of this document");
                 }
                 let field_id = ui.make_persistent_id(("path_field", document.letter()));
                 let field = &mut state.path_fields[document_index(document.clone())];
@@ -613,6 +621,41 @@ mod tests {
 
     use super::*;
     use crate::rows::RowMap;
+
+    /// The header of A over a path, drawn in a window 500 wide.
+    fn header_harness(eol: Option<EolStyle>) -> egui_kittest::Harness<'static> {
+        let mut state = PaneState::default();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 100.0)).with_accessibility_check(false).build_ui(move |ui| {
+            theme::apply_style(ui.ctx(), &crate::config::ViewConfig::default());
+            let palette = theme::palette_of(ui);
+            let mut actions = Vec::new();
+            header(ui, &palette, 4, Document::A, None, Some(Path::new("a.txt")), eol.clone(), false, &mut state, &mut actions);
+        });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn the_header_names_the_line_ending_style_beside_browse() {
+        use egui_kittest::kittest::Queryable;
+        for (style, name) in [(EolStyle::Lf, "LF"), (EolStyle::Cr, "CR"), (EolStyle::CrLf, "CRLF")] {
+            let harness = header_harness(Some(style));
+            let label = harness.get_by_label(name).rect();
+            let browse = harness.get_by_label("Browse...").rect();
+            assert!(label.right() <= browse.left(), "{name} sits left of Browse");
+            assert!(label.left() > 250.0, "{name} sits at the right end, next to Browse, not at {}", label.left());
+        }
+    }
+
+    #[test]
+    fn a_document_without_a_line_ending_style_shows_no_label() {
+        use egui_kittest::kittest::Queryable;
+        let harness = header_harness(None);
+        harness.get_by_label("Browse...");
+        for name in ["LF", "CR", "CRLF"] {
+            assert!(harness.query_by_label(name).is_none(), "no {name} label");
+        }
+    }
 
     #[test]
     fn caret_belongs_to_one_document() {

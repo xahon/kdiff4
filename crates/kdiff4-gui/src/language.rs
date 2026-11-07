@@ -384,7 +384,7 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
     use kdiff4_protocol::engine::{Comparison, ComparisonOptions, EngineCapabilities};
-    use kdiff4_protocol::{Document, DocumentText, EolStyle, OutputDocument, Revision, Snapshot};
+    use kdiff4_protocol::{Document, DocumentText, EolChoice, EolStyle, OutputDocument, Revision, Snapshot};
 
     use super::*;
 
@@ -582,7 +582,7 @@ mod tests {
             document,
             path: PathBuf::from(path),
             label: None,
-            eol: EolStyle::Lf,
+            eol: Some(EolStyle::Lf),
             text: text.to_string(),
             lines,
         }
@@ -599,6 +599,7 @@ mod tests {
             path: Some(PathBuf::from(path)),
             text: String::new(),
             modified: false,
+            eol: EolChoice::default(),
         });
         let snapshot = Snapshot {
             revision: Revision(1),

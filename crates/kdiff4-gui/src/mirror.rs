@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, RegionStatus};
 use kdiff4_protocol::{
-    Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot,
+    Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, EolChoice, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot,
 };
 
 use crate::editing::{self, Edit, Lines};
@@ -17,6 +17,7 @@ pub struct OutputMirror {
     pub text: String,
     pub lines: Vec<Range<usize>>,
     pub modified: bool,
+    pub eol: EolChoice,
 }
 
 impl OutputMirror {
@@ -81,6 +82,7 @@ impl Mirror {
                 text: output.text,
                 lines,
                 modified: output.modified,
+                eol: output.eol,
             }
         });
         let mut mirror = Mirror {
@@ -382,6 +384,10 @@ impl Mirror {
                 }
                 None => return DeltaOutcome::NeedsResync,
             },
+            Change::OutputEolChanged(eol) => match self.output.as_mut() {
+                Some(output) => output.eol = eol,
+                None => return DeltaOutcome::NeedsResync,
+            },
             Change::AlignmentsChanged(alignments) => self.alignments = alignments,
         }
         self.revision = delta.revision;
@@ -405,7 +411,7 @@ mod tests {
             document,
             path: PathBuf::from(format!("{}.txt", document.letter())),
             label: None,
-            eol: EolStyle::Lf,
+            eol: Some(EolStyle::Lf),
             text: text.to_string(),
             lines,
         }
@@ -416,6 +422,7 @@ mod tests {
             path: Some(PathBuf::from("out.txt")),
             text: text.to_string(),
             modified: false,
+            eol: EolChoice::default(),
         };
         Mirror::from_snapshot(
             Snapshot {
@@ -465,6 +472,7 @@ mod tests {
             path: None,
             text: String::new(),
             modified: false,
+            eol: EolChoice::default(),
         };
         let snapshot = Snapshot {
             revision: Revision(1),
@@ -947,6 +955,17 @@ mod tests {
         assert_eq!(output.path, Some(PathBuf::from("s.txt")));
         assert!(!output.modified);
         assert_eq!(mirror.revision(), Revision(4));
+    }
+
+    #[test]
+    fn a_new_output_line_ending_is_applied() {
+        let mut mirror = merge_mirror("x");
+        assert_eq!(mirror.output().unwrap().eol, EolChoice::Style(EolStyle::Lf));
+        assert_eq!(mirror.apply_delta(delta(2, None, Change::OutputEolChanged(EolChoice::Conflict))), DeltaOutcome::Applied);
+        assert_eq!(mirror.output().unwrap().eol, EolChoice::Conflict);
+        assert_eq!(mirror.apply_delta(delta(3, Some(4), Change::OutputEolChanged(EolChoice::Style(EolStyle::Cr)))), DeltaOutcome::Applied);
+        assert_eq!(mirror.output().unwrap().eol, EolChoice::Style(EolStyle::Cr));
+        assert_eq!(mirror.revision(), Revision(3));
     }
 
     #[test]
