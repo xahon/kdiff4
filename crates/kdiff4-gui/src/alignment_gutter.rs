@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use egui::{Align2, Color32, FontId, Painter, Rect, Shape, Stroke, StrokeKind, pos2};
@@ -104,14 +105,40 @@ pub fn arrows_width(lanes: usize, gap: f32) -> f32 {
     ARROW_EDGE + lanes as f32 * ARROW_WIDTH + (lanes - 1) as f32 * gap.max(0.0) + ARROW_RUN
 }
 
-/// The marks under a point of the alignment column, given in pixels from the top of the content: the ranges that cover its row and the anchors whose chip it touches.
-pub fn hits(places: &[Place], row_height: f32, content_y: f32) -> Vec<usize> {
+/// How many other marks of the pane enclose each mark: a range encloses the ranges inside it, and the anchors strictly inside it. Of equal ranges the one with the lower number encloses the other. Nested marks are drawn one bar further right per level.
+pub fn depths(marks: &[AlignmentMark]) -> Vec<usize> {
+    marks.iter().map(|mark| marks.iter().filter(|other| encloses(other, mark)).count()).collect()
+}
+
+
+fn encloses(outer: &AlignmentMark, inner: &AlignmentMark) -> bool {
+    if outer.is_anchor() || outer.number == inner.number {
+        return false;
+    }
+    if inner.is_anchor() {
+        return outer.lines.start < inner.lines.start && inner.lines.start < outer.lines.end;
+    }
+    let inside = outer.lines.start <= inner.lines.start && inner.lines.end <= outer.lines.end;
+    inside && (outer.lines != inner.lines || outer.number < inner.number)
+}
+
+
+/// The width of the alignment column that holds bars of `bar_width` side by side for the deepest of `depths`.
+pub fn column_width(bar_width: f32, depths: &[usize]) -> f32 {
+    bar_width * (depths.iter().max().map_or(0, |depth| depth + 1)).max(1) as f32
+}
+
+
+/// The marks under a point of the alignment column, given in pixels from the left edge of the column and from the top of the content: the ranges that cover its row and the anchors whose chip it touches. Of those only the innermost ones that sit in the bars the point has reached stay, so a point in the bar of an outer mark finds that mark, and a point right of it finds the innermost one.
+pub fn hits(places: &[Place], depths: &[usize], row_height: f32, bar_width: f32, x: f32, content_y: f32) -> Vec<usize> {
     if row_height <= 0.0 || content_y < 0.0 {
         return Vec::new();
     }
     let row = (content_y / row_height).floor() as usize;
     let half_chip = row_height * CHIP_HEIGHT_SHARE / 2.0;
-    places
+    let lane = if bar_width > 0.0 { (x.max(0.0) / bar_width).floor() as usize } else { 0 };
+    let depth = |index: &usize| depths.get(*index).cloned().unwrap_or(0);
+    let covered: Vec<usize> = places
         .iter()
         .enumerate()
         .filter(|(_, place)| match place {
@@ -119,8 +146,12 @@ pub fn hits(places: &[Place], row_height: f32, content_y: f32) -> Vec<usize> {
             Place::Edge(edge) => (content_y - *edge as f32 * row_height).abs() <= half_chip,
         })
         .map(|(index, _)| index)
-        .collect()
+        .filter(|index| depth(index) <= lane)
+        .collect();
+    let innermost = covered.iter().map(depth).max();
+    covered.into_iter().filter(|index| Some(depth(index)) == innermost).collect()
 }
+
 
 /// What a mark says when the pointer rests on it.
 pub fn describe(mark: &AlignmentMark) -> String {
@@ -180,30 +211,32 @@ fn colors(status: MarkStatus, color: Color32, palette: &Palette) -> (DocumentCol
     }
 }
 
-/// Paints what the alignment column shows on `row`: the slice of every range mark that covers it, with the number on its first row, and the chip of every anchor on the edge above it, or below it when it is the last row and the anchor is at the end of the text.
+/// Paints what the alignment column shows on `row`: the slice of every range mark that covers it, with the number on its first row, and the chip of every anchor on the edge above it, or below it when it is the last row and the anchor is at the end of the text. A mark of depth `n` (see `depths`) takes the bar `n` places right of the first one, `bar_width` wide.
 pub fn paint_row(
     painter: &Painter,
     marks: &[AlignmentMark],
     places: &[Place],
+    depths: &[usize],
     row: usize,
     row_count: usize,
     rect: Rect,
     column_left: f32,
-    column_width: f32,
+    bar_width: f32,
     color: Color32,
     palette: &Palette,
     font_id: &FontId,
 ) {
-    for (mark, place) in marks.iter().zip(places) {
+    for ((mark, place), depth) in marks.iter().zip(places).zip(depths) {
         let Place::Rows(rows) = place else { continue };
         if !rows.contains(&row) {
             continue;
         }
+        let bar_left = column_left + *depth as f32 * bar_width;
         let (set, active) = colors(mark.status, color, palette);
-        text_view::paint_gutter_block(painter, column_left, column_width, rect, row == rows.start, row + 1 == rows.end, &set, &set, active);
+        text_view::paint_gutter_block(painter, bar_left, bar_width, rect, row == rows.start, row + 1 == rows.end, &set, &set, active);
         if row == rows.start {
             painter.text(
-                pos2(column_left + column_width / 2.0, rect.center().y),
+                pos2(bar_left + bar_width / 2.0, rect.center().y),
                 Align2::CENTER_CENTER,
                 mark.number.to_string(),
                 font_id.clone(),
@@ -215,10 +248,11 @@ pub fn paint_row(
         painter,
         marks,
         places,
+        depths,
         rect.top(),
         rect,
         column_left,
-        column_width,
+        bar_width,
         color,
         palette,
         font_id,
@@ -229,10 +263,11 @@ pub fn paint_row(
             painter,
             marks,
             places,
+            depths,
             rect.bottom(),
             rect,
             column_left,
-            column_width,
+            bar_width,
             color,
             palette,
             font_id,
@@ -240,6 +275,7 @@ pub fn paint_row(
         );
     }
 }
+
 
 /// The part of every arrow on `row`, in the strip from `left` to `left + width`, like a branch in a graph: a line down its lane, a dot at the right end of the strip, next to the line numbers, where the hunk was taken from, and a tip there pointing at the first row of the hunk. `lanes` has the lane of every arrow, and `gap` is the space between lanes.
 pub fn paint_arrows(painter: &Painter, arrows: &[Arrow], lanes: &[usize], row: usize, row_count: usize, rect: Rect, left: f32, width: f32, gap: f32, color: Color32) {
@@ -270,36 +306,40 @@ pub fn paint_arrows(painter: &Painter, arrows: &[Arrow], lanes: &[usize], row: u
     }
 }
 
-/// One chip on the edge `edge` at height `y`, labeled with the numbers of the anchors there, lowest first.
+/// The chips on the edge `edge` at height `y`, one per depth, each labeled with the numbers of the anchors there, lowest first.
 fn paint_chips(
     painter: &Painter,
     marks: &[AlignmentMark],
     places: &[Place],
+    depths: &[usize],
     y: f32,
     rect: Rect,
     column_left: f32,
-    column_width: f32,
+    bar_width: f32,
     color: Color32,
     palette: &Palette,
     font_id: &FontId,
     edge: Place,
 ) {
-    let mut anchors: Vec<&AlignmentMark> = marks.iter().zip(places).filter(|(_, place)| **place == edge).map(|(mark, _)| mark).collect();
-    anchors.sort_by_key(|mark| mark.number);
-    let Some(first) = anchors.first() else { return };
-    let status = if anchors.iter().any(|mark| mark.status == MarkStatus::Applied) {
-        MarkStatus::Applied
-    } else {
-        first.status
-    };
-    let (set, active) = colors(status, color, palette);
-    let half = rect.height() * CHIP_HEIGHT_SHARE / 2.0;
-    let chip = Rect::from_min_max(pos2(column_left, y - half), pos2(column_left + column_width, y + half));
-    painter.rect_filled(chip, 1.0, if active { set.gutter_active } else { set.header });
-    painter.rect_stroke(chip, 1.0, Stroke::new(1.0, set.gutter_border), StrokeKind::Inside);
-    painter.hline(chip.x_range(), y, Stroke::new(1.0, set.gutter_border));
-    let label = anchors.iter().map(|mark| mark.number.to_string()).collect::<Vec<_>>().join(",");
-    painter.text(chip.center(), Align2::CENTER_CENTER, label, font_id.clone(), palette.text);
+    let mut by_depth: BTreeMap<usize, Vec<&AlignmentMark>> = BTreeMap::new();
+    for ((mark, place), depth) in marks.iter().zip(places).zip(depths) {
+        if *place == edge {
+            by_depth.entry(*depth).or_default().push(mark);
+        }
+    }
+    for (depth, mut anchors) in by_depth {
+        anchors.sort_by_key(|mark| mark.number);
+        let status = if anchors.iter().any(|mark| mark.status == MarkStatus::Applied) { MarkStatus::Applied } else { anchors[0].status };
+        let (set, active) = colors(status, color, palette);
+        let half = rect.height() * CHIP_HEIGHT_SHARE / 2.0;
+        let left = column_left + depth as f32 * bar_width;
+        let chip = Rect::from_min_max(pos2(left, y - half), pos2(left + bar_width, y + half));
+        painter.rect_filled(chip, 1.0, if active { set.gutter_active } else { set.header });
+        painter.rect_stroke(chip, 1.0, Stroke::new(1.0, set.gutter_border), StrokeKind::Inside);
+        painter.hline(chip.x_range(), y, Stroke::new(1.0, set.gutter_border));
+        let label = anchors.iter().map(|mark| mark.number.to_string()).collect::<Vec<_>>().join(",");
+        painter.text(chip.center(), Align2::CENTER_CENTER, label, font_id.clone(), palette.text);
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +356,7 @@ mod tests {
             lines,
             status,
             replaced_by: None,
+            heuristic: false,
         }
     }
 
@@ -365,15 +406,60 @@ mod tests {
     #[test]
     fn the_pointer_hits_ranges_by_row_and_anchors_by_their_chip() {
         let places = [Place::Rows(1..3), Place::Edge(5), Place::Edge(5), Place::Edge(7)];
-        assert_eq!(hits(&places, 10.0, 15.0), [0]);
-        assert_eq!(hits(&places, 10.0, 29.9), [0]);
-        assert!(hits(&places, 10.0, 30.1).is_empty());
-        assert_eq!(hits(&places, 10.0, 50.0), [1, 2]);
-        assert_eq!(hits(&places, 10.0, 53.9), [1, 2]);
-        assert!(hits(&places, 10.0, 54.1).is_empty());
-        assert_eq!(hits(&places, 10.0, 46.5), [1, 2]);
-        assert!(hits(&places, 10.0, -1.0).is_empty());
-        assert!(hits(&places, 0.0, 5.0).is_empty());
+        let hits = |content_y| hits(&places, &[0; 4], 10.0, 20.0, 5.0, content_y);
+        assert_eq!(hits(15.0), [0]);
+        assert_eq!(hits(29.9), [0]);
+        assert!(hits(30.1).is_empty());
+        assert_eq!(hits(50.0), [1, 2]);
+        assert_eq!(hits(53.9), [1, 2]);
+        assert!(hits(54.1).is_empty());
+        assert_eq!(hits(46.5), [1, 2]);
+        assert!(hits(-1.0).is_empty());
+        assert!(self::hits(&places, &[0; 4], 0.0, 20.0, 5.0, 5.0).is_empty());
+    }
+
+    #[test]
+    fn nested_marks_are_one_level_deeper_per_enclosing_mark() {
+        let marks = [
+            mark(1, 0..8, MarkStatus::Pending),
+            mark(2, 2..6, MarkStatus::Pending),
+            mark(3, 3..4, MarkStatus::Pending),
+            mark(4, 3..3, MarkStatus::Pending),
+            mark(5, 9..10, MarkStatus::Pending),
+            mark(6, 0..0, MarkStatus::Pending),
+            mark(7, 8..8, MarkStatus::Pending),
+        ];
+        assert_eq!(depths(&marks), [0, 1, 2, 2, 0, 0, 0]);
+    }
+
+    #[test]
+    fn of_equal_ranges_the_lower_number_is_outer() {
+        let marks = [mark(2, 1..3, MarkStatus::Pending), mark(1, 1..3, MarkStatus::Pending)];
+        assert_eq!(depths(&marks), [1, 0]);
+        assert!(depths(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_column_has_a_bar_for_every_level() {
+        assert_eq!(column_width(20.0, &[]), 20.0);
+        assert_eq!(column_width(20.0, &[0, 0]), 20.0);
+        assert_eq!(column_width(20.0, &[0, 2, 1]), 60.0);
+        assert_eq!(column_width(0.0, &[0, 2]), 0.0);
+    }
+
+    #[test]
+    fn the_pointer_prefers_the_innermost_mark() {
+        let places = [Place::Rows(0..6), Place::Rows(2..4), Place::Edge(3)];
+        let depths = [0, 1, 2];
+        let hits = |x, content_y| hits(&places, &depths, 10.0, 20.0, x, content_y);
+        assert_eq!(hits(5.0, 5.0), [0]);
+        assert_eq!(hits(65.0, 5.0), [0]);
+        assert_eq!(hits(5.0, 25.0), [0]);
+        assert_eq!(hits(25.0, 25.0), [1]);
+        assert_eq!(hits(45.0, 25.0), [1]);
+        assert_eq!(hits(45.0, 30.0), [2]);
+        assert_eq!(hits(25.0, 30.0), [1]);
+        assert!(hits(5.0, 65.0).is_empty());
     }
 
     #[test]
@@ -394,6 +480,7 @@ mod tests {
         assert!(describe(&mark(1, 0..1, MarkStatus::Unmatched)).contains("has no effect"));
         let moved = AlignmentMark {
             replaced_by: Some(1),
+            heuristic: false,
             ..mark(2, 4..7, MarkStatus::Applied)
         };
         assert!(describe(&moved).starts_with("Alignment 2, lines 5 to 7: applied. It is moved"));
@@ -402,6 +489,7 @@ mod tests {
     fn moved(number: u32, lines: Range<usize>, replaced_by: u32, status: MarkStatus) -> AlignmentMark {
         AlignmentMark {
             replaced_by: Some(replaced_by),
+            heuristic: false,
             ..mark(number, lines, status)
         }
     }

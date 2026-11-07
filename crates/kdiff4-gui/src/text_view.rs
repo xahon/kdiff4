@@ -270,7 +270,13 @@ pub fn show(
         Vec::new()
     };
     let lanes = alignment_gutter::assign_lanes(&arrows);
-    let margin = margin_widths(style, lines.count(), char_width, row_height, lanes.iter().max().map_or(0, |lane| lane + 1));
+    let depths = alignment_gutter::depths(marks.marks);
+    let base_margin = margin_widths(style, lines.count(), char_width, row_height, lanes.iter().max().map_or(0, |lane| lane + 1));
+    let bar_width = base_margin.alignment;
+    let margin = Margin {
+        alignment: alignment_gutter::column_width(bar_width, &depths),
+        ..base_margin
+    };
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -328,11 +334,12 @@ pub fn show(
                         ui.painter(),
                         marks.marks,
                         &places,
+                        &depths,
                         row,
                         rows.len(),
                         rect,
                         viewport.left() + margin.alignment_left(),
-                        margin.alignment,
+                        bar_width,
                         color,
                         palette,
                         &font_id,
@@ -406,7 +413,7 @@ pub fn show(
         if style.alignment_color.is_none() || x < margin.alignment_left() || x >= margin.gutter_left() {
             return Vec::new();
         }
-        alignment_gutter::hits(&places, row_height, pointer.y - output.inner_rect.min.y + scroll.y)
+        alignment_gutter::hits(&places, &depths, row_height, bar_width, x - margin.alignment_left(), pointer.y - output.inner_rect.min.y + scroll.y)
     };
     let hovered_marks = hover_position.filter(|_| response.hovered()).map(alignment_hits).unwrap_or_default();
     if !hovered_marks.is_empty() {
@@ -1217,6 +1224,7 @@ mod tests {
             lines: 1..3,
             status: kdiff4_protocol::MarkStatus::Pending,
             replaced_by: None,
+            heuristic: false,
         }];
         let test = MenuTest {
             marks,

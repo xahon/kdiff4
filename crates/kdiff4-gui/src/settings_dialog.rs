@@ -1,5 +1,5 @@
 use egui::{Button, Checkbox, Color32, ComboBox, DragValue, Label, RichText, ScrollArea, Theme, Ui};
-use kdiff4_protocol::Document;
+use kdiff4_protocol::{Document, Extractor};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
 use crate::config::{
@@ -390,6 +390,17 @@ impl SettingsDialog {
     }
 
     fn comparison_tab(&mut self, ui: &mut Ui) {
+        section(ui, "comparison_heuristics", "Heuristics Alignment", |ui| {
+            ui.label("Extractor:");
+            ComboBox::from_id_salt("heuristic_extractor").selected_text(extractor_name(self.draft.heuristic_extractor)).show_ui(ui, |ui| {
+                for extractor in [Extractor::TreeSitter] {
+                    ui.selectable_value(&mut self.draft.heuristic_extractor, extractor, extractor_name(extractor));
+                }
+            })
+            .response
+            .on_hover_text("The parser that finds the functions, methods and types Heuristics Alignment pairs.");
+            ui.end_row();
+        });
         let Some((_, draft)) = self.comparison.as_mut() else {
             ui.label(RichText::new("Open files to change how they are compared.").weak());
             return;
@@ -407,6 +418,11 @@ impl SettingsDialog {
             let myers = draft.algorithm == DiffAlgorithm::Myers;
             ui.add_enabled(myers, egui::Checkbox::new(&mut draft.try_hard, "Minimal diff"))
                 .on_hover_text("Myers only: find the smallest diff, which can be slow on large files.");
+            ui.end_row();
+
+            ui.label("");
+            ui.checkbox(&mut draft.pair_similar_lines, "Pair similar changed lines")
+                .on_hover_text("Inside a changed region, put a line that changed a little next to its old version, even when lines were added or removed before it. Off pairs the lines by position, like kdiff3.");
             ui.end_row();
         });
         section(ui, "comparison_char_diff", "Comparison: Character diff", |ui| {
@@ -484,6 +500,14 @@ fn color_override(ui: &mut Ui, color: &mut Option<[u8; 3]>, theme_color: Color32
         }
     });
 }
+
+
+fn extractor_name(extractor: Extractor) -> &'static str {
+    match extractor {
+        Extractor::TreeSitter => "Tree-Sitter",
+    }
+}
+
 
 fn algorithm_name(algorithm: DiffAlgorithm) -> &'static str {
     match algorithm {
@@ -603,6 +627,39 @@ mod tests {
         harness.state_mut().reset_to_defaults();
         assert!(harness.state().draft().alignment_stops);
         assert_eq!(harness.state().draft().alignment_color, crate::config::DEFAULT_ALIGNMENT_COLOR);
+    }
+
+    #[test]
+    fn the_comparison_tab_toggles_similar_line_pairing_and_shows_the_extractor_without_a_session() {
+        use egui_kittest::kittest::Queryable;
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), Some(&ComparisonOptions::default()));
+        dialog.tab = Tab::Comparison;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 1200.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, dialog: &mut SettingsDialog| {
+                    dialog.show(ui, Some(&[]));
+                },
+                dialog,
+            );
+        harness.run_steps(3);
+        harness.get_by_label("Pair similar changed lines").click();
+        harness.run_steps(3);
+        assert!(harness.state().changed_comparison().is_some_and(|options| !options.pair_similar_lines));
+        let mut without_session = SettingsDialog::new(&ViewConfig::default(), None);
+        without_session.tab = Tab::Comparison;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 1200.0))
+            .with_accessibility_check(false)
+            .build_ui_state(
+                |ui, dialog: &mut SettingsDialog| {
+                    dialog.show(ui, Some(&[]));
+                },
+                without_session,
+            );
+        harness.run_steps(3);
+        harness.get_by_label("Extractor:");
     }
 
     #[test]

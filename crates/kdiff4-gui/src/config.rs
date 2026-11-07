@@ -1,6 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use kdiff4_protocol::{Extractor, HeuristicOptions};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -51,6 +52,8 @@ pub struct GuiConfig {
     pub view: ViewConfig,
     pub recent: RecentConfig,
     pub updates: UpdateConfig,
+    /// The options the Heuristics Alignment window was last closed with. Its extractor is the one of the view settings.
+    pub heuristics: HeuristicOptions,
 }
 
 impl Default for GuiConfig {
@@ -60,6 +63,7 @@ impl Default for GuiConfig {
             view: ViewConfig::default(),
             recent: RecentConfig::default(),
             updates: UpdateConfig::default(),
+            heuristics: HeuristicOptions::default(),
         }
     }
 }
@@ -104,6 +108,8 @@ pub struct ViewConfig {
     pub inset_arrow_gap: u8,
     /// Previous and Next Difference also stop at the first region of every applied alignment.
     pub alignment_stops: bool,
+    /// The parser Heuristics Alignment finds entities with.
+    pub heuristic_extractor: Extractor,
     pub theme: ThemeChoice,
     pub light_colors: ThemeColors,
     pub dark_colors: ThemeColors,
@@ -133,6 +139,7 @@ impl Default for ViewConfig {
             alignment_color: DEFAULT_ALIGNMENT_COLOR,
             inset_arrow_gap: DEFAULT_INSET_ARROW_GAP,
             alignment_stops: true,
+            heuristic_extractor: Extractor::TreeSitter,
             theme: ThemeChoice::Light,
             light_colors: ThemeColors::default(),
             dark_colors: ThemeColors::default(),
@@ -413,6 +420,7 @@ last_dir = \"x\"
             alignment_color: [9, 8, 7, 6],
             inset_arrow_gap: 3,
             alignment_stops: false,
+            heuristic_extractor: Extractor::TreeSitter,
             theme: ThemeChoice::System,
             light_colors: ThemeColors {
                 ui_text: Some([1, 2, 3]),

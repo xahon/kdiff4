@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use semver::Version;
-use kdiff4_protocol::{Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HostMessage, InsetChoice, Navigation, RequestId, Response};
+use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, RequestId, Response};
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
@@ -25,6 +25,7 @@ use crate::text_view::{self, Caret};
 use crate::self_update::{self, UpdateInstall};
 use crate::theme;
 use crate::update_check::{self, CheckOutcome, ReleaseInfo, UpdateCheck, UpdateError};
+use crate::heuristics_dialog::{HeuristicsAction, HeuristicsDialog};
 use crate::inset_dialog::{self, InsetAnswer};
 use crate::update_dialog::{self, AvailableAction, InstallOffer};
 use crate::window_frame;
@@ -38,6 +39,9 @@ const MARK_LINES_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::C
 const MARK_ANCHOR_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
 const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
 const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
+const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
+const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::H);
+const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
@@ -108,6 +112,10 @@ enum Pending {
     /// A mark, anchor, renumbering, removal or clearing of alignment marks.
     AlignmentEdit,
     ApplyAlignments,
+    /// A request for the matches of the Heuristics Alignment window.
+    HeuristicPropose,
+    /// The heuristic alignments sent, and the alignment they were limited to, to send again once the user confirms dropping D's work.
+    HeuristicApply(Vec<Vec<std::ops::Range<usize>>>, Option<u32>),
 }
 
 /// A message under the panes: the differences found on open and reload, or the outcome of the last save, reload or path change.
@@ -161,6 +169,8 @@ pub struct KdiffApp {
     /// The save waiting for the user to choose the output's line ending style.
     eol_prompt: Option<PendingSave>,
     eol_modal_id: egui::Id,
+    /// The Heuristics Alignment window, while it is open.
+    heuristics: Option<HeuristicsDialog>,
 }
 
 impl KdiffApp {
@@ -221,6 +231,7 @@ impl KdiffApp {
             inset_modal_id: egui::Id::unique("inset_prompt"),
             eol_prompt: None,
             eol_modal_id: egui::Id::unique("eol_prompt"),
+            heuristics: None,
         };
         app.apply_view(ctx, &view);
         app
@@ -552,6 +563,9 @@ impl KdiffApp {
                     };
                     self.status = None;
                 }
+                if let Some(dialog) = self.heuristics.as_mut() {
+                    dialog.forget_proposal();
+                }
                 let mirror = Mirror::from_snapshot(snapshot, self.view().align_output);
                 self.language.follow(&mirror);
                 self.mirror = Some(mirror);
@@ -620,6 +634,12 @@ impl KdiffApp {
                     }
                 }
             }
+            HostMessage::Event(Event::HeuristicProposal(proposal)) => {
+                let asked = proposal.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::HeuristicPropose));
+                if asked && let Some(dialog) = self.heuristics.as_mut() {
+                    dialog.set_proposal(proposal);
+                }
+            }
             HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
         }
     }
@@ -679,10 +699,11 @@ impl KdiffApp {
                         text: ALIGNMENTS_CHANGED_HINT.to_string(),
                         is_error: false,
                     }),
-                    Pending::ApplyAlignments => self.mirror.as_ref().map(|mirror| Status {
+                    Pending::ApplyAlignments | Pending::HeuristicApply(..) => self.mirror.as_ref().map(|mirror| Status {
                         text: format!("Alignments applied. {}", mirror.difference_summary()),
                         is_error: false,
                     }),
+                    Pending::HeuristicPropose => self.status.take(),
                 };
                 return;
             }
@@ -714,6 +735,16 @@ impl KdiffApp {
                 }
             }
             Pending::ApplyAlignments => self.report_error(format!("Cannot apply the alignments: {}", error.message)),
+            Pending::HeuristicPropose => match self.heuristics.as_mut() {
+                Some(dialog) => dialog.set_error(error.message),
+                None => self.report_error(format!("Cannot find heuristic alignments: {}", error.message)),
+            },
+            Pending::HeuristicApply(alignments, within) if error.kind == ErrorKind::NeedsConfirmation => {
+                if open_dialog::confirm_apply_alignments() {
+                    self.send(Command::ApplyHeuristicAlignments { alignments: alignments.clone(), confirmed: true, within }, Pending::HeuristicApply(alignments, within));
+                }
+            }
+            Pending::HeuristicApply(..) => self.report_error(format!("Cannot apply the heuristic alignments: {}", error.message)),
         }
     }
 
@@ -1240,6 +1271,81 @@ impl KdiffApp {
         }
     }
 
+    /// Opens the Heuristics Alignment window with the options it was last closed with, and asks the engine for its matches at once.
+    fn open_heuristics(&mut self) {
+        self.open_heuristics_window(None);
+    }
+
+
+    /// Opens the Heuristics Alignment window for what lies inside the innermost applied alignment around the caret.
+    fn open_heuristics_inside(&mut self) {
+        let number = match (self.panes.caret, self.mirror.as_ref()) {
+            (Some((document, cursor)), Some(mirror)) if document != Document::D && self.panes.void_row.is_none() => {
+                innermost_applied_alignment(mirror.alignments(), document, cursor.head.line, mirror.documents().len().min(3))
+            }
+            _ => None,
+        };
+        match number {
+            Some(number) => self.open_heuristics_window(Some(number)),
+            None => self.report_error(INSIDE_ALIGNMENT_HINT.to_string()),
+        }
+    }
+
+
+    fn open_heuristics_window(&mut self, within: Option<u32>) {
+        let Some(mirror) = self.mirror.as_ref() else { return };
+        let options = HeuristicOptions {
+            extractor: self.view().heuristic_extractor.clone(),
+            ..self.config.heuristics.clone()
+        };
+        let documents = mirror.documents().len().min(3);
+        let dialog = HeuristicsDialog::new(options, self.language.current().name(), documents);
+        self.heuristics = Some(match within {
+            Some(number) => dialog.inside(number),
+            None => dialog,
+        });
+        self.find_heuristic_matches();
+    }
+
+
+    fn find_heuristic_matches(&mut self) {
+        let Some(dialog) = self.heuristics.as_mut() else { return };
+        dialog.start_search();
+        let command = Command::ProposeHeuristicAlignments {
+            language: dialog.language().to_string(),
+            options: dialog.options.clone(),
+            within: dialog.within(),
+        };
+        self.send(command, Pending::HeuristicPropose);
+    }
+
+
+    fn show_heuristics(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.heuristics.as_mut() else { return };
+        let mut action = None;
+        let modal = egui::Modal::new(egui::Id::unique("heuristics_dialog")).show(ctx, |ui| action = dialog.show(ui));
+        if action.is_none() && modal.should_close() {
+            action = Some(HeuristicsAction::Cancel);
+        }
+        let Some(action) = action else { return };
+        self.config.heuristics = dialog.options.clone();
+        let within = dialog.within();
+        self.save_config(false);
+        match action {
+            HeuristicsAction::Find => self.find_heuristic_matches(),
+            HeuristicsAction::Align(alignments) => {
+                self.heuristics = None;
+                self.apply_heuristics(alignments, within);
+            }
+            HeuristicsAction::Cancel => self.heuristics = None,
+        }
+    }
+
+
+    fn apply_heuristics(&mut self, alignments: Vec<Vec<std::ops::Range<usize>>>, within: Option<u32>) {
+        self.send(Command::ApplyHeuristicAlignments { alignments: alignments.clone(), confirmed: false, within }, Pending::HeuristicApply(alignments, within));
+    }
+
     fn clear_alignments(&mut self) {
         if self.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()) {
             self.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit);
@@ -1284,6 +1390,12 @@ impl KdiffApp {
                 }
                 if ctx.input_mut(|input| input.consume_shortcut(&APPLY_ALIGNMENTS_SHORTCUT)) {
                     self.apply_alignments();
+                }
+                if ctx.input_mut(|input| input.consume_shortcut(&HEURISTICS_INSIDE_SHORTCUT)) {
+                    self.open_heuristics_inside();
+                }
+                if ctx.input_mut(|input| input.consume_shortcut(&HEURISTICS_SHORTCUT)) {
+                    self.open_heuristics();
                 }
             }
             if ctx.input_mut(|input| input.consume_shortcut(&UNDO_SHORTCUT)) {
@@ -1494,6 +1606,22 @@ impl KdiffApp {
                         .clicked()
                     {
                         self.apply_alignments();
+                    }
+                    let heuristics = egui::Button::new("Heuristics Alignment…").shortcut_text(ui.ctx().format_shortcut(&HEURISTICS_SHORTCUT));
+                    if ui
+                        .add_enabled(has_session, heuristics)
+                        .on_hover_text("Find functions, methods and types in the documents and align them, also where a document moved them")
+                        .clicked()
+                    {
+                        self.open_heuristics();
+                    }
+                    let inside = egui::Button::new("Heuristics Alignment Inside…").shortcut_text(ui.ctx().format_shortcut(&HEURISTICS_INSIDE_SHORTCUT));
+                    if ui
+                        .add_enabled(has_session, inside)
+                        .on_hover_text("Find and align the entities inside the applied alignment around the caret")
+                        .clicked()
+                    {
+                        self.open_heuristics_inside();
                     }
                     let clear = egui::Button::new("Clear All Alignments").shortcut_text(ui.ctx().format_shortcut(&CLEAR_ALIGNMENTS_SHORTCUT));
                     if ui.add_enabled(marks > 0, clear).clicked() {
@@ -1746,6 +1874,7 @@ impl eframe::App for KdiffApp {
         }
         self.show_inset_prompt(&ctx);
         self.show_eol_prompt(&ctx);
+        self.show_heuristics(&ctx);
         self.show_settings(&ctx);
         self.show_update_window(&ctx);
         self.update_window_frame(frame);
@@ -1917,6 +2046,33 @@ fn paint_overview_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Colo
     }
     ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
 }
+
+/// The number of the applied alignment around `line` of `document` that is innermost: the one with the shortest part there, and of equal parts the one nested in the most alignments.
+fn innermost_applied_alignment(alignments: &Alignments, document: Document, line: usize, documents: usize) -> Option<u32> {
+    let mut numbers: Vec<u32> = alignments.marks.iter().filter(|mark| mark.status == MarkStatus::Applied).map(|mark| mark.number).collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    let complete: Vec<(u32, Vec<std::ops::Range<usize>>)> = numbers
+        .into_iter()
+        .filter_map(|number| {
+            let parts = Document::ALL
+                .iter()
+                .take(documents)
+                .map(|document| alignments.of(document.clone()).find(|mark| mark.number == number && mark.status == MarkStatus::Applied).map(|mark| mark.lines.clone()))
+                .collect::<Option<Vec<_>>>()?;
+            Some((number, parts))
+        })
+        .collect();
+    let index = Document::ALL.iter().position(|candidate| *candidate == document)?;
+    let holds = |parts: &Vec<std::ops::Range<usize>>| parts.get(index).is_some_and(|part| part.start <= line && line < part.end);
+    let depth = |parts: &Vec<std::ops::Range<usize>>| complete.iter().filter(|(_, other)| other != parts && other.iter().zip(parts.iter()).all(|(other, part)| other.start <= part.start && part.end <= other.end)).count();
+    complete
+        .iter()
+        .filter(|(_, parts)| holds(parts))
+        .min_by_key(|(_, parts)| (parts[index].len(), std::cmp::Reverse(depth(parts))))
+        .map(|(number, _)| number.clone())
+}
+
 
 fn lines_of(mirror: &Mirror, document: Document) -> Option<Lines<'_>> {
     match document {
@@ -2095,6 +2251,7 @@ mod tests {
             lines,
             status: kdiff4_protocol::MarkStatus::Pending,
             replaced_by: None,
+            heuristic: false,
         }
     }
 
@@ -2229,6 +2386,115 @@ mod tests {
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
         press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::ApplyAlignments { confirmed: false }, Command::Redo]);
+    }
+
+    #[test]
+    fn ctrl_h_opens_heuristics_alignment_with_the_saved_options_and_asks_for_matches() {
+        let (mut app, host, ctx) = app_with_session();
+        app.config.heuristics.types = true;
+        app.config.heuristics.signature_similarity = 90;
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        assert!(app.heuristics.is_some());
+        let language = app.language.current().name().to_string();
+        let options = HeuristicOptions {
+            types: true,
+            signature_similarity: 90,
+            ..HeuristicOptions::default()
+        };
+        assert_eq!(sent(app, host), [Command::ProposeHeuristicAlignments { language, options, within: None }]);
+    }
+
+    fn applied(document: Document, number: u32, lines: std::ops::Range<usize>) -> kdiff4_protocol::AlignmentMark {
+        kdiff4_protocol::AlignmentMark {
+            status: kdiff4_protocol::MarkStatus::Applied,
+            ..mark(document, number, lines)
+        }
+    }
+
+    fn caret_at(app: &mut KdiffApp, document: Document, line: usize) {
+        app.panes.set_caret(document, Cursor::at(Position { line, column: 0 }), None);
+    }
+
+    #[test]
+    fn ctrl_alt_h_needs_the_caret_inside_an_applied_alignment() {
+        let (mut app, _host, ctx) = app_with_session();
+        let hint = "Put the caret inside an applied alignment to align inside it";
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        assert!(app.heuristics.is_none());
+        assert_eq!(app.status.as_ref().map(|status| (status.text.as_str(), status.is_error)), Some((hint, true)));
+        app.status = None;
+        set_marks(&mut app, vec![mark(Document::A, 1, 0..2), mark(Document::B, 1, 0..2)], true);
+        caret_at(&mut app, Document::A, 1);
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        assert!(app.heuristics.is_none(), "a pending alignment does not count");
+        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(hint));
+        app.status = None;
+        set_marks(&mut app, vec![applied(Document::A, 1, 0..1), applied(Document::B, 1, 0..1)], false);
+        caret_at(&mut app, Document::A, 1);
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        assert!(app.heuristics.is_none(), "the caret is outside it");
+        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(hint));
+    }
+
+    #[test]
+    fn ctrl_alt_h_opens_the_window_inside_the_innermost_alignment_and_sends_it_with_both_commands() {
+        let (mut app, host, ctx) = app_with_session();
+        let marks = vec![applied(Document::A, 1, 0..10), applied(Document::B, 1, 0..10), applied(Document::A, 2, 2..5), applied(Document::B, 2, 3..6)];
+        set_marks(&mut app, marks, false);
+        caret_at(&mut app, Document::B, 4);
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        assert_eq!(app.heuristics.as_ref().and_then(|dialog| dialog.within()), Some(2));
+        app.apply_heuristics(vec![vec![2..3, 3..4]], Some(2));
+        let language = app.language.current().name().to_string();
+        let options = HeuristicOptions::default();
+        assert_eq!(
+            sent(app, host),
+            [
+                Command::ProposeHeuristicAlignments { language, options, within: Some(2) },
+                Command::ApplyHeuristicAlignments { alignments: vec![vec![2..3, 3..4]], confirmed: false, within: Some(2) }
+            ]
+        );
+    }
+
+    #[test]
+    fn the_innermost_alignment_is_the_smallest_part_and_of_equal_parts_the_deepest() {
+        let alignments = |marks: Vec<kdiff4_protocol::AlignmentMark>| kdiff4_protocol::Alignments { marks, ..Default::default() };
+        let pair = |number: u32, a: std::ops::Range<usize>, b: std::ops::Range<usize>| [applied(Document::A, number, a), applied(Document::B, number, b)];
+        let nested: Vec<_> = [pair(1, 0..10, 0..10), pair(2, 2..8, 2..8), pair(3, 3..4, 3..4)].into_iter().flatten().collect();
+        assert_eq!(innermost_applied_alignment(&alignments(nested.clone()), Document::A, 3, 2), Some(3));
+        assert_eq!(innermost_applied_alignment(&alignments(nested.clone()), Document::A, 5, 2), Some(2));
+        assert_eq!(innermost_applied_alignment(&alignments(nested.clone()), Document::A, 9, 2), Some(1));
+        assert_eq!(innermost_applied_alignment(&alignments(nested.clone()), Document::A, 10, 2), None);
+        assert_eq!(innermost_applied_alignment(&alignments(nested), Document::D, 3, 2), None);
+        let equal_in_a: Vec<_> = [pair(1, 0..6, 0..9), pair(2, 0..6, 2..4)].into_iter().flatten().collect();
+        assert_eq!(innermost_applied_alignment(&alignments(equal_in_a.clone()), Document::A, 1, 2), Some(2));
+        let mut one_document = equal_in_a;
+        one_document.retain(|mark| !(mark.number == 2 && mark.document == Document::B));
+        assert_eq!(innermost_applied_alignment(&alignments(one_document), Document::A, 1, 2), Some(1), "an alignment a document lacks is not complete");
+    }
+
+    #[test]
+    fn a_heuristic_proposal_fills_the_window_only_when_it_answers_the_window() {
+        let (mut app, _host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        let id = app.pending.iter().find(|(_, kind)| **kind == Pending::HeuristicPropose).map(|(id, _)| id.clone()).unwrap();
+        let proposal = |cause| kdiff4_protocol::HeuristicProposal {
+            cause,
+            matches: vec![kdiff4_protocol::HeuristicMatch {
+                kind: kdiff4_protocol::EntityKind::Function,
+                names: vec![Some("f".to_string()), Some("f".to_string())],
+                parts: vec![0..1, 1..2],
+                stage: kdiff4_protocol::MatchStage::Signature,
+                parent: None,
+                moved: false,
+            }],
+            found: vec![1, 1],
+            blocked: 0,
+        };
+        app.handle_message(&ctx, HostMessage::Event(Event::HeuristicProposal(proposal(Some(RequestId(id.0 + 100))))));
+        assert!(app.heuristics.as_ref().unwrap().checked_parts().is_empty());
+        app.handle_message(&ctx, HostMessage::Event(Event::HeuristicProposal(proposal(Some(id)))));
+        assert_eq!(app.heuristics.as_ref().unwrap().checked_parts(), vec![vec![0..1, 1..2]]);
     }
 
     fn inset_choice() -> InsetChoice {

@@ -36,6 +36,9 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 semver = "1.0.28"
 serde_json = "1.0.154"
 egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
+tree-sitter = "0.27.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
 
 [package]
 name = "kdiff4"

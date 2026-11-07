@@ -113,6 +113,119 @@ pub enum Command {
     ApplyAlignments {
         confirmed: bool,
     },
+    /// Finds the functions, methods, types and (when the options ask for them, and always with `within`) blocks of the source documents of `language` (a name the language selector shows) and pairs them across the documents; the entities inside a paired entity are paired in turn. With `within`, the number of an applied alignment, only what lies inside that alignment is paired. The host answers with `Event::HeuristicProposal` and changes nothing. Rejected for a language the extractor can't parse, and for a `within` that is not an applied alignment.
+    ProposeHeuristicAlignments {
+        language: String,
+        options: HeuristicOptions,
+        #[serde(default)]
+        within: Option<u32>,
+    },
+    /// Replaces the marks of the previous heuristic alignments with `alignments`, one part per source document each (an empty range is an anchor), and applies all marks like `ApplyAlignments`. An alignment that collides with a mark the user made is left out. With `within`, only the heuristic marks nested inside that alignment are replaced and the others stay. On failure the marks are unchanged.
+    ApplyHeuristicAlignments {
+        alignments: Vec<Vec<Range<usize>>>,
+        confirmed: bool,
+        #[serde(default)]
+        within: Option<u32>,
+    },
+}
+
+
+/// The parser that finds the entities Heuristics Alignment pairs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Extractor {
+    #[default]
+    TreeSitter,
+}
+
+
+/// What Heuristics Alignment looks for and how it pairs what it found. Similarities are percentages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeuristicOptions {
+    pub extractor: Extractor,
+    pub functions: bool,
+    pub methods: bool,
+    pub types: bool,
+    /// Look for the blocks inside functions and methods: conditions, loops, switches with their cases, try statements and lambdas.
+    pub blocks: bool,
+    /// Pair entities with the same name when the signature changed.
+    pub match_names: bool,
+    /// Pair entities whose signature and body are similar enough.
+    pub match_similar: bool,
+    pub signature_similarity: u8,
+    pub body_similarity: u8,
+    /// Pair the one overload of a name left over after the exact signatures were paired. Otherwise overloads only pair by exact signature.
+    pub overload_leftovers: bool,
+    /// Align an entity that one document lacks, at an anchor between the entities that surround it in the others, when those are neighbors in that document too.
+    pub missing_by_neighbors: bool,
+}
+
+impl Default for HeuristicOptions {
+    fn default() -> Self {
+        HeuristicOptions {
+            extractor: Extractor::TreeSitter,
+            functions: true,
+            methods: true,
+            types: false,
+            blocks: false,
+            match_names: true,
+            match_similar: true,
+            signature_similarity: 80,
+            body_similarity: 50,
+            overload_leftovers: false,
+            missing_by_neighbors: true,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum EntityKind {
+    Function,
+    Method,
+    Type,
+    /// A statement with a body inside a function: condition, loop, switch, case, try, lambda or nested function.
+    Block,
+}
+
+
+/// How the parts of a heuristic alignment were paired: the weakest pairing among its documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MatchStage {
+    Signature,
+    Name,
+    /// Signature and body similarity, in percent.
+    Similar { signature: u8, body: u8 },
+}
+
+
+/// One alignment Heuristics Alignment proposes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeuristicMatch {
+    pub kind: EntityKind,
+    /// Per source document, the qualified name of its entity; `None` where the document lacks it and has an anchor.
+    pub names: Vec<Option<String>>,
+    /// Per source document, the lines of its entity, or an anchor (empty range).
+    pub parts: Vec<Range<usize>>,
+    pub stage: MatchStage,
+    /// The index in `HeuristicProposal::matches` of the match whose entities hold the entities of this one. Parents come before their children.
+    #[serde(default)]
+    pub parent: Option<usize>,
+    /// Some document has the entity away from where the display order shows it, so its hunk is exchanged.
+    pub moved: bool,
+}
+
+
+/// The answer to `ProposeHeuristicAlignments`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeuristicProposal {
+    pub cause: Option<RequestId>,
+    /// Ordered by position in A.
+    pub matches: Vec<HeuristicMatch>,
+    /// Per source document, how many entities it has, at any depth.
+    pub found: Vec<usize>,
+    /// Matches left out because they collide with a mark the user made.
+    pub blocked: usize,
 }
 
 /// Where a navigate command moves the current region. A difference is a region whose hunks are not all equal; a conflict is one that needs a decision before auto-resolve can merge it, whether or not D has resolved it since.
@@ -180,6 +293,7 @@ pub enum Event {
     Snapshot(Snapshot),
     Delta(Delta),
     CurrentRegion(CurrentRegion),
+    HeuristicProposal(HeuristicProposal),
 }
 
 /// The current region changed by navigation. It does not change the revision: `revision` is the one `region` refers to. Changes of D also make their region current, without this event.
@@ -263,6 +377,9 @@ pub struct AlignmentMark {
     /// Set when its alignment shows the hunk away from its place in the document: the number of the alignment whose hunk is shown where this one was. Taken from the applied alignments when `status` is `Applied`, from where the alignment would be shown otherwise.
     #[serde(default)]
     pub replaced_by: Option<u32>,
+    /// Made by Heuristics Alignment, which replaces these marks when it runs again.
+    #[serde(default)]
+    pub heuristic: bool,
 }
 
 impl AlignmentMark {
@@ -528,6 +645,7 @@ mod tests {
             lines,
             status: MarkStatus::Pending,
             replaced_by: None,
+            heuristic: false,
         }
     }
 

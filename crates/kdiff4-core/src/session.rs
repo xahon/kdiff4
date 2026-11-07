@@ -7,11 +7,13 @@ use kdiff4_protocol::engine::{
     run_comparison,
 };
 use kdiff4_protocol::{
-    Alignments, Change, Choice, Document, DocumentText, EolChoice, EolStyle, LineCharRuns, Navigation, OpenFiles, OutputDocument, OutputEdit, RegionMerge, Revision, Snapshot,
+    Alignments, Change, Choice, Document, DocumentText, EolChoice, EolStyle, HeuristicMatch, HeuristicOptions, HeuristicProposal, LineCharRuns, Navigation, OpenFiles, OutputDocument,
+    OutputEdit, RegionMerge, Revision, Snapshot,
 };
 
 use crate::alignment_marks::AlignmentMarks;
 use crate::error::CoreError;
+use crate::heuristics::{self, DocumentLines, Proposed};
 use crate::merge::{self, Merge, MergeStep, RegionState};
 use crate::normalizer;
 use crate::text::{self, SourceText};
@@ -285,6 +287,83 @@ impl Session {
         self.alignments.set_applied(alignments);
         self.rebuild(comparison, engine);
         Ok(true)
+    }
+
+    /// Finds the functions, methods, types and blocks of the source documents and pairs them (see `Command::ProposeHeuristicAlignments`). Matches that collide with a mark the user made are left out with the matches inside them, and counted. Changes nothing.
+    pub fn propose_heuristic_alignments(&self, language: &str, options: &HeuristicOptions, within: Option<u32>) -> Result<HeuristicProposal, CoreError> {
+        let scope = match within {
+            Some(number) => Some(self.alignments.applied_parts(number, self.sources.len()).ok_or(CoreError::NotApplied { number })?),
+            None => None,
+        };
+        let documents: Vec<DocumentLines<'_>> = self
+            .sources
+            .iter()
+            .map(|source| DocumentLines {
+                text: &source.text.text,
+                lines: &source.text.lines,
+            })
+            .collect();
+        let (proposed, found) = heuristics::propose(language, &documents, options, scope.as_deref())?;
+        let mut kept: Vec<Proposed> = Vec::with_capacity(proposed.len());
+        let mut new_index: Vec<Option<usize>> = Vec::with_capacity(proposed.len());
+        let mut blocked = 0;
+        for mut entry in proposed {
+            let parent_kept = entry.parent.is_none_or(|parent| new_index[parent].is_some());
+            if !parent_kept || self.alignments.blocks(&entry.parts) {
+                new_index.push(None);
+                blocked += 1;
+                continue;
+            }
+            entry.parent = entry.parent.and_then(|parent| new_index[parent]);
+            new_index.push(Some(kept.len()));
+            kept.push(entry);
+        }
+        let mut trial = self.alignments.clone();
+        let parts: Vec<Vec<Range<usize>>> = kept.iter().map(|proposed| proposed.parts.clone()).collect();
+        let numbers = match within {
+            Some(number) => trial.replace_heuristic_within(&parts, &self.line_counts(), number)?,
+            None => trial.replace_heuristic(&parts, &self.line_counts())?,
+        };
+        let summary = trial.summary(self.sources.len());
+        let moved = |number: &Option<u32>| number.is_some_and(|number| summary.marks.iter().any(|mark| mark.number == number && mark.is_moved()));
+        let matches = kept
+            .into_iter()
+            .zip(numbers.iter())
+            .map(|(proposed, number)| HeuristicMatch {
+                kind: proposed.kind,
+                names: proposed.names,
+                parts: proposed.parts,
+                stage: proposed.stage,
+                parent: proposed.parent,
+                moved: moved(number),
+            })
+            .collect();
+        Ok(HeuristicProposal {
+            cause: None,
+            matches,
+            found,
+            blocked,
+        })
+    }
+
+    /// Replaces the heuristic marks with `alignments`, or with `within` only the ones nested inside that alignment, and applies all marks (see `Command::ApplyHeuristicAlignments`). Returns whether the comparison changed; when it did not, the marks may still have. On failure the marks are unchanged.
+    pub fn apply_heuristic_alignments(&mut self, alignments: &[Vec<Range<usize>>], within: Option<u32>, confirmed: bool, engine: &dyn ComparisonEngine) -> Result<bool, CoreError> {
+        let saved = self.alignments.clone();
+        let line_counts = self.line_counts();
+        let replaced = match within {
+            Some(number) => self.alignments.replace_heuristic_within(alignments, &line_counts, number),
+            None => self.alignments.replace_heuristic(alignments, &line_counts),
+        };
+        let result = replaced.and_then(|_| self.apply_alignments(confirmed, engine));
+        if result.is_err() {
+            self.alignments = saved;
+        }
+        result
+    }
+
+    /// The change of the alignment marks, for a command that changed them without comparing again.
+    pub fn alignment_marks_change(&mut self) -> Change {
+        self.marks_changed(None)
     }
 
     fn alignment_summary(&self) -> Alignments {
@@ -729,7 +808,7 @@ mod tests {
     use std::fs;
 
     use kdiff4_protocol::engine::{CharDiff, EngineError, HunkChange, MergeStatus, RegionStatus, Row};
-    use kdiff4_protocol::{ErrorKind, Labels, MarkStatus, ProtocolError};
+    use kdiff4_protocol::{EntityKind, ErrorKind, Labels, MarkStatus, ProtocolError};
 
     use super::*;
     use crate::builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
@@ -1609,8 +1688,8 @@ cc
         assert!(matches!(session.mark_alignment(Document::D, 0..1), Err(CoreError::NoSuchDocument { .. })));
         assert!(matches!(session.mark_alignment(Document::A, 1..3), Err(CoreError::InvalidMark { .. })));
         assert_eq!(session.snapshot(), before);
-        session.mark_alignment(Document::A, 0..2).unwrap();
-        let error = session.mark_alignment(Document::A, 1..2).unwrap_err();
+        session.mark_alignment(Document::B, 0..2).unwrap();
+        let error = session.mark_alignment(Document::B, 1..3).unwrap_err();
         assert_eq!(ProtocolError::from(error).kind, ErrorKind::InvalidRequest);
         assert!(matches!(session.remove_alignment_mark(Document::A, 4), Err(CoreError::InvalidMark { .. })));
         assert!(matches!(session.renumber_alignment_mark(Document::A, 1, 0), Err(CoreError::InvalidMark { .. })));
@@ -2318,6 +2397,88 @@ cc
                 session.redo().unwrap();
             }
         }
+    }
+
+    const TWO_FUNCTIONS: [&str; 18] = [
+        "int f(int n)",
+        "{",
+        "    if (n)",
+        "    {",
+        "        a();",
+        "    }",
+        "    return n;",
+        "}",
+        "",
+        "int g(int n)",
+        "{",
+        "    while (n)",
+        "    {",
+        "        b();",
+        "    }",
+        "    return n;",
+        "}",
+        "",
+    ];
+
+    fn heuristic_lines(session: &Session) -> Vec<std::ops::Range<usize>> {
+        let alignments = session.snapshot().alignments;
+        alignments.of(Document::A).filter(|mark| mark.heuristic).map(|mark| mark.lines.clone()).collect()
+    }
+
+    #[test]
+    fn a_blocked_heuristic_match_takes_the_matches_inside_it_along() {
+        let dir = temp_dir("heuristic-blocked");
+        let mut lines = vec!["int x;"];
+        lines.extend(TWO_FUNCTIONS);
+        let mut session = merge_of(&dir, &lines, &lines, &lines);
+        let options = HeuristicOptions { blocks: true, ..HeuristicOptions::default() };
+        let proposal = session.propose_heuristic_alignments("C++", &options, None).unwrap();
+        assert_eq!(proposal.matches.len(), 4);
+        assert_eq!(proposal.matches.iter().map(|found| found.parent).collect::<Vec<_>>(), [None, Some(0), None, Some(2)]);
+        session.mark_alignment(Document::A, 0..3).unwrap();
+        let proposal = session.propose_heuristic_alignments("C++", &options, None).unwrap();
+        assert_eq!(proposal.blocked, 2);
+        assert_eq!(proposal.matches.len(), 2);
+        assert_eq!(proposal.matches.iter().map(|found| found.parent).collect::<Vec<_>>(), [None, Some(0)]);
+        assert_eq!(proposal.matches[0].names[0].as_deref(), Some("g"));
+    }
+
+    #[test]
+    fn a_scoped_proposal_needs_an_applied_alignment_and_pairs_what_is_inside() {
+        let dir = temp_dir("heuristic-within");
+        let mut session = merge_of(&dir, &TWO_FUNCTIONS, &TWO_FUNCTIONS, &TWO_FUNCTIONS);
+        let options = HeuristicOptions::default();
+        assert!(matches!(session.propose_heuristic_alignments("C++", &options, Some(1)), Err(CoreError::NotApplied { number: 1 })));
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 0..8).unwrap();
+        }
+        assert!(matches!(session.propose_heuristic_alignments("C++", &options, Some(1)), Err(CoreError::NotApplied { number: 1 })));
+        session.apply_alignments(false, &BuiltinEngine).unwrap();
+        let proposal = session.propose_heuristic_alignments("C++", &options, Some(1)).unwrap();
+        assert_eq!(proposal.matches.iter().map(|found| (found.kind.clone(), found.parts.clone(), found.parent)).collect::<Vec<_>>(), [(EntityKind::Block, vec![2..6, 2..6, 2..6], None)]);
+        assert_eq!(proposal.found, vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn applying_a_scoped_proposal_keeps_the_heuristic_marks_outside_the_scope() {
+        let dir = temp_dir("heuristic-within-apply");
+        let mut session = merge_of(&dir, &TWO_FUNCTIONS, &TWO_FUNCTIONS, &TWO_FUNCTIONS);
+        let options = HeuristicOptions::default();
+        let whole: Vec<Vec<std::ops::Range<usize>>> = session.propose_heuristic_alignments("C++", &options, None).unwrap().matches.into_iter().map(|found| found.parts).collect();
+        session.apply_heuristic_alignments(&whole, None, false, &BuiltinEngine).unwrap();
+        assert_eq!(heuristic_lines(&session), [0..8, 9..17]);
+        let inside: Vec<Vec<std::ops::Range<usize>>> = session.propose_heuristic_alignments("C++", &options, Some(1)).unwrap().matches.into_iter().map(|found| found.parts).collect();
+        assert_eq!(inside, [vec![2..6, 2..6, 2..6]]);
+        session.apply_heuristic_alignments(&inside, Some(1), false, &BuiltinEngine).unwrap();
+        assert_eq!(heuristic_lines(&session), [0..8, 9..17, 2..6]);
+        let other: Vec<Vec<std::ops::Range<usize>>> = session.propose_heuristic_alignments("C++", &options, Some(2)).unwrap().matches.into_iter().map(|found| found.parts).collect();
+        assert_eq!(other, [vec![11..15, 11..15, 11..15]]);
+        session.apply_heuristic_alignments(&other, Some(2), false, &BuiltinEngine).unwrap();
+        assert_eq!(heuristic_lines(&session), [0..8, 9..17, 2..6, 11..15]);
+        session.apply_heuristic_alignments(&whole, None, true, &BuiltinEngine).unwrap();
+        assert_eq!(heuristic_lines(&session), [0..8, 9..17]);
+        assert!(matches!(session.apply_heuristic_alignments(&inside, Some(9), true, &BuiltinEngine), Err(CoreError::NotApplied { number: 9 })));
+        assert_eq!(heuristic_lines(&session), [0..8, 9..17]);
     }
 
     proptest::proptest! {

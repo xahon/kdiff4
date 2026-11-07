@@ -39,6 +39,10 @@ pub enum CoreError {
     EolConflict,
     #[error("invalid alignment mark: {reason}")]
     InvalidMark { reason: String },
+    #[error("Alignment {number} is not applied")]
+    NotApplied { number: u32 },
+    #[error("Heuristics Alignment can't parse {language} yet")]
+    UnsupportedLanguage { language: String },
     #[error("applying the alignments compares everything again and discards the choices and edits in D")]
     NeedsConfirmation,
 }
@@ -59,6 +63,8 @@ impl From<CoreError> for ProtocolError {
             | CoreError::InvalidRange { .. }
             | CoreError::NoSuchRegion { .. }
             | CoreError::InvalidChoice { .. }
+            | CoreError::UnsupportedLanguage { .. }
+            | CoreError::NotApplied { .. }
             | CoreError::InvalidEditTarget { .. }
             | CoreError::UnresolvedConflicts { .. }
             | CoreError::InvalidMark { .. } => ErrorKind::InvalidRequest,

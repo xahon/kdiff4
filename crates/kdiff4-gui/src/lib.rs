@@ -6,6 +6,7 @@ mod editing;
 mod eol;
 mod find;
 mod fonts;
+mod heuristics_dialog;
 mod inset_dialog;
 mod language;
 mod minimap;

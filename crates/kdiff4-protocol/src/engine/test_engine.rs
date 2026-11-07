@@ -38,6 +38,7 @@ impl ComparisonEngine for SimpleEngine {
             algorithms: vec![DiffAlgorithm::Histogram],
             try_hard: false,
             align_b_with_c: false,
+            pair_similar_lines: false,
         }
     }
 

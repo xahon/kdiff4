@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
-use kdiff4_protocol::engine::{EngineError, ManualAlignment, document_order, moved_parts, validate_alignments};
+use kdiff4_protocol::engine::{EngineError, ManualAlignment, alignment_tree, moved_parts, sibling_order, siblings, validate_alignments};
 use kdiff4_protocol::{AlignmentMark, Alignments, Document, InsetChoice, InsetOption, MarkStatus};
 
 use crate::error::CoreError;
@@ -12,9 +13,10 @@ struct Mark {
     number: u32,
     /// An empty range is an anchor: the position before that line.
     lines: Range<usize>,
+    heuristic: bool,
 }
 
-/// A complete alignment at its place in the display order.
+/// A complete alignment at its place in the display order. Nested alignments sit anywhere in the list: only the order within each sibling group counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Placed {
     number: u32,
@@ -22,7 +24,7 @@ struct Placed {
 }
 
 
-/// Where an alignment could be shown among the others: the documents that don't keep their order there move their hunk.
+/// Where an alignment could be shown among its siblings: the documents that don't keep their order there move their hunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Candidate {
     slot: usize,
@@ -39,7 +41,7 @@ pub struct AlignmentMarks {
     marks: Vec<Mark>,
     /// The number of source documents the marks were last changed for.
     documents: usize,
-    /// The complete alignments in the order they are shown. A place the user chose stays until the marks of its alignment change.
+    /// The complete alignments in the order they are shown; the siblings of each group are in the order of the group. A place the user chose stays until the marks of its alignment change.
     placed: Vec<Placed>,
     applied: Vec<ManualAlignment>,
 }
@@ -57,13 +59,18 @@ impl AlignmentMarks {
                 document.letter()
             )));
         }
-        if let Some(other) = self.of(index).find(|mark| collide(&mark.lines, &lines)) {
+        if let Some(other) = self.of(index).find(|mark| crosses(&mark.lines, &lines)) {
             return Err(invalid(format!("alignment {} of {} is in the way of {}", other.number, document.letter(), subject(&lines))));
         }
         let number = (1..)
             .find(|number| self.get(index, *number).is_none())
             .ok_or_else(|| invalid("no alignment number is free".to_string()))?;
-        self.marks.push(Mark { document: index, number, lines });
+        self.marks.push(Mark {
+            document: index,
+            number,
+            lines,
+            heuristic: false,
+        });
         self.sort();
         self.documents = line_counts.len();
         self.settle();
@@ -99,30 +106,102 @@ impl AlignmentMarks {
         Ok(())
     }
 
-    /// Shows the alignment `number` at `slot` among the other alignments, counting from 0 at the top. The documents whose order disagrees with that place move its hunk.
+    /// Shows the alignment `number` at `slot` among its siblings, counting from 0 at the top: the other alignments inside the same alignment, or the top-level ones. The documents whose order disagrees with that place move its hunk.
     pub fn place(&mut self, number: u32, slot: usize) -> Result<(), CoreError> {
         let mut list = self.arranged(self.documents);
         let Some(index) = list.iter().position(|placed| placed.number == number) else {
             return Err(invalid(format!("alignment {number} is not marked in every document")));
         };
-        let placed = list.remove(index);
-        if slot > list.len() {
-            return Err(invalid(format!("there is no place {slot} among the {} other alignments", list.len())));
+        let tree = alignment_tree(&alignments_of(&list));
+        let group: Vec<usize> = siblings(&tree, tree[index]).into_iter().filter(|member| *member != index).collect();
+        if slot > group.len() {
+            return Err(invalid(format!("there is no place {slot} among the {} other alignments", group.len())));
         }
-        let moved = moved_at(&list, &placed.alignment.parts, slot);
+        let others: Vec<Placed> = group.iter().map(|member| list[*member].clone()).collect();
+        let placed = list.remove(index);
+        let moved = moved_at(&others, &placed.alignment.parts, slot);
         if moved.iter().all(|moved| *moved) {
             return Err(invalid(format!("no document keeps its order when alignment {number} is shown there")));
         }
-        list.insert(slot, placed);
+        let group: Vec<usize> = group.into_iter().map(|member| if member > index { member - 1 } else { member }).collect();
+        list.insert(insertion_point(list.len(), &group, slot), placed);
         self.placed = list;
         Ok(())
+    }
+
+    /// Replaces the marks of the previous heuristic alignments with `alignments`, one part per document each, numbered in order with the lowest numbers no document uses. Returns the number each alignment got, or `None` for one left out because it crosses another mark, contradicts a complete alignment (see `validate_alignments`) or holds only anchors. One nested inside or around other alignments is kept.
+    pub fn replace_heuristic(&mut self, alignments: &[Vec<Range<usize>>], line_counts: &[usize]) -> Result<Vec<Option<u32>>, CoreError> {
+        self.replace_heuristic_where(alignments, line_counts, None)
+    }
+
+    /// Like `replace_heuristic`, but only the heuristic marks of the alignments nested inside the applied alignment `within` are replaced; the other heuristic marks stay. Fails when `within` is not an applied alignment.
+    pub fn replace_heuristic_within(&mut self, alignments: &[Vec<Range<usize>>], line_counts: &[usize], within: u32) -> Result<Vec<Option<u32>>, CoreError> {
+        let parts = self.applied_parts(within, line_counts.len()).ok_or(CoreError::NotApplied { number: within })?;
+        self.replace_heuristic_where(alignments, line_counts, Some((within, parts)))
+    }
+
+    /// The parts of the complete alignment `number` when the comparison was computed with it.
+    pub fn applied_parts(&self, number: u32, source_count: usize) -> Option<Vec<Range<usize>>> {
+        let (_, parts) = self.complete(source_count).into_iter().find(|(complete, _)| *complete == number)?;
+        self.applied.contains(&ManualAlignment::new(parts.clone())).then_some(parts)
+    }
+
+    fn replace_heuristic_where(&mut self, alignments: &[Vec<Range<usize>>], line_counts: &[usize], within: Option<(u32, Vec<Range<usize>>)>) -> Result<Vec<Option<u32>>, CoreError> {
+        for parts in alignments.iter() {
+            if parts.len() != line_counts.len() {
+                return Err(invalid(format!("a heuristic alignment has {} parts for {} documents", parts.len(), line_counts.len())));
+            }
+            if let Some((document, lines)) = parts.iter().enumerate().find(|(document, lines)| lines.start > lines.end || lines.end > line_counts[*document]) {
+                return Err(invalid(format!("lines {}..{} do not fit the {} lines of {}", lines.start, lines.end, line_counts[document], Document::ALL[document].letter())));
+            }
+        }
+        let replaced: Vec<u32> = match within {
+            None => self.marks.iter().filter(|mark| mark.heuristic).map(|mark| mark.number.clone()).collect(),
+            Some((number, scope)) => self
+                .complete_of(line_counts.len(), |mark| mark.heuristic)
+                .into_iter()
+                .filter(|(heuristic, parts)| *heuristic != number && parts.iter().zip(scope.iter()).all(|(part, scope)| scope.start <= part.start && part.end <= scope.end))
+                .map(|(heuristic, _)| heuristic)
+                .collect(),
+        };
+        self.marks.retain(|mark| !(mark.heuristic && replaced.contains(&mark.number)));
+        let mut numbers = Vec::with_capacity(alignments.len());
+        let mut next = 1;
+        for parts in alignments.iter() {
+            if self.collides(parts, |_| true) || self.conflicts(parts, |_| true) || parts.iter().all(|lines| lines.is_empty()) {
+                numbers.push(None);
+                continue;
+            }
+            while self.marks.iter().any(|mark| mark.number == next) {
+                next += 1;
+            }
+            for (document, lines) in parts.iter().enumerate() {
+                self.marks.push(Mark {
+                    document,
+                    number: next.clone(),
+                    lines: lines.clone(),
+                    heuristic: true,
+                });
+            }
+            numbers.push(Some(next.clone()));
+        }
+        self.sort();
+        self.documents = line_counts.len();
+        self.settle();
+        Ok(numbers)
+    }
+
+    /// Whether `parts`, one per document, cross a mark the user made or contradict an alignment the user made.
+    pub fn blocks(&self, parts: &[Range<usize>]) -> bool {
+        self.collides(parts, |mark| !mark.heuristic) || self.conflicts(parts, |mark| !mark.heuristic)
     }
 
     /// Whether some document has the alignment `number` in another place than the others, so the user has a place to choose.
     pub fn is_inset(&self, number: u32, source_count: usize) -> bool {
         let placed = self.arranged(source_count);
-        let orders = document_orders(&placed, source_count);
-        placed.iter().position(|placed| placed.number == number).is_some_and(|index| disagrees(&orders, index))
+        let alignments = alignments_of(&placed);
+        let tree = alignment_tree(&alignments);
+        placed.iter().position(|placed| placed.number == number).is_some_and(|index| disagrees(&alignments, &tree, index, source_count))
     }
 
     /// Removes every mark. The applied alignments stay, since the comparison still has them.
@@ -159,20 +238,21 @@ impl AlignmentMarks {
                 return Err(EngineError::InvalidAlignment(message.replacen("alignment 1", &format!("alignment {number}"), 1)));
             }
         }
-        for pair in numbered.windows(2) {
-            let (previous, next) = (&pair[0], &pair[1]);
-            if let Err(EngineError::InvalidAlignment(message)) = validate_alignments(&[previous.1.clone(), next.1.clone()], line_counts) {
-                return Err(EngineError::InvalidAlignment(message.replacen(
-                    "alignments 1 and 2",
-                    &format!("alignments {} and {}", previous.0, next.0),
-                    1,
-                )));
+        for (index, previous) in numbered.iter().enumerate() {
+            for next in &numbered[index + 1..] {
+                if let Err(EngineError::InvalidAlignment(message)) = validate_alignments(&[previous.1.clone(), next.1.clone()], line_counts) {
+                    return Err(EngineError::InvalidAlignment(message.replacen(
+                        "alignments 1 and 2",
+                        &format!("alignments {} and {}", previous.0, next.0),
+                        1,
+                    )));
+                }
             }
         }
         Err(error)
     }
 
-    /// Every mark with its status, the alignments that are insets with the places they could be shown at, and whether applying would change the comparison.
+    /// Every mark with its status, the alignments that are insets with the places they could be shown at among their siblings, and whether applying would change the comparison.
     pub fn summary(&self, source_count: usize) -> Alignments {
         let placed = self.arranged(source_count);
         let wanted: Vec<ManualAlignment> = placed.iter().map(|placed| placed.alignment.clone()).collect();
@@ -204,11 +284,12 @@ impl AlignmentMarks {
                     lines: mark.lines.clone(),
                     status,
                     replaced_by,
+                    heuristic: mark.heuristic,
                 })
             })
             .collect();
-        let orders = document_orders(&placed, source_count);
-        let mut insets: Vec<InsetChoice> = (0..placed.len()).filter(|index| disagrees(&orders, *index)).map(|index| inset_choice(&placed, &placed[index])).collect();
+        let tree = alignment_tree(&wanted);
+        let mut insets: Vec<InsetChoice> = (0..placed.len()).filter(|index| disagrees(&wanted, &tree, *index, source_count)).map(|index| inset_choice(&placed, &tree, index)).collect();
         insets.sort_by_key(|choice| choice.number);
         Alignments {
             marks,
@@ -216,6 +297,17 @@ impl AlignmentMarks {
             insets,
             ask: None,
         }
+    }
+
+    /// Whether `parts` cross a mark that `counts` accepts in some document, or take the very lines it marks, which the user has claimed.
+    fn collides(&self, parts: &[Range<usize>], counts: impl Fn(&Mark) -> bool) -> bool {
+        let claimed = |mark: &Mark, lines: &Range<usize>| !lines.is_empty() && mark.lines == *lines;
+        parts.iter().enumerate().any(|(document, lines)| self.of(document).any(|mark| counts(mark) && (crosses(&mark.lines, lines) || claimed(mark, lines))))
+    }
+
+    /// Whether `parts` can not be an alignment next to a complete alignment of the marks `counts` accepts.
+    fn conflicts(&self, parts: &[Range<usize>], counts: impl Fn(&Mark) -> bool + Copy) -> bool {
+        self.complete_of(parts.len(), counts).iter().any(|(_, other)| !compatible(other, parts))
     }
 
     fn of(&self, document: usize) -> impl Iterator<Item = &Mark> {
@@ -245,54 +337,87 @@ impl AlignmentMarks {
 
     /// The numbers marked in every one of `source_count` documents, with their parts, ordered by number.
     fn complete(&self, source_count: usize) -> Vec<(u32, Vec<Range<usize>>)> {
-        let mut numbers: Vec<u32> = self.marks.iter().map(|mark| mark.number.clone()).collect();
+        self.complete_of(source_count, |_| true)
+    }
+
+    /// Like `complete`, for the marks that `counts` accepts.
+    fn complete_of(&self, source_count: usize, counts: impl Fn(&Mark) -> bool + Copy) -> Vec<(u32, Vec<Range<usize>>)> {
+        let mut numbers: Vec<u32> = self.marks.iter().filter(|mark| counts(mark)).map(|mark| mark.number.clone()).collect();
         numbers.sort_unstable();
         numbers.dedup();
         numbers
             .into_iter()
             .filter_map(|number| {
                 let parts = (0..source_count)
-                    .map(|document| self.get(document, number).map(|mark| mark.lines.clone()))
+                    .map(|document| self.of(document).find(|mark| mark.number == number && counts(mark)).map(|mark| mark.lines.clone()))
                     .collect::<Option<Vec<_>>>()?;
                 Some((number, parts))
             })
             .collect()
     }
 
-    /// Every complete alignment of `source_count` documents in the order they are shown. Alignments keep the place they have as long as their marks are the same. A new one is shown where every document agrees with the order, among alignments with the same positions by number. Where the documents disagree it is shown where the fewest documents keep their order, which is the user's likely intent: the document that differs from the others is the one that moved the code on purpose. A tie goes to the first document.
+    /// Every complete alignment of `source_count` documents in the order they are shown. Alignments keep the place they have as long as their marks are the same. A new one is shown among its siblings, the alignments inside the same alignment (decided from all complete alignments; one that fits nowhere is top level). It is shown where every document agrees with the order, among alignments with the same positions by number. Where the documents disagree it is shown where the fewest documents keep their order, which is the user's likely intent: the document that differs from the others is the one that moved the code on purpose. A tie goes to the first document.
     fn arranged(&self, source_count: usize) -> Vec<Placed> {
         let complete = self.complete(source_count);
+        let enclosing = enclosing(&complete);
         let kept = |placed: &&Placed| complete.iter().any(|(number, parts)| *number == placed.number && *parts == placed.alignment.parts);
         let mut list: Vec<Placed> = self.placed.iter().filter(kept).cloned().collect();
         for (number, parts) in complete.iter() {
             if list.iter().any(|placed| placed.number == *number) {
                 continue;
             }
-            let candidates = candidates(&list, *number, parts);
-            let slot = preferred(&candidates).map_or(list.len(), |index| candidates[index].slot);
-            list.insert(
-                slot,
-                Placed {
-                    number: *number,
-                    alignment: ManualAlignment::new(parts.clone()),
-                },
-            );
+            let parent = enclosing.get(number).cloned().flatten();
+            let group: Vec<usize> = (0..list.len()).filter(|index| enclosing.get(&list[*index].number).cloned().flatten() == parent).collect();
+            let others: Vec<Placed> = group.iter().map(|index| list[*index].clone()).collect();
+            let candidates = candidates(&others, *number, parts);
+            let slot = preferred(&candidates).map_or(others.len(), |index| candidates[index].slot);
+            let placed = Placed {
+                number: *number,
+                alignment: ManualAlignment::new(parts.clone()),
+            };
+            list.insert(insertion_point(list.len(), &group, slot), placed);
         }
         list
     }
 }
 
 
-/// The order of the parts of each of `source_count` documents, for the alignments in the order they are shown.
-fn document_orders(placed: &[Placed], source_count: usize) -> Vec<Vec<usize>> {
-    let alignments: Vec<ManualAlignment> = placed.iter().map(|placed| placed.alignment.clone()).collect();
-    (0..source_count).map(|document| document_order(&alignments, document)).collect()
+/// Per complete alignment, the number of the alignment it is nested in.
+fn enclosing(complete: &[(u32, Vec<Range<usize>>)]) -> HashMap<u32, Option<u32>> {
+    let alignments: Vec<ManualAlignment> = complete.iter().map(|(_, parts)| ManualAlignment::new(parts.clone())).collect();
+    let tree = alignment_tree(&alignments);
+    complete.iter().zip(tree).map(|((number, _), parent)| (number.clone(), parent.map(|parent| complete[parent].0.clone()))).collect()
 }
 
 
-/// Whether the alignment at `index` of the list is not at the place in some document's order that it has in the list.
-fn disagrees(orders: &[Vec<usize>], index: usize) -> bool {
-    orders.iter().any(|order| order.get(index).is_some_and(|alignment| *alignment != index))
+fn alignments_of(placed: &[Placed]) -> Vec<ManualAlignment> {
+    placed.iter().map(|placed| placed.alignment.clone()).collect()
+}
+
+
+/// Where in a list of `length` entries to insert an entry that is shown at `slot` among its siblings, which sit at the indices `group`: before the sibling now at that slot, else after the last one.
+fn insertion_point(length: usize, group: &[usize], slot: usize) -> usize {
+    match group.get(slot) {
+        Some(sibling) => *sibling,
+        None => group.last().map_or(length, |last| *last + 1),
+    }
+}
+
+
+/// Whether two alignments of the same documents can stand next to each other: they are siblings or one is nested in the other. Alignments that hold only anchors are not judged.
+fn compatible(first: &[Range<usize>], second: &[Range<usize>]) -> bool {
+    if first.iter().all(|part| part.is_empty()) || second.iter().all(|part| part.is_empty()) {
+        return true;
+    }
+    let counts: Vec<usize> = first.iter().zip(second).map(|(first, second)| first.end.max(second.end)).collect();
+    validate_alignments(&[ManualAlignment::new(first.to_vec()), ManualAlignment::new(second.to_vec())], &counts).is_ok()
+}
+
+
+/// Whether the alignment at `index` of the list is not at the place in some document's order that it has in the list, among its siblings.
+fn disagrees(alignments: &[ManualAlignment], tree: &[Option<usize>], index: usize, source_count: usize) -> bool {
+    let slot = siblings(tree, tree[index]).iter().position(|member| *member == index).unwrap_or(0);
+    (0..source_count).any(|document| sibling_order(alignments, tree, tree[index], document).get(slot).is_some_and(|member| *member != index))
 }
 
 
@@ -300,11 +425,12 @@ fn disagrees(orders: &[Vec<usize>], index: usize) -> bool {
 fn moved_at(others: &[Placed], parts: &[Range<usize>], slot: usize) -> Vec<bool> {
     let mut alignments: Vec<ManualAlignment> = others.iter().map(|other| other.alignment.clone()).collect();
     alignments.insert(slot, ManualAlignment::new(parts.to_vec()));
-    (0..parts.len()).map(|document| document_order(&alignments, document)[slot] != slot).collect()
+    let tree = vec![None; alignments.len()];
+    (0..parts.len()).map(|document| sibling_order(&alignments, &tree, None, document)[slot] != slot).collect()
 }
 
 
-/// The places the alignment `number` with `parts` could be shown at among `others`, one per set of documents that would move it, in the order of their slots. A place where every document moves it is never one.
+/// The places the alignment `number` with `parts` could be shown at among its siblings `others`, one per set of documents that would move it, in the order of their slots. A place where every document moves it is never one.
 fn candidates(others: &[Placed], number: u32, parts: &[Range<usize>]) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Vec::new();
     for slot in 0..=others.len() {
@@ -336,11 +462,13 @@ fn preferred(candidates: &[Candidate]) -> Option<usize> {
 }
 
 
-/// The places `entry` could be shown at, and the one it is shown at, for the summary. `placed` is the whole list.
-fn inset_choice(placed: &[Placed], entry: &Placed) -> InsetChoice {
-    let others: Vec<Placed> = placed.iter().filter(|other| other.number != entry.number).cloned().collect();
+/// The places the alignment at `index` of `placed` could be shown at among its siblings, and the one it is shown at, for the summary.
+fn inset_choice(placed: &[Placed], tree: &[Option<usize>], index: usize) -> InsetChoice {
+    let entry = &placed[index];
+    let group = siblings(tree, tree[index]);
+    let others: Vec<Placed> = group.iter().filter(|member| **member != index).map(|member| placed[*member].clone()).collect();
     let options = candidates(&others, entry.number, &entry.alignment.parts);
-    let slot = placed.iter().position(|other| other.number == entry.number).unwrap_or(0);
+    let slot = group.iter().position(|member| *member == index).unwrap_or(0);
     let moved_now = moved_at(&others, &entry.alignment.parts, slot);
     let current = options.iter().position(|option| option.moved == moved_now).unwrap_or(0);
     let options = options
@@ -367,14 +495,11 @@ fn document_index(document: &Document, source_count: usize) -> Result<usize, Cor
     }
 }
 
-/// Whether `new` can not be marked next to `existing`: marked ranges must not overlap and an anchor must not sit inside a range. Anchors may share a position, and ranges and anchors may touch.
-fn collide(existing: &Range<usize>, new: &Range<usize>) -> bool {
-    match (existing.is_empty(), new.is_empty()) {
-        (true, true) => false,
-        (true, false) => new.start < existing.start && existing.start < new.end,
-        (false, true) => existing.start < new.start && new.start < existing.end,
-        (false, false) => existing.start < new.end && new.start < existing.end,
-    }
+/// Whether `new` can not be marked next to `existing` in one document: two ranges must not cross, that is overlap without one containing the other. Containing, equal and touching ranges are fine, and so are anchors anywhere.
+fn crosses(existing: &Range<usize>, new: &Range<usize>) -> bool {
+    let overlap = !existing.is_empty() && !new.is_empty() && existing.start < new.end && new.start < existing.end;
+    let contained = (existing.start <= new.start && new.end <= existing.end) || (new.start <= existing.start && existing.end <= new.end);
+    overlap && !contained
 }
 
 fn subject(lines: &Range<usize>) -> String {
@@ -391,6 +516,8 @@ fn invalid(reason: String) -> CoreError {
 
 #[cfg(test)]
 mod tests {
+    use kdiff4_protocol::engine::document_order;
+
     use super::*;
 
     const COUNTS: [usize; 3] = [10, 10, 10];
@@ -441,13 +568,21 @@ mod tests {
     }
 
     #[test]
-    fn ranges_must_not_overlap_and_anchors_must_not_sit_inside_one() {
+    fn ranges_must_not_cross() {
         let mut marks = marks(&[(Document::A, 2..5)]);
         assert_eq!(reason(marks.mark(Document::A, 4..6, &COUNTS)), "alignment 1 of A is in the way of lines 5 to 6");
-        assert_eq!(reason(marks.mark(Document::A, 3..4, &COUNTS)), "alignment 1 of A is in the way of lines 4 to 4");
-        assert_eq!(reason(marks.mark(Document::A, 3..3, &COUNTS)), "alignment 1 of A is in the way of an anchor before line 4");
-        assert_eq!(reason(marks.mark(Document::A, 0..8, &COUNTS)), "alignment 1 of A is in the way of lines 1 to 8");
+        assert_eq!(reason(marks.mark(Document::A, 0..3, &COUNTS)), "alignment 1 of A is in the way of lines 1 to 3");
         assert_eq!(numbers(&marks, Document::A).len(), 1);
+    }
+
+    #[test]
+    fn ranges_may_contain_each_other_and_anchors_may_sit_inside_ranges() {
+        let mut marks = marks(&[(Document::A, 2..5)]);
+        assert!(marks.mark(Document::A, 3..4, &COUNTS).is_ok());
+        assert!(marks.mark(Document::A, 3..3, &COUNTS).is_ok());
+        assert!(marks.mark(Document::A, 0..8, &COUNTS).is_ok());
+        assert!(marks.mark(Document::A, 2..5, &COUNTS).is_ok());
+        assert_eq!(numbers(&marks, Document::A).len(), 5);
     }
 
     #[test]
@@ -775,5 +910,156 @@ mod tests {
         assert!(marks.applied().is_empty());
         assert!(marks.summary(3).marks.is_empty());
         assert!(!marks.summary(3).changed);
+    }
+
+
+    #[test]
+    fn heuristic_marks_take_numbers_no_document_uses_and_skip_collisions() {
+        let mut marks = marks(&[(Document::A, 0..2), (Document::B, 5..6)]);
+        let numbers = marks.replace_heuristic(&[vec![2..3, 2..3, 2..3], vec![1..3, 7..8, 7..8], vec![4..4, 4..4, 4..4], vec![8..9, 8..9, 9..9]], &COUNTS).unwrap();
+        assert_eq!(numbers, vec![Some(2), None, None, Some(3)]);
+        let summary = marks.summary(3);
+        let heuristic: Vec<(Document, u32, Range<usize>)> = summary
+            .marks
+            .iter()
+            .filter(|mark| mark.heuristic)
+            .map(|mark| (mark.document.clone(), mark.number, mark.lines.clone()))
+            .collect();
+        assert_eq!(heuristic.len(), 6);
+        assert!(heuristic.contains(&(Document::C, 3, 9..9)));
+        assert_eq!(summary.marks.iter().filter(|mark| !mark.heuristic).count(), 2);
+    }
+
+
+    #[test]
+    fn heuristic_marks_replace_only_the_previous_heuristic_marks() {
+        let mut marks = marks(&[(Document::A, 0..1), (Document::B, 0..1), (Document::C, 0..1)]);
+        marks.replace_heuristic(&[vec![2..3, 2..3, 2..3], vec![4..5, 4..5, 4..5]], &COUNTS).unwrap();
+        marks.replace_heuristic(&[vec![6..7, 6..7, 6..7]], &COUNTS).unwrap();
+        let lines: Vec<(u32, Range<usize>, bool)> = marks
+            .summary(3)
+            .marks
+            .iter()
+            .filter(|mark| mark.document == Document::A)
+            .map(|mark| (mark.number, mark.lines.clone(), mark.heuristic))
+            .collect();
+        assert_eq!(lines, vec![(1, 0..1, false), (2, 6..7, true)]);
+        assert!(marks.blocks(&[0..1, 3..4, 3..4]));
+        assert!(!marks.blocks(&[6..7, 6..7, 6..7]));
+    }
+
+
+    #[test]
+    fn heuristic_alignments_must_fit_the_documents() {
+        let mut marks = AlignmentMarks::default();
+        assert_eq!(reason(marks.replace_heuristic(&[vec![0..1, 0..1]], &COUNTS)), "a heuristic alignment has 2 parts for 3 documents");
+        assert_eq!(reason(marks.replace_heuristic(&[vec![0..1, 0..1, 9..11]], &COUNTS)), "lines 9..11 do not fit the 10 lines of C");
+    }
+
+
+    // Three documents with an outer alignment 1 and an inner one 2 inside it.
+    fn nested_marks() -> AlignmentMarks {
+        marks(&[
+            (Document::A, 0..8),
+            (Document::B, 0..8),
+            (Document::C, 0..8),
+            (Document::A, 2..4),
+            (Document::B, 2..4),
+            (Document::C, 2..4),
+        ])
+    }
+
+    #[test]
+    fn nested_marks_give_nested_alignments() {
+        let alignments = nested_marks().to_apply(&COUNTS).unwrap();
+        assert_eq!(alignments, [ManualAlignment::new(vec![0..8, 0..8, 0..8]), ManualAlignment::new(vec![2..4, 2..4, 2..4])]);
+        assert_eq!(alignment_tree(&alignments), [None, Some(0)]);
+        assert!(nested_marks().summary(3).insets.is_empty());
+    }
+
+    #[test]
+    fn a_nested_alignment_that_differs_in_order_is_an_inset_among_its_siblings_only() {
+        let mut marks = nested_marks();
+        for (document, lines) in [(Document::A, 4..6), (Document::B, 5..7), (Document::C, 4..6), (Document::A, 6..7), (Document::B, 4..5), (Document::C, 6..7)] {
+            marks.mark(document, lines, &COUNTS).unwrap();
+        }
+        let alignments = marks.to_apply(&COUNTS).unwrap();
+        assert_eq!(alignments.len(), 4);
+        assert_eq!(alignment_tree(&alignments), [None, Some(0), Some(0), Some(0)]);
+        let summary = marks.summary(3);
+        let numbers: Vec<u32> = summary.insets.iter().map(|choice| choice.number).collect();
+        assert_eq!(numbers, [3, 4]);
+        let option = |choice: &InsetChoice| choice.options.iter().map(|option| (option.slot, option.above, option.below)).collect::<Vec<_>>();
+        assert_eq!(option(&summary.insets[0]), [(1, Some(2), Some(4)), (2, Some(4), None)]);
+        assert!(!marks.is_inset(1, 3) && !marks.is_inset(2, 3));
+        assert!(marks.is_inset(3, 3) && marks.is_inset(4, 3));
+    }
+
+    #[test]
+    fn a_new_alignment_is_placed_among_its_siblings() {
+        let mut marks = nested_marks();
+        marks.mark(Document::A, 9..10, &COUNTS).unwrap();
+        marks.mark(Document::B, 9..10, &COUNTS).unwrap();
+        marks.mark(Document::C, 9..10, &COUNTS).unwrap();
+        marks.mark(Document::A, 5..6, &COUNTS).unwrap();
+        marks.mark(Document::B, 5..6, &COUNTS).unwrap();
+        marks.mark(Document::C, 5..6, &COUNTS).unwrap();
+        let top_level = |marks: &AlignmentMarks| -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+            let alignments = marks.to_apply(&COUNTS).unwrap();
+            let tree = alignment_tree(&alignments);
+            let outer = alignments.iter().position(|alignment| alignment.parts[0] == (0..8)).unwrap();
+            let first = |parent| siblings(&tree, parent).iter().map(|index| alignments[*index].parts[0].clone()).collect::<Vec<_>>();
+            (first(None), first(Some(outer)))
+        };
+        assert_eq!(top_level(&marks), (vec![0..8, 9..10], vec![2..4, 5..6]));
+        assert_eq!(reason(marks.place(4, 2)), "there is no place 2 among the 1 other alignments");
+        assert_eq!(reason(marks.place(4, 0)), "no document keeps its order when alignment 4 is shown there");
+        marks.place(4, 1).unwrap();
+        assert_eq!(top_level(&marks), (vec![0..8, 9..10], vec![2..4, 5..6]));
+    }
+
+    #[test]
+    fn nesting_that_documents_see_differently_is_reported_with_the_numbers_of_the_user() {
+        let marks = marks(&[
+            (Document::A, 8..9),
+            (Document::B, 8..9),
+            (Document::C, 8..9),
+            (Document::A, 0..6),
+            (Document::A, 2..4),
+            (Document::B, 2..4),
+            (Document::B, 0..6),
+            (Document::C, 0..6),
+            (Document::C, 2..4),
+        ]);
+        let Err(EngineError::InvalidAlignment(message)) = marks.to_apply(&COUNTS) else {
+            panic!("expected an invalid alignment")
+        };
+        assert_eq!(message, "alignments 3 and 2 overlap in A");
+    }
+
+    #[test]
+    fn heuristic_alignments_may_sit_inside_or_around_alignments_of_the_user() {
+        let mut marks = nested_marks();
+        let numbers = marks.replace_heuristic(&[vec![3..4, 3..4, 3..4], vec![0..9, 0..9, 0..9], vec![1..5, 1..5, 1..3], vec![2..4, 2..4, 2..4]], &COUNTS).unwrap();
+        assert_eq!(numbers, [Some(3), Some(4), None, None]);
+        assert!(!marks.blocks(&[1..2, 1..2, 1..2]));
+        assert!(marks.blocks(&[1..5, 1..5, 1..3]));
+        assert!(marks.blocks(&[2..4, 2..4, 5..6]));
+    }
+
+
+    #[test]
+    fn heuristic_marks_within_an_applied_alignment_replace_only_the_ones_nested_in_it() {
+        let mut marks = AlignmentMarks::default();
+        marks.replace_heuristic(&[vec![0..8, 0..8, 0..8], vec![2..4, 2..4, 2..4], vec![9..10, 9..10, 9..10]], &COUNTS).unwrap();
+        assert_eq!(marks.applied_parts(1, 3), None);
+        assert!(matches!(marks.replace_heuristic_within(&[], &COUNTS, 1), Err(CoreError::NotApplied { number: 1 })));
+        marks.set_applied(marks.to_apply(&COUNTS).unwrap());
+        assert_eq!(marks.applied_parts(1, 3), Some(vec![0..8, 0..8, 0..8]));
+        let numbers = marks.replace_heuristic_within(&[vec![5..6, 5..6, 5..6], vec![0..8, 0..8, 0..8]], &COUNTS, 1).unwrap();
+        assert_eq!(numbers, [Some(2), None]);
+        let lines: Vec<(u32, Range<usize>)> = marks.summary(3).marks.iter().filter(|mark| mark.document == Document::A).map(|mark| (mark.number, mark.lines.clone())).collect();
+        assert_eq!(lines, [(1, 0..8), (2, 5..6), (3, 9..10)]);
+        assert!(matches!(marks.replace_heuristic_within(&[], &COUNTS, 2), Err(CoreError::NotApplied { number: 2 })));
     }
 }

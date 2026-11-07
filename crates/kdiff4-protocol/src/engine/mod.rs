@@ -12,9 +12,9 @@ use thiserror::Error;
 
 use crate::messages::{Document, ErrorKind, ProtocolError};
 
-pub use alignment::{parts_collide, validate_alignments};
+pub use alignment::{alignment_tree, parts_collide, siblings, validate_alignments};
 pub use check::check_comparison;
-pub use inset::{document_order, moved_parts};
+pub use inset::{document_order, moved_parts, sibling_order};
 
 /// Interned line key. Two lines are equal when their tokens are equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -61,6 +61,14 @@ pub struct ComparisonOptions {
     pub align_b_with_c: bool,
     /// Lines longer than this, in characters, are marked as different as a whole.
     pub char_diff_line_limit: usize,
+    /// Pair the lines of a changed chunk by how alike they are instead of by position.
+    #[serde(default = "pair_similar_lines_default")]
+    pub pair_similar_lines: bool,
+}
+
+
+fn pair_similar_lines_default() -> bool {
+    true
 }
 
 impl Default for ComparisonOptions {
@@ -70,11 +78,12 @@ impl Default for ComparisonOptions {
             try_hard: false,
             align_b_with_c: false,
             char_diff_line_limit: 10_000,
+            pair_similar_lines: true,
         }
     }
 }
 
-/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line. Alignments are listed in display order. A document may hold its parts in another order than the list: they are exchanged between the places the parts have in the document (see Inset alignment in `ARCHITECTURE.md`).
+/// One part per source document, in A, B, C order. An empty range is an anchor: the position before that line. Alignments are listed in display order. An alignment may lie inside another one in every document: it is nested in it (see Nested alignment in `ARCHITECTURE.md`). A document may hold the parts of siblings in another order than the list: they are exchanged between the places the parts have in the document (see Inset alignment in `ARCHITECTURE.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManualAlignment {
     pub parts: Vec<Range<usize>>,
@@ -155,13 +164,15 @@ pub struct EngineCapabilities {
     pub id: String,
     pub version: String,
     pub three_way: bool,
-    /// Honors manual alignments itself. Otherwise the segmentation helper compares each segment separately.
+    /// Honors manual alignments itself. Otherwise the segmentation helper compares each segment separately. Nested alignments always go through the helper.
     pub manual_alignment: bool,
     pub char_diff: bool,
     pub progress: bool,
     pub algorithms: Vec<DiffAlgorithm>,
     pub try_hard: bool,
     pub align_b_with_c: bool,
+    #[serde(default)]
+    pub pair_similar_lines: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,9 +281,10 @@ pub fn run_comparison(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, j
     Ok(comparison)
 }
 
-/// Compares input whose alignments keep their order in every document.
+/// Compares input whose siblings keep their order in every document. Engines are not expected to handle nested alignments, so those always go through the segmentation helper.
 fn compare_aligned(engine: &dyn ComparisonEngine, input: &CompareInput<'_>, job: &Job<'_>, capabilities: &EngineCapabilities) -> Result<Comparison, EngineError> {
-    if input.alignments.is_empty() || capabilities.manual_alignment {
+    let nested = alignment_tree(input.alignments).iter().any(|parent| parent.is_some());
+    if input.alignments.is_empty() || (capabilities.manual_alignment && !nested) {
         engine.compare(input, job)
     } else {
         alignment::compare_segments(engine, input, job)

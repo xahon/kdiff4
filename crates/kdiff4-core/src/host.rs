@@ -1,7 +1,7 @@
 use std::io;
 use std::thread::{self, JoinHandle};
 
-use kdiff4_protocol::{Change, Command, CurrentRegion, Delta, Event, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
+use kdiff4_protocol::{Change, Command, CurrentRegion, Delta, Event, HeuristicProposal, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
 
 use crate::engine_registry::EngineRegistry;
 use crate::error::CoreError;
@@ -96,6 +96,21 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
                 let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
             }
             return Ok(());
+        }
+        Command::ProposeHeuristicAlignments { language, options, within } => {
+            let proposal = active(session)?.propose_heuristic_alignments(&language, &options, within)?;
+            log::info!("host: Heuristics Alignment proposes {} alignments for {language}", proposal.matches.len());
+            let _ = endpoint.send(HostMessage::Event(Event::HeuristicProposal(HeuristicProposal { cause: Some(id), ..proposal })));
+            return Ok(());
+        }
+        Command::ApplyHeuristicAlignments { alignments, confirmed, within } => {
+            let active = active(session)?;
+            if active.apply_heuristic_alignments(&alignments, within, confirmed, registry.default_engine())? {
+                log::info!("host: {} heuristic alignments applied", alignments.len());
+                let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
+                return Ok(());
+            }
+            active.alignment_marks_change()
         }
         Command::MarkAlignment { document, lines } => active(session)?.mark_alignment(document, lines)?,
         Command::RemoveAlignmentMark { document, number } => active(session)?.remove_alignment_mark(document, number)?,

@@ -588,6 +588,7 @@ mod tests {
                 lines: 0..1,
                 status: kdiff4_protocol::MarkStatus::Pending,
                 replaced_by: None,
+                heuristic: false,
             }],
             changed: false,
             ..Alignments::default()

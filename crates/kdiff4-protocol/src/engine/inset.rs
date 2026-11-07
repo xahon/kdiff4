@@ -1,36 +1,67 @@
 use std::cmp::Reverse;
 use std::ops::Range;
 
-use super::{CompareInput, Comparison, ComparisonEngine, EngineCapabilities, EngineError, Job, ManualAlignment, Region, Row, SourceLines, Token, check_comparison, compare_aligned, document_letter};
+use super::{CompareInput, Comparison, ComparisonEngine, EngineCapabilities, EngineError, Job, ManualAlignment, Region, Row, SourceLines, Token, alignment_tree, check_comparison, compare_aligned, document_letter, siblings};
 
 
-/// The alignment indices of the list in the order their parts have in `document`: `order[slot]` is the alignment whose part is the `slot`-th one. Parts at one position keep the order of the list.
-pub fn document_order(alignments: &[ManualAlignment], document: usize) -> Vec<usize> {
+/// The alignment indices of one sibling group (see `siblings`) in the order their parts have in `document`. Parts at one position keep the order of the list.
+pub fn sibling_order(alignments: &[ManualAlignment], tree: &[Option<usize>], parent: Option<usize>, document: usize) -> Vec<usize> {
     let position = |index: &usize| {
         let part = alignments[*index].parts.get(document).cloned().unwrap_or(0..0);
         (part.start, part.end, *index)
     };
-    let mut order: Vec<usize> = (0..alignments.len()).collect();
+    let mut order = siblings(tree, parent);
     order.sort_by_key(position);
     order
 }
 
 
-/// Whether some document holds the alignments in another order than the list.
-pub(super) fn has_insets(alignments: &[ManualAlignment]) -> bool {
-    let documents = alignments.first().map_or(0, |alignment| alignment.parts.len());
-    (0..documents).any(|document| document_order(alignments, document).iter().enumerate().any(|(slot, index)| slot != *index))
+/// The alignment indices of the list in the order their parts have in `document`: each alignment is followed by the alignments nested in it, and every sibling group is in the order of its parts. For alignments that are not nested that is the order of the parts.
+pub fn document_order(alignments: &[ManualAlignment], document: usize) -> Vec<usize> {
+    let tree = alignment_tree(alignments);
+    let mut order = Vec::with_capacity(alignments.len());
+    push_group_order(alignments, &tree, None, document, &mut order);
+    order
 }
 
 
-/// Per alignment of the list, for a part that `document` shows away from its place: the index of the alignment whose part is shown in the place it had. The parts that stay are a longest run of the document that already has the order of the list, and of several the one with the alignments listed first; the others are the moved ones. The parts in between only follow along when the places are exchanged.
+fn push_group_order(alignments: &[ManualAlignment], tree: &[Option<usize>], parent: Option<usize>, document: usize, order: &mut Vec<usize>) {
+    for index in sibling_order(alignments, tree, parent, document) {
+        order.push(index);
+        push_group_order(alignments, tree, Some(index), document, order);
+    }
+}
+
+
+/// The sibling groups of a tree: the top level and the children of every alignment.
+fn groups(tree: &[Option<usize>]) -> impl Iterator<Item = Option<usize>> {
+    std::iter::once(None).chain((0..tree.len()).map(Some))
+}
+
+
+/// Whether some document holds the alignments of a sibling group in another order than the list.
+pub(super) fn has_insets(alignments: &[ManualAlignment]) -> bool {
+    let documents = alignments.first().map_or(0, |alignment| alignment.parts.len());
+    let tree = alignment_tree(alignments);
+    groups(&tree).any(|parent| {
+        let members = siblings(&tree, parent);
+        (0..documents).any(|document| sibling_order(alignments, &tree, parent, document) != members)
+    })
+}
+
+
+/// Per alignment of the list, for a part that `document` shows away from its place: the index of the alignment whose part is shown in the place it had. This is decided within each sibling group. The parts that stay are a longest run of the group that already has the order of the list, and of several the one with the alignments listed first; the others are the moved ones. The parts in between only follow along when the places are exchanged.
 pub fn moved_parts(alignments: &[ManualAlignment], document: usize) -> Vec<Option<usize>> {
-    let order = document_order(alignments, document);
-    let kept = longest_increasing(&order);
+    let tree = alignment_tree(alignments);
     let mut moved = vec![None; alignments.len()];
-    for (slot, index) in order.iter().enumerate() {
-        if !kept[slot] {
-            moved[*index] = Some(slot);
+    for parent in groups(&tree) {
+        let members = siblings(&tree, parent);
+        let order = sibling_order(alignments, &tree, parent, document);
+        let kept = longest_increasing(&order);
+        for (slot, index) in order.iter().enumerate() {
+            if !kept[slot] {
+                moved[*index] = Some(members[slot]);
+            }
         }
     }
     moved
@@ -61,7 +92,7 @@ fn longest_increasing(order: &[usize]) -> Vec<bool> {
 }
 
 
-/// The source documents in display order. A document that holds its alignments in another order than the list keeps the text between its parts where it is and exchanges the parts between the places they have: the place of the `n`-th part in the document shows the part of the `n`-th alignment of the list. So every document has the alignments in the order of the list, and no text is added or lost between them.
+/// The source documents in display order. Per sibling group, a document that holds its alignments in another order than the list keeps the text between their parts where it is and exchanges the parts between the places they have: the place of the `n`-th part in the document shows the part of the `n`-th alignment of the group. A part carries its whole content, nested alignments included, and those are laid out the same way inside it. So every document has the siblings in the order of the list, and no text is added or lost between them.
 pub(super) struct Layout {
     /// Per document, the document line of every line in display order.
     lines: Vec<Vec<usize>>,
@@ -74,10 +105,11 @@ pub(super) struct Layout {
 impl Layout {
     /// For alignments that passed `validate_alignments`.
     pub fn new(alignments: &[ManualAlignment], line_counts: &[usize]) -> Layout {
+        let tree = alignment_tree(alignments);
         let mut lines = Vec::with_capacity(line_counts.len());
         let mut parts = vec![Vec::with_capacity(line_counts.len()); alignments.len()];
         for (document, count) in line_counts.iter().enumerate() {
-            let (document_lines, document_parts) = document_layout(alignments, document, *count);
+            let (document_lines, document_parts) = document_layout(alignments, &tree, document, *count);
             lines.push(document_lines);
             for (alignment, part) in parts.iter_mut().zip(document_parts) {
                 alignment.push(part);
@@ -212,20 +244,27 @@ pub(super) fn compare_with_insets(engine: &dyn ComparisonEngine, input: &Compare
 
 
 /// One document's lines in display order, and the place of each alignment's part in them.
-fn document_layout(alignments: &[ManualAlignment], document: usize, count: usize) -> (Vec<usize>, Vec<Range<usize>>) {
-    let part = |index: usize| alignments[index].parts.get(document).cloned().unwrap_or(0..0);
+fn document_layout(alignments: &[ManualAlignment], tree: &[Option<usize>], document: usize, count: usize) -> (Vec<usize>, Vec<Range<usize>>) {
     let mut lines = Vec::with_capacity(count);
     let mut places = vec![0..0; alignments.len()];
-    let mut cursor = 0;
-    for (shown, own) in document_order(alignments, document).into_iter().map(&part).enumerate() {
+    lay_out_group(alignments, tree, document, None, 0..count, &mut lines, &mut places);
+    (lines, places)
+}
+
+
+/// Appends the lines of `area` in display order: the parts of the group `parent` exchange their places, and each part is laid out with its own nested alignments.
+fn lay_out_group(alignments: &[ManualAlignment], tree: &[Option<usize>], document: usize, parent: Option<usize>, area: Range<usize>, lines: &mut Vec<usize>, places: &mut [Range<usize>]) {
+    let part = |index: usize| alignments[index].parts.get(document).cloned().unwrap_or(0..0);
+    let members = siblings(tree, parent);
+    let mut cursor = area.start;
+    for (shown, own) in sibling_order(alignments, tree, parent, document).into_iter().map(&part).enumerate() {
         lines.extend(cursor..own.start);
         let start = lines.len();
-        lines.extend(part(shown));
-        places[shown] = start..lines.len();
+        lay_out_group(alignments, tree, document, Some(members[shown]), part(members[shown]), lines, places);
+        places[members[shown]] = start..lines.len();
         cursor = own.end;
     }
-    lines.extend(cursor..count);
-    (lines, places)
+    lines.extend(cursor..area.end);
 }
 
 
@@ -422,6 +461,73 @@ mod tests {
         };
         let error = layout.to_documents(vec![region]).unwrap_err();
         assert!(matches!(error, EngineError::InvalidResult(_)), "{error:?}");
+    }
+
+    const UNCHANGED_DIFF: RegionStatus = RegionStatus::Diff(HunkChange::Unchanged);
+
+    // B has the second function first. The first function holds a nested alignment, which moves along with it.
+    fn parent_with_child() -> (Vec<Vec<&'static str>>, [ManualAlignment; 3]) {
+        let documents = vec![vec!["pre", "p1a", "c1", "p1b", "mid", "p2", "post"], vec!["pre", "p2", "mid", "p1a", "c1", "p1b", "post"]];
+        (documents, [alignment(&[1..4, 3..6]), alignment(&[5..6, 1..2]), alignment(&[2..3, 4..5])])
+    }
+
+    #[test]
+    fn a_nested_alignment_moves_with_its_parent() {
+        let (documents, alignments) = parent_with_child();
+        let layout = Layout::new(&alignments, &[7, 7]);
+        assert_eq!(layout.lines[1], [0, 3, 4, 5, 2, 1, 6]);
+        assert_eq!(layout.alignments, [alignment(&[1..4, 1..4]), alignment(&[5..6, 5..6]), alignment(&[2..3, 2..3])]);
+        assert_eq!(moved_parts(&alignments, 1), [None, Some(0), None]);
+        let documents: Vec<&[&'static str]> = documents.iter().map(|document| document.as_slice()).collect();
+        let comparison = compare(&Fixture::new(&documents), &alignments);
+        let expected = [
+            (vec![0..1, 0..1], UNCHANGED_DIFF),
+            (vec![1..2, 3..4], UNCHANGED_DIFF),
+            (vec![2..3, 4..5], UNCHANGED_DIFF),
+            (vec![3..4, 5..6], UNCHANGED_DIFF),
+            (vec![4..5, 2..3], UNCHANGED_DIFF),
+            (vec![5..6, 1..2], UNCHANGED_DIFF),
+            (vec![6..7, 6..7], UNCHANGED_DIFF),
+        ];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    // The children of the aligned parent are in the other order in B.
+    fn swapped_children() -> (Vec<Vec<&'static str>>, [ManualAlignment; 4]) {
+        let documents = vec![vec!["pre", "x", "c1", "m", "c2", "y", "q"], vec!["pre", "x", "c2", "m", "c1", "y", "q"]];
+        (documents, [alignment(&[1..6, 1..6]), alignment(&[2..3, 4..5]), alignment(&[4..5, 2..3]), alignment(&[6..7, 6..7])])
+    }
+
+    #[test]
+    fn children_swapped_inside_an_aligned_parent_swap_only_inside_it() {
+        let (documents, alignments) = swapped_children();
+        let layout = Layout::new(&alignments, &[7, 7]);
+        assert_eq!(layout.lines[0], [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(layout.lines[1], [0, 1, 4, 3, 2, 5, 6]);
+        assert_eq!(layout.alignments, [alignment(&[1..6, 1..6]), alignment(&[2..3, 2..3]), alignment(&[4..5, 4..5]), alignment(&[6..7, 6..7])]);
+        let documents: Vec<&[&'static str]> = documents.iter().map(|document| document.as_slice()).collect();
+        let comparison = compare(&Fixture::new(&documents), &alignments);
+        let expected = [
+            (vec![0..1, 0..1], UNCHANGED_DIFF),
+            (vec![1..2, 1..2], UNCHANGED_DIFF),
+            (vec![2..3, 4..5], UNCHANGED_DIFF),
+            (vec![3..4, 3..4], UNCHANGED_DIFF),
+            (vec![4..5, 2..3], UNCHANGED_DIFF),
+            (vec![5..6, 5..6], UNCHANGED_DIFF),
+            (vec![6..7, 6..7], UNCHANGED_DIFF),
+        ];
+        assert_eq!(hunks(&comparison), expected);
+    }
+
+    #[test]
+    fn insets_are_decided_per_sibling_group() {
+        let (_, alignments) = swapped_children();
+        assert!(has_insets(&alignments));
+        assert!(!has_insets(&alignments[..1]));
+        assert_eq!(moved_parts(&alignments, 0), [None, None, None, None]);
+        assert_eq!(moved_parts(&alignments, 1), [None, None, Some(1), None]);
+        assert_eq!(document_order(&alignments, 1), [0, 2, 1, 3]);
+        assert_eq!(sibling_order(&alignments, &alignment_tree(&alignments), None, 1), [0, 3]);
     }
 
     #[test]

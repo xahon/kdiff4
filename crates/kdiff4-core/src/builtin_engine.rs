@@ -7,6 +7,7 @@ use kdiff4_protocol::engine::{
 };
 
 use crate::fine_diff;
+use crate::similar_lines;
 
 pub const BUILTIN_ENGINE_ID: &str = "builtin";
 
@@ -29,6 +30,7 @@ impl ComparisonEngine for BuiltinEngine {
             algorithms: vec![DiffAlgorithm::Histogram, DiffAlgorithm::Myers],
             try_hard: true,
             align_b_with_c: false,
+            pair_similar_lines: true,
         }
     }
 
@@ -41,15 +43,21 @@ impl ComparisonEngine for BuiltinEngine {
         let rows = match input.sources.as_slice() {
             [a, b] => {
                 job.check_canceled()?;
-                let rows = pairs(algorithm, a.tokens, b.tokens);
+                let rows = pairs(algorithm, a, b, false);
                 job.report(1, steps);
                 rows.into_iter().map(|(line_a, line_b)| vec![line_a, line_b]).collect()
             }
-            [a, b, c] => three_way_rows(algorithm, a, b, c, job, steps)?,
+            [a, b, c] => three_way_rows(algorithm, a, b, c, false, Some((job, steps)))?,
             sources => return Err(EngineError::InvalidInput(format!("{} source documents, expected 2 or 3", sources.len()))),
         };
         job.check_canceled()?;
-        let regions = self.regions(input, rows)?;
+        let mut regions = self.regions(input, rows)?;
+        if input.options.pair_similar_lines {
+            for region in regions.iter_mut().filter(|region| !matches!(region.status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged))) {
+                job.check_canceled()?;
+                pair_similar_rows(algorithm, input, region)?;
+            }
+        }
         job.report(steps, steps);
         Ok(Comparison { regions })
     }
@@ -167,10 +175,12 @@ fn range(range: &Range<u32>) -> Range<usize> {
     range.start as usize..range.end as usize
 }
 
-/// Rows of a 2-way alignment of `left` and `right`: equal lines share a row, the lines of a changed chunk are paired by position, and the rest of the longer side gets rows of its own.
-fn pairs(algorithm: Algorithm, left: &[Token], right: &[Token]) -> Vec<(Option<usize>, Option<usize>)> {
+/// Rows of a 2-way alignment of `left` and `right`: equal lines share a row, the lines of a changed chunk are paired by how alike they are with `similar`, otherwise by position, and the rest of the longer side gets rows of its own.
+fn pairs(algorithm: Algorithm, left: &SourceLines<'_>, right: &SourceLines<'_>, similar: bool) -> Vec<(Option<usize>, Option<usize>)> {
     let values = |tokens: &[Token]| tokens.iter().map(|token| token.0.clone()).collect::<Vec<u32>>();
     let mut rows = Vec::with_capacity(left.len().max(right.len()));
+    let (left_lines, right_lines) = (left.lines, right.lines);
+    let (left, right) = (left.tokens, right.tokens);
     let (mut next_left, mut next_right) = (0, 0);
     let equal_rows = |rows: &mut Vec<(Option<usize>, Option<usize>)>, next_left: &mut usize, next_right: &mut usize, end_left: usize| {
         while *next_left < end_left {
@@ -182,10 +192,15 @@ fn pairs(algorithm: Algorithm, left: &[Token], right: &[Token]) -> Vec<(Option<u
     for hunk in diff_hunks(algorithm, values(left), values(right)) {
         let (before, after) = (range(&hunk.before), range(&hunk.after));
         equal_rows(&mut rows, &mut next_left, &mut next_right, before.start.clone());
-        let paired = before.len().min(after.len());
-        rows.extend((0..paired).map(|offset| (Some(before.start + offset), Some(after.start + offset))));
-        rows.extend((before.start + paired..before.end).map(|line| (Some(line), None)));
-        rows.extend((after.start + paired..after.end).map(|line| (None, Some(line))));
+        if similar {
+            let chunk = similar_lines::chunk_rows(left_lines.get(before.clone()).unwrap_or(&[]), right_lines.get(after.clone()).unwrap_or(&[]));
+            rows.extend(chunk.into_iter().map(|(line_before, line_after)| (line_before.map(|line| line + before.start), line_after.map(|line| line + after.start))));
+        } else {
+            let paired = before.len().min(after.len());
+            rows.extend((0..paired).map(|offset| (Some(before.start + offset), Some(after.start + offset))));
+            rows.extend((before.start + paired..before.end).map(|line| (Some(line), None)));
+            rows.extend((after.start + paired..after.end).map(|line| (None, Some(line))));
+        }
         next_left = before.end;
         next_right = after.end;
     }
@@ -224,18 +239,23 @@ impl Pairing {
 }
 
 /// B and C are each aligned with A. Lines of B and C between the same two lines of A are aligned with each other, so equal ones share a row.
-fn three_way_rows(algorithm: Algorithm, a: &SourceLines<'_>, b: &SourceLines<'_>, c: &SourceLines<'_>, job: &Job<'_>, steps: u64) -> Result<Vec<Vec<Option<usize>>>, EngineError> {
-    job.check_canceled()?;
-    let with_b = Pairing::new(pairs(algorithm, a.tokens, b.tokens), a.len());
-    job.report(1, steps);
-    job.check_canceled()?;
-    let with_c = Pairing::new(pairs(algorithm, a.tokens, c.tokens), a.len());
-    job.report(2, steps);
+fn three_way_rows(algorithm: Algorithm, a: &SourceLines<'_>, b: &SourceLines<'_>, c: &SourceLines<'_>, similar: bool, job: Option<(&Job<'_>, u64)>) -> Result<Vec<Vec<Option<usize>>>, EngineError> {
+    let step = |done: u64| -> Result<(), EngineError> {
+        if let Some((job, steps)) = job {
+            job.check_canceled()?;
+            job.report(done, steps.clone());
+        }
+        Ok(())
+    };
+    let with_b = Pairing::new(pairs(algorithm, a, b, similar), a.len());
+    step(1)?;
+    let with_c = Pairing::new(pairs(algorithm, a, c, similar), a.len());
+    step(2)?;
     let mut rows = Vec::new();
     for line_a in 0..=a.len() {
         let (run_b, run_c) = (with_b.unpaired[line_a].clone(), with_c.unpaired[line_a].clone());
         if !run_b.is_empty() || !run_c.is_empty() {
-            for (line_b, line_c) in pairs(algorithm, b.slice(run_b.clone()).tokens, c.slice(run_c.clone()).tokens) {
+            for (line_b, line_c) in pairs(algorithm, &b.slice(run_b.clone()), &c.slice(run_c.clone()), similar) {
                 rows.push(vec![None, line_b.map(|line| line + run_b.start), line_c.map(|line| line + run_c.start)]);
             }
         }
@@ -244,6 +264,39 @@ fn three_way_rows(algorithm: Algorithm, a: &SourceLines<'_>, b: &SourceLines<'_>
         }
     }
     Ok(rows)
+}
+
+/// Pairs the rows of a changed region again, from its hunks alone, by how alike their lines are. The new rows are kept when they score higher (see `similar_lines::row_score`) and no row of them has an equal line in every document, so the region keeps its hunks and status and only its rows change.
+fn pair_similar_rows(algorithm: Algorithm, input: &CompareInput<'_>, region: &mut Region) -> Result<(), EngineError> {
+    let hunks: Vec<SourceLines<'_>> = input.sources.iter().zip(region.hunks.iter()).map(|(source, hunk)| source.slice(hunk.clone())).collect();
+    let relative = match hunks.as_slice() {
+        [a, b] => pairs(algorithm, a, b, true).into_iter().map(|(line_a, line_b)| vec![line_a, line_b]).collect(),
+        [a, b, c] => three_way_rows(algorithm, a, b, c, true, None)?,
+        _ => return Ok(()),
+    };
+    let texts = |row: &[Option<usize>], base: &dyn Fn(usize) -> usize| -> Vec<Option<&str>> {
+        row.iter()
+            .enumerate()
+            .map(|(document, line)| line.and_then(|line| input.sources[document].lines.get(base(document) + line).copied()))
+            .collect()
+    };
+    let starts: Vec<usize> = region.hunks.iter().map(|hunk| hunk.start.clone()).collect();
+    let current: u32 = region.rows.iter().map(|row| similar_lines::row_score(&texts(&row.lines, &|_| 0))).sum();
+    let candidate: u32 = relative.iter().map(|row| similar_lines::row_score(&texts(row, &|document| starts[document]))).sum();
+    let all_equal = |row: &Vec<Option<usize>>| {
+        let lines = texts(row, &|document| starts[document]);
+        lines.iter().all(Option::is_some) && lines.windows(2).all(|pair| pair[0] == pair[1])
+    };
+    if candidate <= current || relative.iter().any(all_equal) {
+        return Ok(());
+    }
+    region.rows = relative
+        .into_iter()
+        .map(|row| Row {
+            lines: row.into_iter().enumerate().map(|(document, line)| line.map(|line| line + starts[document])).collect(),
+        })
+        .collect();
+    Ok(())
 }
 
 fn is_stable(input: &CompareInput<'_>, lines: &[Option<usize>]) -> bool {
@@ -405,6 +458,29 @@ mod tests {
     fn changed_lines_are_paired_by_position() {
         let comparison = Documents::new(&[&["a", "b"], &["x", "y", "z"]]).compare(&[]);
         assert_eq!(rows(&comparison), [vec![Some(0), Some(0)], vec![Some(1), Some(1)], vec![None, Some(2)]]);
+    }
+
+    #[test]
+    fn a_changed_line_keeps_its_similar_partner_after_an_inserted_one() {
+        let documents = Documents::new(&[&["start", "total += value;", "end"], &["start", "log(value);", "total += value * 2;", "end"]]);
+        let expected = [vec![Some(0), Some(0)], vec![None, Some(1)], vec![Some(1), Some(2)], vec![Some(2), Some(3)]];
+        assert_eq!(rows(&documents.compare(&[])), expected);
+        let by_position = ComparisonOptions {
+            pair_similar_lines: false,
+            ..ComparisonOptions::default()
+        };
+        let positional = [vec![Some(0), Some(0)], vec![Some(1), Some(1)], vec![None, Some(2)], vec![Some(2), Some(3)]];
+        assert_eq!(rows(&documents.compare_with(&[], &by_position).unwrap()), positional);
+    }
+
+    #[test]
+    fn three_way_rows_keep_a_line_changed_on_one_side_with_its_base() {
+        let base: &[&str] = &["f() {", "    x = compute(1);", "}"];
+        let changed: &[&str] = &["f() {", "    log();", "    x = compute(2);", "}"];
+        let comparison = Documents::new(&[base, changed, base]).compare(&[]);
+        assert!(rows(&comparison).contains(&vec![Some(1), Some(2), Some(1)]));
+        assert!(rows(&comparison).contains(&vec![None, Some(1), None]));
+        assert_eq!(summary(&comparison).len(), 3);
     }
 
     #[test]
