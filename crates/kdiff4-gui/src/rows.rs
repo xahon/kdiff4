@@ -21,7 +21,7 @@ pub struct Block {
     pub style: Option<CharStyle>,
 }
 
-/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block of that region, if any. `origin` is where a line of D in a block came from, `None` when unknown or elsewhere. `conflict_marker` is D's placeholder of an unresolved conflict.
+/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block of that region, if any. `origin` is where a line of D in a block came from, `None` when unknown or elsewhere. `void_source` is the document whose choice left a void row of D empty. `conflict_marker` is D's placeholder of an unresolved conflict.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRow {
     pub line: Option<usize>,
@@ -29,6 +29,7 @@ pub struct PaneRow {
     pub boxed: bool,
     pub block: Option<Block>,
     pub origin: Option<Mark>,
+    pub void_source: Option<Document>,
     pub conflict_marker: bool,
 }
 
@@ -75,7 +76,7 @@ impl RowMap {
                     ..PaneRow::default()
                 });
             }
-            pad(&mut rows, index, region_starts[index], heights, boxed, block);
+            pad(&mut rows, index, region_starts[index], heights, boxed, block, None);
         }
         if shown != line_count {
             return RowMap::fallback(line_count, "lines missing");
@@ -96,11 +97,13 @@ impl RowMap {
                 origin: None,
                 style: None,
             });
+            let void_source = accepted_void_source(state);
             if state.output_lines == 0 && (boxed || state.is_unresolved()) {
                 rows.push(PaneRow {
                     region: Some(index),
                     boxed,
                     block,
+                    void_source,
                     conflict_marker: state.is_unresolved(),
                     ..PaneRow::default()
                 });
@@ -121,7 +124,7 @@ impl RowMap {
                     ..PaneRow::default()
                 });
             }
-            pad(&mut rows, index, region_starts[index], heights, boxed, block);
+            pad(&mut rows, index, region_starts[index], heights, boxed, block, void_source);
         }
         while row_of_line.len() < line_count {
             row_of_line.push(rows.len());
@@ -169,15 +172,24 @@ impl RowMap {
 }
 
 /// Pads the rows of region `index`, which started at row `start`, with void rows of `block` up to its height.
-fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>, boxed: bool, block: Option<Block>) {
+fn pad(rows: &mut Vec<PaneRow>, index: usize, start: usize, heights: Option<&[usize]>, boxed: bool, block: Option<Block>, void_source: Option<Document>) {
     let height = heights.and_then(|heights| heights.get(index)).cloned().unwrap_or(0);
     while rows.len() - start < height {
         rows.push(PaneRow {
             region: Some(index),
             boxed,
             block,
+            void_source,
             ..PaneRow::default()
         });
+    }
+}
+
+/// The first document of the choice of a region that contributes no lines to D, when it was not edited by hand: the document whose empty hunk was accepted.
+fn accepted_void_source(state: &RegionMerge) -> Option<Document> {
+    match &state.choice {
+        Choice::Hunks(documents) if state.output_lines == 0 && !state.edited => documents.first().cloned(),
+        _ => None,
     }
 }
 
@@ -642,6 +654,19 @@ mod tests {
             })
         );
         assert_eq!(Rows::Mapped(&map).len(), 1);
+    }
+
+    #[test]
+    fn accepted_voids_of_d_know_the_document_they_were_accepted_from() {
+        let regions = [conflict_region(&[0..1, 0..0], 1)];
+        let accepted = state(Choice::Hunks(vec![Document::B]), false, 0);
+        let map = RowMap::for_output(&[accepted], &regions, 0, Some(&[2]));
+        let sources: Vec<Option<Document>> = (0..2).map(|row| Rows::Mapped(&map).row(row).and_then(|row| row.void_source)).collect();
+        assert_eq!(sources, [Some(Document::B), Some(Document::B)]);
+        for merge in [state(Choice::Unresolved, false, 0), state(Choice::Hunks(vec![Document::B]), true, 0)] {
+            let map = RowMap::for_output(&[merge], &regions, 0, None);
+            assert_eq!(Rows::Mapped(&map).row(0).and_then(|row| row.void_source), None);
+        }
     }
 
     #[test]

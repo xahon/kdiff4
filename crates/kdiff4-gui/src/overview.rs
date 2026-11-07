@@ -271,7 +271,7 @@ fn paint_lines(
                     palette.red(),
                 );
             } else {
-                text_view::paint_void(&painter, text_rect, palette);
+                text_view::paint_void(&painter, text_rect, palette, lens.pane_row().and_then(|pane_row| pane_row.void_source).or(Some(lens.document.clone())));
             }
             if caret.is_some() && void_row.is_some() && void_row == lens.row {
                 text_view::paint_caret(&painter, text_rect.left(), rect, palette);

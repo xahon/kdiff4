@@ -349,7 +349,7 @@ pub fn show(
                             palette.red(),
                         );
                     } else {
-                        paint_void(&text_painter, text_rect, palette);
+                        paint_void(&text_painter, text_rect, palette, pane_row.void_source.or(char_runs.map(|runs| runs.document)));
                     }
                     if caret_on_void {
                         paint_caret(&text_painter, text_rect.left() + CARET_WIDTH / 2.0, rect, palette);
@@ -745,9 +745,9 @@ fn region_box(rows: Range<usize>, row: usize, row_top: f32, row_height: f32, x_r
 }
 
 /// Diagonal stripes anchored to the screen, so the stripes of consecutive void rows join up.
-pub fn paint_void(painter: &Painter, rect: Rect, palette: &Palette) {
+pub fn paint_void(painter: &Painter, rect: Rect, palette: &Palette, document: Option<Document>) {
     let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    let stroke = Stroke::new(1.0, palette.void_hatch);
+    let stroke = Stroke::new(1.0, palette.void_hatch_of(document));
     let first = ((rect.left() + rect.top()) / HATCH_SPACING).floor() as i64;
     let last = ((rect.right() + rect.bottom()) / HATCH_SPACING).ceil() as i64;
     for stripe in first..=last {

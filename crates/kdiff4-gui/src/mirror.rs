@@ -853,6 +853,7 @@ mod tests {
                     origin: None,
                     style: None
                 }),
+                void_source: Some(Document::A),
                 ..PaneRow::default()
             })
         );

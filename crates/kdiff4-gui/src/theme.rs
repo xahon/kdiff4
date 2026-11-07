@@ -127,6 +127,14 @@ impl Palette {
         }
     }
 
+    /// The hatching of a void in the pane of `document`: that source document's color; D and views of no source document get the neutral `void_hatch`.
+    pub fn void_hatch_of(&self, document: Option<Document>) -> Color32 {
+        match document {
+            Some(Document::D) | None => self.void_hatch,
+            Some(source) => self.colors(source).gutter_active,
+        }
+    }
+
     pub fn colors(&self, document: Document) -> &DocumentColors {
         match document {
             Document::A => &self.sources[0],
@@ -309,6 +317,19 @@ mod tests {
         for palette in [&LIGHT, &DARK] {
             assert!(contrast_ratio(palette.region_border, palette.pane_bg) >= 3.0, "{palette:?}");
             assert!(contrast_ratio(palette.void_hatch, palette.pane_bg) >= 1.4, "{palette:?}");
+        }
+    }
+
+    #[test]
+    fn voids_are_hatched_in_the_color_of_their_source_document() {
+        for palette in [&LIGHT, &DARK] {
+            for document in [Document::A, Document::B, Document::C] {
+                let hatch = palette.void_hatch_of(Some(document.clone()));
+                assert_eq!(hatch, palette.colors(document).gutter_active);
+                assert!(contrast_ratio(hatch, palette.pane_bg) >= 1.4, "{document:?} in {palette:?}");
+            }
+            assert_eq!(palette.void_hatch_of(Some(Document::D)), palette.void_hatch);
+            assert_eq!(palette.void_hatch_of(None), palette.void_hatch);
         }
     }
 
