@@ -93,6 +93,12 @@ pub struct PaneState {
     pub source_scroll: SmoothScroll,
     /// Vertical scrolling of D when it doesn't line up with the source panes.
     pub output_scroll: SmoothScroll,
+    /// Vertical scrolling of each pane on its own while the panes scroll independently, in `Document::ALL` order.
+    pub pane_scrolls: [SmoothScroll; 4],
+    /// Every pane scrolls on its own, as of the last frame.
+    pub independent_scroll: bool,
+    /// The pane, among those that line up with the source panes, that the user last pressed in, scrolled with the wheel or dragged the scroll bar of. The others take its offset when scrolling is synced again.
+    pub scroll_leader: Option<Document>,
     /// What each pane showed in the last frame, in `Document::ALL` order.
     pub viewports: [Option<Viewport>; 4],
     /// The find bar and its matches in the pane with the caret.
@@ -113,6 +119,9 @@ impl Default for PaneState {
             path_fields: Default::default(),
             source_scroll: SmoothScroll::default(),
             output_scroll: SmoothScroll::default(),
+            pane_scrolls: [SmoothScroll::default(); 4],
+            independent_scroll: false,
+            scroll_leader: None,
             viewports: [None; 4],
             find: FindState::default(),
         }
@@ -145,6 +154,54 @@ impl PaneState {
             void_row: self.void_row.clone(),
         })
     }
+
+    /// The pane the others follow when scrolling is synced again: the scroll leader if it lines up with the source panes, A otherwise.
+    pub fn scroll_leader(&self, aligned: bool) -> Document {
+        match self.scroll_leader {
+            Some(Document::D) if !aligned => Document::A,
+            Some(document) => document,
+            None => Document::A,
+        }
+    }
+
+    /// Switches between synced and independent scrolling. Going independent, every pane starts where it is; going synced, the panes that line up with the source panes take the offset of the scroll leader, and D on its own keeps its offset.
+    pub fn set_independent_scroll(&mut self, independent: bool, aligned: bool) {
+        if independent == self.independent_scroll {
+            return;
+        }
+        if independent {
+            for document in Document::ALL {
+                let scroll = self.scroll_of(scroll_group(document.clone(), aligned, false)).clone();
+                self.pane_scrolls[document_index(document)] = scroll;
+            }
+        } else {
+            let leader = self.scroll_leader(aligned);
+            self.source_scroll = self.pane_scrolls[document_index(leader)].clone();
+            self.output_scroll = match aligned {
+                true => self.source_scroll.clone(),
+                false => self.pane_scrolls[document_index(Document::D)].clone(),
+            };
+        }
+        self.independent_scroll = independent;
+    }
+
+    /// The scroll offset the minimap shows and moves, with the index of the pane whose viewport it stands for: the source panes', or the scroll leader's while scrolling is independent.
+    pub fn map_scroll(&mut self, aligned: bool) -> (usize, &mut SmoothScroll) {
+        let document = match self.independent_scroll {
+            true => self.scroll_leader(aligned),
+            false => Document::A,
+        };
+        let group = scroll_group(document.clone(), aligned, self.independent_scroll.clone());
+        (document_index(document), self.scroll_of(group))
+    }
+
+    fn scroll_of(&mut self, group: ScrollGroup) -> &mut SmoothScroll {
+        match group {
+            ScrollGroup::Sources => &mut self.source_scroll,
+            ScrollGroup::Output => &mut self.output_scroll,
+            ScrollGroup::Pane(document) => &mut self.pane_scrolls[document_index(document)],
+        }
+    }
 }
 
 /// View settings the panes draw with.
@@ -162,6 +219,8 @@ pub struct PaneOptions {
     pub whitespace: WhitespaceConfig,
     pub overview_strip: bool,
     pub minimap: bool,
+    /// Every pane scrolls on its own instead of with the others.
+    pub independent_scroll: bool,
     pub alignment_color: Color32,
     /// Pixels between the lines of the arrows of moved hunks.
     pub inset_arrow_gap: u8,
@@ -172,11 +231,24 @@ pub struct PaneOptions {
 enum ScrollGroup {
     Sources,
     Output,
+    /// The pane scrolls on its own, as every pane does while scrolling is independent.
+    Pane(Document),
 }
 
-/// How a pane's vertical scrolling went in a frame: the offset it was given, where it ended up, the wheel scrolling over it and its largest offset.
+/// The scroll offset `document`'s pane follows: its own while scrolling is independent, otherwise the source panes', or D's own when D doesn't line up with them.
+fn scroll_group(document: Document, aligned: bool, independent: bool) -> ScrollGroup {
+    match (independent, document) {
+        (true, document) => ScrollGroup::Pane(document),
+        (false, Document::D) if !aligned => ScrollGroup::Output,
+        (false, _) => ScrollGroup::Sources,
+    }
+}
+
+/// How a pane's vertical scrolling went in a frame: the offset it was given, where it ended up, the wheel scrolling over it, its largest offset, and whether the mouse button went down in it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PaneScroll {
+    document: Document,
+    pressed: bool,
     group: ScrollGroup,
     given: f32,
     after: f32,
@@ -215,6 +287,7 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     };
     let output_style = style(MarginKind::Marks);
     let mut actions = Vec::new();
+    state.set_independent_scroll(options.independent_scroll, mirror.is_aligned());
     if let Some(region) = state.jump
         && (region_in_view_everywhere(mirror, &state.viewports, region) || start_jump(mirror, state, region, options))
     {
@@ -222,7 +295,10 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
     }
     let dt = ui.input(|input| input.stable_dt).min(MAX_SCROLL_STEP);
     state.source_scroll.step(dt.clone(), options.scroll_motion);
-    state.output_scroll.step(dt, options.scroll_motion);
+    state.output_scroll.step(dt.clone(), options.scroll_motion);
+    for scroll in state.pane_scrolls.iter_mut() {
+        scroll.step(dt.clone(), options.scroll_motion);
+    }
     if options.minimap {
         egui::Panel::right("minimap")
             .resizable(false)
@@ -257,13 +333,24 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
             splitter(ui, palette, usable, merge_height, &mut state.merge_fraction);
             ui.allocate_ui(vec2(total.x, merge_height), |ui| output_pane(ui, &output_style, mirror, state, &mut actions, &mut scrolls));
         }
-        follow_panes(&mut state.source_scroll, ScrollGroup::Sources, &scrolls, options.scroll_motion);
-        follow_panes(&mut state.output_scroll, ScrollGroup::Output, &scrolls, options.scroll_motion);
-        if mirror.is_aligned() {
+        let mut groups: Vec<ScrollGroup> = Vec::new();
+        for pane in &scrolls {
+            if !groups.contains(&pane.group) {
+                groups.push(pane.group.clone());
+            }
+        }
+        for group in groups {
+            follow_panes(state.scroll_of(group.clone()), group, &scrolls, options.scroll_motion);
+        }
+        if let Some(leader) = focused_pane(&scrolls, mirror.is_aligned()) {
+            state.scroll_leader = Some(leader);
+        }
+        if mirror.is_aligned() && !state.independent_scroll {
             state.output_scroll = state.source_scroll.clone();
         }
     });
-    if state.source_scroll.offset != state.source_scroll.target || state.output_scroll.offset != state.output_scroll.target || state.jump.is_some() {
+    let moving = |scroll: &SmoothScroll| scroll.offset != scroll.target;
+    if moving(&state.source_scroll) || moving(&state.output_scroll) || state.pane_scrolls.iter().any(moving) || state.jump.is_some() {
         ui.ctx().request_repaint();
     }
     actions
@@ -271,20 +358,37 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
 
 /// Whether every pane of the session showed all rows of `region` in the last frame. A pane with no viewport yet does not.
 fn region_in_view_everywhere(mirror: &Mirror, viewports: &[Option<Viewport>; 4], region: usize) -> bool {
-    scroll_groups(mirror)
+    scroll_groups(mirror, false)
         .into_iter()
         .flat_map(|(_, panes)| panes)
         .all(|(document, rows)| region_in_view(Some(rows), viewports[document_index(document)], region))
 }
 
-/// The panes of the session with their rows, by the scroll offset they follow: the source panes, with D when it lines up with them, and D on its own otherwise. Panes without row maps can't be jumped in and are left out.
-fn scroll_groups(mirror: &Mirror) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>)> {
+/// The pane that lines up with the source panes and that the user pressed in, scrolled with the wheel or moved the scroll bar of this frame.
+fn focused_pane(scrolls: &[PaneScroll], aligned: bool) -> Option<Document> {
+    scrolls
+        .iter()
+        .filter(|pane| pane.document != Document::D || aligned)
+        .find(|pane| pane.pressed || pane.wheel.stepped != 0.0 || pane.wheel.direct != 0.0 || (pane.after - pane.given).abs() > MOVED_BY_PANE)
+        .map(|pane| pane.document.clone())
+}
+
+
+/// The panes of the session with their rows, by the scroll offset they follow: while scrolling is independent, every pane on its own; otherwise the source panes, with D when it lines up with them, and D on its own otherwise. Panes without row maps can't be jumped in and are left out.
+fn scroll_groups(mirror: &Mirror, independent: bool) -> Vec<(ScrollGroup, Vec<(Document, Rows<'_>)>)> {
     let mut sources: Vec<(Document, Rows<'_>)> = mirror
         .documents()
         .iter()
         .filter_map(|text| mirror.rows(text.document.clone()).map(|rows| (text.document.clone(), Rows::Mapped(rows))))
         .collect();
     let output = mirror.output().map(|_| (Document::D, Rows::Mapped(mirror.output_rows())));
+    if independent {
+        return sources
+            .into_iter()
+            .chain(output)
+            .map(|(document, rows)| (ScrollGroup::Pane(document.clone()), vec![(document, rows)]))
+            .collect();
+    }
     let mut groups = Vec::new();
     match output {
         Some(output) if mirror.is_aligned() => sources.push(output),
@@ -318,7 +422,7 @@ enum JumpTarget {
 
 /// Starts scrolling every group of panes to `region`. Returns false, scrolling nothing, while a pane has not been laid out yet.
 fn start_jump(mirror: &Mirror, state: &mut PaneState, region: usize, options: &PaneOptions) -> bool {
-    let targets: Vec<(ScrollGroup, JumpTarget)> = scroll_groups(mirror)
+    let targets: Vec<(ScrollGroup, JumpTarget)> = scroll_groups(mirror, state.independent_scroll.clone())
         .into_iter()
         .map(|(group, panes)| {
             let panes: Vec<(Rows<'_>, Option<Viewport>)> = panes.into_iter().map(|(document, rows)| (rows, state.viewports[document_index(document)])).collect();
@@ -330,11 +434,7 @@ fn start_jump(mirror: &Mirror, state: &mut PaneState, region: usize, options: &P
     }
     for (group, target) in targets {
         if let JumpTarget::Offset { offset, max } = target {
-            let scroll = match group {
-                ScrollGroup::Sources => &mut state.source_scroll,
-                ScrollGroup::Output => &mut state.output_scroll,
-            };
-            scroll.scroll_to(offset, max, options.scroll_motion);
+            state.scroll_of(group).scroll_to(offset, max, options.scroll_motion);
         }
     }
     true
@@ -402,10 +502,9 @@ fn splitter(ui: &mut Ui, palette: &Palette, usable: f32, merge_height: f32, frac
     }
 }
 
-/// The source panes all show the shared scroll offset. Each reports how its scrolling went to `scrolls`.
+/// The source panes all show the shared scroll offset, or their own while scrolling is independent. Each reports how its scrolling went to `scrolls`.
 fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
     let count = mirror.documents().len().max(1);
-    let given = state.source_scroll.offset.clone();
     ui.columns(count, |columns| {
         for (column, text) in columns.iter_mut().zip(mirror.documents()) {
             let lines = Lines {
@@ -420,6 +519,8 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
             });
             let marks: Vec<AlignmentMark> = mirror.alignments().of(text.document.clone()).cloned().collect();
             let highest = mirror.alignments().marks.iter().map(|mark| mark.number).max().unwrap_or(0);
+            let group = scroll_group(text.document.clone(), mirror.is_aligned(), state.independent_scroll.clone());
+            let given = state.scroll_of(group.clone()).offset.clone();
             scrolls.push(pane(
                 column,
                 style,
@@ -436,8 +537,8 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
                     highest,
                     insets: &mirror.alignments().insets,
                 },
-                ScrollGroup::Sources,
-                given.clone(),
+                group,
+                given,
                 state,
                 actions,
             ));
@@ -445,14 +546,12 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
     });
 }
 
-/// D scrolls on its own, unless it is lined up with the source panes: then it shares their offset.
+/// D scrolls on its own, unless it is lined up with the source panes and scrolling is synced: then it shares their offset.
 fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut PaneState, actions: &mut Vec<PaneAction>, scrolls: &mut Vec<PaneScroll>) {
     if let Some(output) = mirror.output() {
         let lines = output.lines();
-        let (group, given) = match mirror.is_aligned() {
-            true => (ScrollGroup::Sources, state.source_scroll.offset.clone()),
-            false => (ScrollGroup::Output, state.output_scroll.offset.clone()),
-        };
+        let group = scroll_group(Document::D, mirror.is_aligned(), state.independent_scroll.clone());
+        let given = state.scroll_of(group.clone()).offset.clone();
         let rows = Rows::Mapped(mirror.output_rows());
         scrolls.push(pane(
             ui,
@@ -552,6 +651,8 @@ fn pane(
                         None => {}
                     }
                     PaneScroll {
+                        document: document.clone(),
+                        pressed: matches!(response.pointer, Some(PointerAction::Press { .. })),
                         group,
                         given,
                         after: response.viewport.offset,
@@ -746,6 +847,8 @@ mod tests {
 
     fn scroll(group: ScrollGroup, given: f32, after: f32, wheel: f32) -> PaneScroll {
         PaneScroll {
+            document: Document::A,
+            pressed: false,
             group,
             given,
             after,
@@ -790,6 +893,8 @@ mod tests {
         let smooth = ScrollMotion { smooth: true, duration: 0.2 };
         let mut shared = SmoothScroll::default();
         let pane = PaneScroll {
+            document: Document::A,
+            pressed: false,
             group: ScrollGroup::Sources,
             given: 0.0,
             after: 0.0,
@@ -798,6 +903,124 @@ mod tests {
         };
         follow_panes(&mut shared, ScrollGroup::Sources, &[pane], smooth);
         assert_eq!(shared, SmoothScroll { offset: 12.0, target: 12.0 });
+    }
+
+    #[test]
+    fn panes_follow_their_own_offset_only_while_independent() {
+        assert_eq!(scroll_group(Document::B, false, false), ScrollGroup::Sources);
+        assert_eq!(scroll_group(Document::D, true, false), ScrollGroup::Sources);
+        assert_eq!(scroll_group(Document::D, false, false), ScrollGroup::Output);
+        assert_eq!(scroll_group(Document::B, true, true), ScrollGroup::Pane(Document::B));
+        assert_eq!(scroll_group(Document::D, false, true), ScrollGroup::Pane(Document::D));
+    }
+
+    #[test]
+    fn independent_panes_scroll_only_with_their_own_wheel() {
+        let panes = [
+            scroll(ScrollGroup::Pane(Document::A), 0.0, 0.0, 0.0),
+            scroll(ScrollGroup::Pane(Document::B), 0.0, 0.0, 45.0),
+        ];
+        let mut a = SmoothScroll::default();
+        let mut b = SmoothScroll::default();
+        follow_panes(&mut a, ScrollGroup::Pane(Document::A), &panes, INSTANT);
+        follow_panes(&mut b, ScrollGroup::Pane(Document::B), &panes, INSTANT);
+        assert_eq!(a.offset, 0.0);
+        assert_eq!(b.offset, 45.0);
+    }
+
+    fn at(offset: f32) -> SmoothScroll {
+        SmoothScroll { offset, target: offset }
+    }
+
+    #[test]
+    fn going_independent_starts_every_pane_where_it_was() {
+        let mut state = PaneState {
+            source_scroll: at(30.0),
+            output_scroll: at(70.0),
+            ..PaneState::default()
+        };
+        state.set_independent_scroll(true, false);
+        assert!(state.independent_scroll);
+        assert_eq!(state.pane_scrolls, [at(30.0), at(30.0), at(30.0), at(70.0)]);
+        state.pane_scrolls = Default::default();
+        state.set_independent_scroll(true, false);
+        assert_eq!(state.pane_scrolls[0], at(0.0), "staying independent changes nothing");
+        let mut aligned = PaneState {
+            source_scroll: at(30.0),
+            output_scroll: at(70.0),
+            ..PaneState::default()
+        };
+        aligned.set_independent_scroll(true, true);
+        assert_eq!(aligned.pane_scrolls[3], at(30.0), "a lined-up D starts with the source panes");
+    }
+
+    #[test]
+    fn syncing_again_follows_the_last_focused_pane() {
+        let mut state = PaneState {
+            independent_scroll: true,
+            pane_scrolls: [at(10.0), at(20.0), at(30.0), at(40.0)],
+            scroll_leader: Some(Document::B),
+            ..PaneState::default()
+        };
+        state.set_independent_scroll(false, false);
+        assert!(!state.independent_scroll);
+        assert_eq!(state.source_scroll, at(20.0));
+        assert_eq!(state.output_scroll, at(40.0), "D on its own keeps its offset");
+        let mut aligned = PaneState {
+            independent_scroll: true,
+            pane_scrolls: [at(10.0), at(20.0), at(30.0), at(40.0)],
+            scroll_leader: Some(Document::D),
+            ..PaneState::default()
+        };
+        aligned.set_independent_scroll(false, true);
+        assert_eq!(aligned.source_scroll, at(40.0), "a lined-up D can lead");
+        assert_eq!(aligned.output_scroll, at(40.0));
+    }
+
+    #[test]
+    fn syncing_without_a_leader_that_lines_up_follows_a() {
+        for leader in [None, Some(Document::D)] {
+            let mut state = PaneState {
+                independent_scroll: true,
+                pane_scrolls: [at(10.0), at(20.0), at(30.0), at(40.0)],
+                scroll_leader: leader,
+                ..PaneState::default()
+            };
+            state.set_independent_scroll(false, false);
+            assert_eq!(state.source_scroll, at(10.0));
+        }
+    }
+
+    #[test]
+    fn the_minimap_moves_the_leader_while_independent() {
+        let mut state = PaneState {
+            source_scroll: at(5.0),
+            pane_scrolls: [at(10.0), at(20.0), at(30.0), at(40.0)],
+            scroll_leader: Some(Document::C),
+            ..PaneState::default()
+        };
+        let (index, scroll) = state.map_scroll(false);
+        assert_eq!((index, scroll.clone()), (0, at(5.0)));
+        state.independent_scroll = true;
+        let (index, scroll) = state.map_scroll(false);
+        assert_eq!(index, 2);
+        scroll.set(99.0);
+        assert_eq!(state.pane_scrolls[2], at(99.0));
+    }
+
+    #[test]
+    fn a_pane_counts_as_focused_when_pressed_wheeled_or_dragged() {
+        let pane = |document: Document, pressed: bool, after: f32, wheel: f32| PaneScroll {
+            document,
+            pressed,
+            ..scroll(ScrollGroup::Pane(document), 10.0, after, wheel)
+        };
+        assert_eq!(focused_pane(&[pane(Document::A, false, 10.0, 0.0), pane(Document::B, false, 10.0, 0.0)], true), None);
+        assert_eq!(focused_pane(&[pane(Document::A, false, 10.0, 0.0), pane(Document::B, true, 10.0, 0.0)], true), Some(Document::B));
+        assert_eq!(focused_pane(&[pane(Document::C, false, 10.0, 30.0)], true), Some(Document::C));
+        assert_eq!(focused_pane(&[pane(Document::B, false, 50.0, 0.0)], true), Some(Document::B));
+        assert_eq!(focused_pane(&[pane(Document::D, true, 10.0, 0.0)], true), Some(Document::D));
+        assert_eq!(focused_pane(&[pane(Document::D, true, 10.0, 0.0)], false), None, "D on its own can't lead the source panes");
     }
 
     #[test]

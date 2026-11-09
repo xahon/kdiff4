@@ -92,14 +92,16 @@ fn offset_at(y: f32, height: f32, viewport: &Viewport) -> f32 {
     centered.clamp(0.0, viewport.max_offset())
 }
 
-/// The whole document as one narrow column: a block for every region that differs, and a rectangle for what the source panes show. A press or drag in it scrolls the source panes there, like a scroll bar.
+/// The whole document as one narrow column: a block for every region that differs, and a rectangle for what the source panes show. A press or drag in it scrolls the source panes there, like a scroll bar. While the panes scroll independently, it shows and scrolls the scroll leader.
 pub fn show(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, palette: &Palette) {
     let (outer, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter_at(outer);
     painter.rect_filled(outer, 0.0, palette.pane_bg);
     painter.rect_stroke(outer, 0.0, Stroke::new(1.0, palette.pane_border), StrokeKind::Inside);
-    let Some(viewport) = state.viewports[0].clone() else {
+    let viewports = state.viewports.clone();
+    let (index, scroll) = state.map_scroll(mirror.is_aligned());
+    let Some(viewport) = viewports[index].clone() else {
         return;
     };
     let map = outer.shrink2(egui::vec2(INSET, INSET));
@@ -110,10 +112,10 @@ pub fn show(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, palette: &Palet
         && let Some(pointer) = response.interact_pointer_pos()
     {
         let offset = offset_at(pointer.y - map.top(), map.height(), &viewport);
-        state.source_scroll.set(offset);
+        scroll.set(offset);
     }
     let viewport = Viewport {
-        offset: state.source_scroll.offset.clone(),
+        offset: scroll.offset.clone(),
         ..viewport
     };
     for block in blocks(mirror) {

@@ -30,6 +30,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 - Splitting a region into smaller regions (see Splitting regions in `ARCHITECTURE.md`). kdiff3 cannot split its merge blocks.
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
 - Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
+- Independent scrolling (setting `independent_scroll`, see Scrolling in `ARCHITECTURE.md`): the panes can scroll on their own, and line up again with the last focused pane when synced. kdiff3's panes always scroll together.
 - Void space in the output pane: D can line up with A, B and C, padded with void rows, and scroll with them. kdiff3's merge pane always has just its own lines.
 - Updates (see Updates in `ARCHITECTURE.md`): the program checks GitHub for a newer release, shows its notes and can replace its own executable and restart. kdiff3 has no update check.
 - Previous and Next Difference can also stop at the first region of every applied manual alignment (setting `alignment_stops`), and the alignment marks have a configurable color (`alignment_color`, cyan by default). kdiff3 has neither.

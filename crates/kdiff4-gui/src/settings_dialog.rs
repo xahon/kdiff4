@@ -86,6 +86,12 @@ impl SettingsDialog {
         self.draft.show_minimap = show;
     }
 
+    /// Follows the toolbar's and the shortcut's independent scrolling toggle, which also works while the dialog is open.
+    pub fn set_independent_scroll(&mut self, independent: bool) {
+        self.original.independent_scroll = independent;
+        self.draft.independent_scroll = independent;
+    }
+
     pub fn original(&self) -> &ViewConfig {
         &self.original
     }
@@ -204,6 +210,8 @@ impl SettingsDialog {
                     .on_hover_text("The current line of every document, with its character diff, between A, B and C and the output pane. D can be edited there.");
                 ui.checkbox(&mut self.draft.show_minimap, "Minimap")
                     .on_hover_text("The whole document as a narrow column right of the panes, with a block for every difference. Click or drag in it to scroll.");
+                ui.checkbox(&mut self.draft.independent_scroll, "Independent scrolling")
+                    .on_hover_text("Every pane scrolls on its own. Turned off, the panes line up again with the one last clicked or scrolled.");
             });
             ui.end_row();
 
@@ -615,6 +623,14 @@ mod tests {
         assert!(dialog.draft().show_minimap);
         dialog.set_show_minimap(false);
         assert!(!dialog.original().show_minimap && !dialog.draft().show_minimap);
+    }
+
+    #[test]
+    fn independent_scroll_toggle_reaches_the_open_dialog() {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), None);
+        assert!(!dialog.draft().independent_scroll);
+        dialog.set_independent_scroll(true);
+        assert!(dialog.original().independent_scroll && dialog.draft().independent_scroll);
     }
 
     #[test]

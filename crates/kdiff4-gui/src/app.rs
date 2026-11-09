@@ -50,6 +50,7 @@ const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NO
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
 const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
+const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
 const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
@@ -77,6 +78,8 @@ const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
 const OVERVIEW_TOGGLE_HINT: &str = "Toggle the Overview Strip: the current line of every document, with its character diff";
 const IGNORE_WHITESPACE_TOGGLE_LABEL: &str = "Ignore Whitespace";
 const IGNORE_WHITESPACE_TOGGLE_HINT: &str = "Toggle ignoring whitespace and line breaks in the character diff, so reflowed or reindented text shows only its real changes";
+const INDEPENDENT_SCROLL_TOGGLE_LABEL: &str = "Independent Scroll";
+const INDEPENDENT_SCROLL_TOGGLE_HINT: &str = "Toggle independent scrolling: every pane scrolls on its own. Turned off, the panes line up again with the one last clicked or scrolled";
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
@@ -1476,6 +1479,9 @@ impl KdiffApp {
         if ctx.input_mut(|input| input.consume_shortcut(&MINIMAP_SHORTCUT)) {
             self.toggle_minimap();
         }
+        if ctx.input_mut(|input| input.consume_shortcut(&INDEPENDENT_SCROLL_SHORTCUT)) {
+            self.toggle_independent_scroll();
+        }
         if ctx.input_mut(|input| input.consume_shortcut(&IGNORE_WHITESPACE_SHORTCUT)) {
             self.toggle_ignore_whitespace();
         }
@@ -1681,6 +1687,12 @@ impl KdiffApp {
                     if ui.add(item).on_hover_text(format!("{MINIMAP_TOGGLE_HINT} ({shortcut})")).clicked() {
                         self.toggle_minimap();
                     }
+                    let mut independent = self.view().independent_scroll;
+                    let item = egui::Checkbox::new(&mut independent, INDEPENDENT_SCROLL_TOGGLE_LABEL);
+                    let shortcut = ui.ctx().format_shortcut(&INDEPENDENT_SCROLL_SHORTCUT);
+                    if ui.add(item).on_hover_text(format!("{INDEPENDENT_SCROLL_TOGGLE_HINT} ({shortcut})")).clicked() {
+                        self.toggle_independent_scroll();
+                    }
                     let mut ignore_whitespace = self.ignores_whitespace();
                     let item = egui::Checkbox::new(&mut ignore_whitespace, IGNORE_WHITESPACE_TOGGLE_LABEL);
                     let shortcut = ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT);
@@ -1710,7 +1722,7 @@ impl KdiffApp {
         });
     }
 
-    /// The strip under the menu bar: the void space toggle of the output pane, the overview strip, minimap and ignore whitespace toggles.
+    /// The strip under the menu bar: the void space toggle of the output pane, the overview strip, minimap, independent scrolling and ignore whitespace toggles.
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         let is_merge = self.is_merge();
         let on = self.view().align_output;
@@ -1719,6 +1731,8 @@ impl KdiffApp {
         let mut overview_toggled = false;
         let mut minimap_toggled = false;
         let minimap_on = self.view().show_minimap;
+        let independent_on = self.view().independent_scroll;
+        let mut independent_toggled = false;
         let ignore_whitespace_on = self.ignores_whitespace();
         let mut ignore_whitespace_toggled = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
@@ -1739,6 +1753,12 @@ impl KdiffApp {
                 {
                     minimap_toggled = true;
                 }
+                if toolbar_toggle(ui, INDEPENDENT_SCROLL_TOGGLE_LABEL, independent_on, true, paint_independent_scroll_icon)
+                    .on_hover_text(INDEPENDENT_SCROLL_TOGGLE_HINT)
+                    .clicked()
+                {
+                    independent_toggled = true;
+                }
                 if toolbar_toggle(ui, IGNORE_WHITESPACE_TOGGLE_LABEL, ignore_whitespace_on, true, paint_ignore_whitespace_icon)
                     .on_hover_text(IGNORE_WHITESPACE_TOGGLE_HINT)
                     .clicked()
@@ -1755,6 +1775,9 @@ impl KdiffApp {
         }
         if minimap_toggled {
             self.toggle_minimap();
+        }
+        if independent_toggled {
+            self.toggle_independent_scroll();
         }
         if ignore_whitespace_toggled {
             self.toggle_ignore_whitespace();
@@ -1796,6 +1819,19 @@ impl KdiffApp {
         }
         if let Some(dialog) = self.settings.as_mut() {
             dialog.set_show_minimap(on);
+        }
+        self.save_config(false);
+    }
+
+    /// Switches between independent and synced scrolling of the panes, from the toolbar, the View menu or Ctrl+Shift+U. Saved at once, and followed by an open settings dialog.
+    fn toggle_independent_scroll(&mut self) {
+        let on = !self.view().independent_scroll;
+        self.config.view.independent_scroll = on;
+        if let Some(applied) = self.applied_view.as_mut() {
+            applied.independent_scroll = on;
+        }
+        if let Some(dialog) = self.settings.as_mut() {
+            dialog.set_independent_scroll(on);
         }
         self.save_config(false);
     }
@@ -1842,6 +1878,7 @@ impl KdiffApp {
             whitespace: view.whitespace.clone(),
             overview_strip: view.show_overview_strip,
             minimap: view.show_minimap,
+            independent_scroll: view.independent_scroll,
             alignment_color: egui::Color32::from_rgba_unmultiplied(view.alignment_color[0], view.alignment_color[1], view.alignment_color[2], view.alignment_color[3]),
             inset_arrow_gap: view.inset_arrow_gap,
         }
@@ -2115,6 +2152,22 @@ fn paint_minimap_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color
     ui.painter().rect_stroke(view, 0.0, stroke, egui::StrokeKind::Inside);
     ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
 }
+
+/// Two boxes side by side, each with a view band at a different height: panes scrolled apart.
+fn paint_independent_scroll_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
+    let radius = theme::corner_radius_of(ui).max(3).min(4);
+    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
+    let stroke = egui::Stroke::new(1.0, stroke_color);
+    let width = (square.width() - 2.0) / 2.0;
+    for (index, band_top) in [0.15, 0.55].iter().enumerate() {
+        let left = square.left() + index as f32 * (width + 2.0);
+        let column = egui::Rect::from_min_size(egui::pos2(left, square.top()), egui::vec2(width, square.height()));
+        let band = egui::Rect::from_min_size(egui::pos2(left + 2.0, square.top() + square.height() * band_top), egui::vec2(width - 4.0, square.height() * 0.3));
+        ui.painter().rect_filled(band, 0.0, stroke_color.gamma_multiply(0.4));
+        ui.painter().rect_stroke(column, radius, stroke, egui::StrokeKind::Inside);
+    }
+}
+
 
 /// Two words with a dotted gap between them in a box: whitespace that doesn't count.
 fn paint_ignore_whitespace_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {

@@ -88,6 +88,8 @@ pub struct ViewConfig {
     pub show_overview_strip: bool,
     /// The minimap: the whole document as a narrow column right of the panes, which scrolls them like a scroll bar.
     pub show_minimap: bool,
+    /// Every pane scrolls on its own instead of with the others.
+    pub independent_scroll: bool,
     /// Rows kept above a region that navigation jumps to.
     pub jump_context_lines: u8,
     /// Wheel scrolling and jumps glide to where they go instead of moving at once.
@@ -129,6 +131,7 @@ impl Default for ViewConfig {
             align_output: false,
             show_overview_strip: true,
             show_minimap: true,
+            independent_scroll: false,
             jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES,
             smooth_scrolling: true,
             smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS,
@@ -410,6 +413,7 @@ last_dir = \"x\"
             align_output: true,
             show_overview_strip: false,
             show_minimap: false,
+            independent_scroll: true,
             jump_context_lines: 7,
             smooth_scrolling: false,
             smooth_scroll_ms: 400,
