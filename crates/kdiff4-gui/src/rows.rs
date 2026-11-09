@@ -1,9 +1,9 @@
 use std::ops::Range;
 
 use kdiff4_protocol::engine::{Comparison, HunkChange, MergeStatus, Region, RegionStatus};
-use kdiff4_protocol::{Choice, Document, RegionMerge};
+use kdiff4_protocol::{Choice, Document, LineCharRuns, RegionMerge};
 
-use crate::char_diff::{self, CharStyle};
+use crate::char_diff::{self, CharStyle, HunksEqual};
 use crate::editing::Position;
 
 /// Where a line of D came from: a chosen hunk, or a hand edit.
@@ -43,8 +43,15 @@ pub struct RowMap {
 }
 
 impl RowMap {
-    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. `merge` tells which regions D holds a hand edit of; they stand out like differences. Falls back to one plain row per line when the comparison doesn't hold every line of the document exactly once. Lines may come in any order: an inset hunk is shown away from its place in the document.
-    pub fn for_source(comparison: &Comparison, merge: &[RegionMerge], document_index: usize, line_count: usize, heights: Option<&[usize]>) -> RowMap {
+    /// `heights`, when given, pads every region with void rows to that many rows, so panes line up with D. `merge` tells which regions D holds a hand edit of; they stand out like differences. With `whitespace_runs`, the char diffs computed with whitespace ignored, gutter blocks also treat hunks as equal where those runs mark nothing between them. Falls back to one plain row per line when the comparison doesn't hold every line of the document exactly once. Lines may come in any order: an inset hunk is shown away from its place in the document.
+    pub fn for_source(comparison: &Comparison, merge: &[RegionMerge], document_index: usize, line_count: usize, heights: Option<&[usize]>, whitespace_runs: Option<&[LineCharRuns]>) -> RowMap {
+        let equal = |region: &Region| {
+            let equal = HunksEqual::from_status(&region.status);
+            match whitespace_runs {
+                Some(runs) => equal.or_from_char_diffs(region, runs),
+                None => equal,
+            }
+        };
         let mut rows = Vec::new();
         let mut row_of_line = vec![usize::MAX; line_count];
         let mut shown = 0;
@@ -53,7 +60,7 @@ impl RowMap {
             region_starts.push(rows.len());
             let boxed = stands_out(region, merge.get(index));
             let document = Document::ALL.get(document_index).cloned();
-            let style = document.and_then(|document| char_diff::region_style(document, &region.status, region.hunks.len()));
+            let style = document.and_then(|document| char_diff::region_style(document, equal(region), region.hunks.len()));
             let block = boxed.then(|| Block {
                 index: index.clone(),
                 origin: document.map(Mark::Source),
@@ -393,7 +400,7 @@ mod tests {
 
     #[test]
     fn source_rows_follow_the_comparison() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.row(0), Some(line(0, 0)));
@@ -408,7 +415,7 @@ mod tests {
         assert_eq!(rows.row(3), Some(line(1, 2)));
         assert_eq!(rows.row(4), None);
         assert_eq!(rows.row_of_line(1), 3);
-        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None, None);
         assert_eq!(
             Rows::Mapped(&map).row(2),
             Some(PaneRow {
@@ -433,7 +440,7 @@ mod tests {
 
     #[test]
     fn unchanged_regions_have_no_gutter() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None, None);
         let blocks: Vec<Option<Block>> = (0..4).map(|row| Rows::Mapped(&map).block_of_row(row)).collect();
         assert_eq!(blocks, [None, source_block(1, Document::B, FROM_A), source_block(1, Document::B, FROM_A), None]);
         let merge = RegionMerge {
@@ -447,7 +454,7 @@ mod tests {
 
     #[test]
     fn regions_know_their_rows() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None);
         let rows = Rows::Mapped(&map);
         assert_eq!((rows.region_start(0), rows.region_start(1), rows.region_start(2)), (Some(0), Some(1), Some(3)));
         assert_eq!(rows.region_start(3), None);
@@ -463,7 +470,7 @@ mod tests {
 
     #[test]
     fn heights_pad_regions_with_voids() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, Some(&[2, 2, 1]));
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, Some(&[2, 2, 1]), None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 5);
         assert_eq!(rows.row(1), Some(void(0)));
@@ -482,7 +489,7 @@ mod tests {
 
     #[test]
     fn clicks_on_voids_go_to_the_next_line() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.line_at_or_after(1), Some(1));
         assert_eq!(rows.line_at_or_after(3), Some(1));
@@ -491,13 +498,13 @@ mod tests {
 
     #[test]
     fn caret_can_sit_on_a_void_row() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None);
         let rows = Rows::Mapped(&map);
         let end = Position { line: 1, column: 1 };
         assert_eq!(rows.caret_at_row(0, 3, end), (Position { line: 0, column: 3 }, None));
         assert_eq!(rows.caret_at_row(2, 3, end), (Position { line: 1, column: 0 }, Some(2)));
         assert_eq!(rows.caret_at_row(9, 0, end), (Position { line: 1, column: 0 }, None));
-        let trailing = RowMap::for_source(&two_way_comparison(), &[], 0, 2, Some(&[1, 2, 2]));
+        let trailing = RowMap::for_source(&two_way_comparison(), &[], 0, 2, Some(&[1, 2, 2]), None);
         assert_eq!(Rows::Mapped(&trailing).caret_at_row(4, 0, end), (end, Some(4)));
     }
 
@@ -511,7 +518,7 @@ mod tests {
 
     #[test]
     fn row_of_line_past_the_end_is_the_last_row() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None);
         assert_eq!(Rows::Mapped(&map).row_of_line(9), 3);
         assert_eq!(Rows::Mapped(&RowMap::default()).row_of_line(0), 0);
         assert_eq!(Rows::PerLine(3).row_of_line(9), 2);
@@ -536,7 +543,7 @@ mod tests {
 
     #[test]
     fn comparison_that_does_not_fit_falls_back_to_lines() {
-        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 5, None);
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 5, None, None);
         assert_eq!(Rows::Mapped(&map).len(), 5);
         assert_eq!(
             Rows::Mapped(&map).row(4),
@@ -547,7 +554,7 @@ mod tests {
         );
         let mut twice = two_way_comparison();
         twice.regions.push(twice.regions[0].clone());
-        let map = RowMap::for_source(&twice, &[], 0, 2, None);
+        let map = RowMap::for_source(&twice, &[], 0, 2, None, None);
         assert_eq!(Rows::Mapped(&map).len(), 2);
         assert_eq!(Rows::Mapped(&map).row_of_line(1), 1);
     }
@@ -556,7 +563,7 @@ mod tests {
     fn lines_shown_away_from_their_place_keep_their_rows() {
         let mut shuffled = two_way_comparison();
         shuffled.regions.swap(0, 2);
-        let map = RowMap::for_source(&shuffled, &[], 0, 2, None);
+        let map = RowMap::for_source(&shuffled, &[], 0, 2, None, None);
         let rows = Rows::Mapped(&map);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.row_of_line(1), 0);
@@ -789,7 +796,7 @@ mod tests {
     #[test]
     fn hand_edited_stable_lines_get_a_block_in_every_pane() {
         let (comparison, merge) = split_stable_line();
-        let source = RowMap::for_source(&comparison, &merge, 1, 3, None);
+        let source = RowMap::for_source(&comparison, &merge, 1, 3, None, None);
         let block = source_block(1, Document::B, None);
         assert_eq!(Rows::Mapped(&source).row(0), Some(line(0, 0)));
         assert_eq!(Rows::Mapped(&source).row(1), Some(PaneRow { boxed: true, block, ..line(1, 1) }));
@@ -831,7 +838,7 @@ mod tests {
         };
         (0..3)
             .map(|document_index| {
-                let map = RowMap::for_source(&comparison, &[], document_index, 1, None);
+                let map = RowMap::for_source(&comparison, &[], document_index, 1, None, None);
                 Rows::Mapped(&map).block_of_row(0).and_then(|block| block.style)
             })
             .collect()
@@ -851,7 +858,7 @@ mod tests {
 
     #[test]
     fn empty_comparison_of_empty_documents() {
-        let map = RowMap::for_source(&Comparison::default(), &[], 0, 0, None);
+        let map = RowMap::for_source(&Comparison::default(), &[], 0, 0, None, None);
         assert_eq!(Rows::Mapped(&map).len(), 0);
     }
 }

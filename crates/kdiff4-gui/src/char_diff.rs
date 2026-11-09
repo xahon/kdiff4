@@ -1,7 +1,8 @@
 use std::ops::Range;
 
 use kdiff4_protocol::Document;
-use kdiff4_protocol::engine::{CharRun, HunkChange, MergeStatus, RegionStatus};
+use kdiff4_protocol::LineCharRuns;
+use kdiff4_protocol::engine::{CharRun, HunkChange, MergeStatus, Region, RegionStatus};
 
 /// How a run of characters or a gutter block is marked: red when it differs from every other document of the row, otherwise in the color of the one other document it differs from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,36 +37,69 @@ pub fn char_style(document: Document, same: SameIn) -> Option<CharStyle> {
     }
 }
 
-/// How the gutter block of a region is marked in the pane of `document`: by the char-diff rules, with the region's documents being the same where its status says they are. A 3-way merge region takes A as the base. `None` when the hunks are all equal. `sources` is how many source documents the comparison has.
-pub fn region_style(document: Document, status: &RegionStatus, sources: usize) -> Option<CharStyle> {
-    let (a_equals_b, a_equals_c, b_equals_c) = match status {
-        RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged) => (true, true, true),
-        RegionStatus::Merge(MergeStatus::ChangedInB) => (false, true, false),
-        RegionStatus::Merge(MergeStatus::ChangedInC) => (true, false, false),
-        RegionStatus::Merge(MergeStatus::ChangedAlike) => (false, false, true),
-        RegionStatus::Diff(_) | RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict) => (false, false, false),
-    };
+/// Which hunks of a region are equal: A and B, A and C, B and C.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HunksEqual {
+    pub a_b: bool,
+    pub a_c: bool,
+    pub b_c: bool,
+}
+
+impl HunksEqual {
+    /// Equal where the region's status says they are. A 3-way merge region takes A as the base.
+    pub fn from_status(status: &RegionStatus) -> HunksEqual {
+        let (a_b, a_c, b_c) = match status {
+            RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged) => (true, true, true),
+            RegionStatus::Merge(MergeStatus::ChangedInB) => (false, true, false),
+            RegionStatus::Merge(MergeStatus::ChangedInC) => (true, false, false),
+            RegionStatus::Merge(MergeStatus::ChangedAlike) => (false, false, true),
+            RegionStatus::Diff(_) | RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict) => (false, false, false),
+        };
+        HunksEqual { a_b, a_c, b_c }
+    }
+
+
+    /// Also equal where the char diff of the region marks nothing between two hunks: every run of each is the same in the other. Used when whitespace is ignored, so hunks that differ only in whitespace count as equal. `char_diffs` is per source document, in A, B, C order.
+    pub fn or_from_char_diffs(self, region: &Region, char_diffs: &[LineCharRuns]) -> HunksEqual {
+        let same = |document: usize, other: usize| {
+            let lines = region.hunks.get(document).cloned().unwrap_or_default();
+            let runs = char_diffs.get(document);
+            runs.is_some_and(|runs| lines.into_iter().all(|line| runs.line(line).iter().all(|run| run.same_in.get(other).cloned().unwrap_or(false))))
+        };
+        let equal = |left: usize, right: usize| region.hunks.len() > right && same(left, right) && same(right, left);
+        HunksEqual {
+            a_b: self.a_b || equal(0, 1),
+            a_c: self.a_c || equal(0, 2),
+            b_c: self.b_c || equal(1, 2),
+        }
+    }
+}
+
+
+/// How the gutter block of a region is marked in the pane of `document`: by the char-diff rules, with the region's documents being the same where `equal` says. `None` when the hunks are all equal. `sources` is how many source documents the comparison has.
+pub fn region_style(document: Document, equal: HunksEqual, sources: usize) -> Option<CharStyle> {
     let three_way = sources > 2;
     let same = match document {
         Document::A => SameIn {
             a: true,
-            b: a_equals_b,
-            c: three_way.then_some(a_equals_c),
+            b: equal.a_b,
+            c: three_way.then_some(equal.a_c),
         },
         Document::B => SameIn {
-            a: a_equals_b,
+            a: equal.a_b,
             b: true,
-            c: three_way.then_some(b_equals_c),
+            c: three_way.then_some(equal.b_c),
         },
         Document::C => SameIn {
-            a: a_equals_c,
-            b: b_equals_c,
+            a: equal.a_c,
+            b: equal.b_c,
             c: Some(true),
         },
         Document::D => return None,
     };
     char_style(document, same)
 }
+
 
 /// The styled column ranges of a line of `document` with `runs`, in order; neighbors with the same style are joined, so one background covers all of them. `sources` is how many source documents the row has. Plain runs are left out.
 pub fn segments(document: Document, runs: &[CharRun], sources: usize) -> Vec<(Range<usize>, CharStyle)> {
@@ -157,38 +191,38 @@ mod tests {
     #[test]
     fn regions_with_equal_hunks_have_no_style() {
         for document in [Document::A, Document::B, Document::C] {
-            assert_eq!(region_style(document, &UNCHANGED_3, 3), None);
+            assert_eq!(region_style(document, HunksEqual::from_status(&UNCHANGED_3), 3), None);
         }
-        assert_eq!(region_style(Document::A, &RegionStatus::Diff(HunkChange::Unchanged), 2), None);
-        assert_eq!(region_style(Document::B, &RegionStatus::Diff(HunkChange::Unchanged), 2), None);
+        assert_eq!(region_style(Document::A, HunksEqual::from_status(&RegionStatus::Diff(HunkChange::Unchanged)), 2), None);
+        assert_eq!(region_style(Document::B, HunksEqual::from_status(&RegionStatus::Diff(HunkChange::Unchanged)), 2), None);
     }
 
     #[test]
     fn region_changed_in_b_is_b_colored_in_a_and_c_and_red_in_b() {
-        assert_eq!(region_style(Document::A, &IN_B, 3), FROM_B);
-        assert_eq!(region_style(Document::B, &IN_B, 3), RED);
-        assert_eq!(region_style(Document::C, &IN_B, 3), FROM_B);
+        assert_eq!(region_style(Document::A, HunksEqual::from_status(&IN_B), 3), FROM_B);
+        assert_eq!(region_style(Document::B, HunksEqual::from_status(&IN_B), 3), RED);
+        assert_eq!(region_style(Document::C, HunksEqual::from_status(&IN_B), 3), FROM_B);
     }
 
     #[test]
     fn region_changed_in_c_is_c_colored_in_a_and_b_and_red_in_c() {
-        assert_eq!(region_style(Document::A, &IN_C, 3), FROM_C);
-        assert_eq!(region_style(Document::B, &IN_C, 3), FROM_C);
-        assert_eq!(region_style(Document::C, &IN_C, 3), RED);
+        assert_eq!(region_style(Document::A, HunksEqual::from_status(&IN_C), 3), FROM_C);
+        assert_eq!(region_style(Document::B, HunksEqual::from_status(&IN_C), 3), FROM_C);
+        assert_eq!(region_style(Document::C, HunksEqual::from_status(&IN_C), 3), RED);
     }
 
     #[test]
     fn region_changed_alike_in_b_and_c_is_a_colored_in_both_and_red_in_a() {
-        assert_eq!(region_style(Document::A, &ALIKE, 3), RED);
-        assert_eq!(region_style(Document::B, &ALIKE, 3), FROM_A);
-        assert_eq!(region_style(Document::C, &ALIKE, 3), FROM_A);
+        assert_eq!(region_style(Document::A, HunksEqual::from_status(&ALIKE), 3), RED);
+        assert_eq!(region_style(Document::B, HunksEqual::from_status(&ALIKE), 3), FROM_A);
+        assert_eq!(region_style(Document::C, HunksEqual::from_status(&ALIKE), 3), FROM_A);
     }
 
     #[test]
     fn conflicting_regions_are_red_everywhere() {
         for status in [CONFLICT, WHITESPACE] {
             for document in [Document::A, Document::B, Document::C] {
-                assert_eq!(region_style(document, &status, 3), RED);
+                assert_eq!(region_style(document, HunksEqual::from_status(&status), 3), RED);
             }
         }
     }
@@ -196,14 +230,14 @@ mod tests {
     #[test]
     fn two_way_regions_are_marked_in_the_color_of_the_other_document() {
         for change in [HunkChange::Added, HunkChange::Removed, HunkChange::Modified] {
-            assert_eq!(region_style(Document::A, &RegionStatus::Diff(change), 2), FROM_B);
-            assert_eq!(region_style(Document::B, &RegionStatus::Diff(change), 2), FROM_A);
+            assert_eq!(region_style(Document::A, HunksEqual::from_status(&RegionStatus::Diff(change)), 2), FROM_B);
+            assert_eq!(region_style(Document::B, HunksEqual::from_status(&RegionStatus::Diff(change)), 2), FROM_A);
         }
     }
 
     #[test]
     fn output_regions_have_no_style() {
-        assert_eq!(region_style(Document::D, &CONFLICT, 3), None);
+        assert_eq!(region_style(Document::D, HunksEqual::from_status(&CONFLICT), 3), None);
     }
 
     fn run(columns: Range<usize>, same_in: &[bool]) -> CharRun {
@@ -270,5 +304,64 @@ mod tests {
     #[test]
     fn segments_treat_missing_flags_as_different() {
         assert_eq!(segments(Document::B, &[run(0..1, &[])], 3), [(0..1, CharStyle::Red)]);
+    }
+
+
+    fn reflowed_region() -> Region {
+        Region {
+            hunks: vec![1..2, 1..4, 1..2],
+            status: RegionStatus::Merge(MergeStatus::Conflict),
+            rows: Vec::new(),
+        }
+    }
+
+
+    fn lines(lines: &[Vec<CharRun>]) -> LineCharRuns {
+        let mut all = vec![Vec::new(); 1];
+        all.extend(lines.iter().cloned());
+        LineCharRuns { lines: all }
+    }
+
+
+    #[test]
+    fn hunks_whose_runs_mark_nothing_between_them_are_equal() {
+        let a = lines(&[vec![run(0..5, &[true, true, false])]]);
+        let b = lines(&[vec![run(0..2, &[true, true, false])], vec![], vec![run(2..4, &[true, true, false])]]);
+        let c = lines(&[vec![run(0..5, &[false, false, true])]]);
+        let equal = HunksEqual::from_status(&RegionStatus::Merge(MergeStatus::Conflict)).or_from_char_diffs(&reflowed_region(), &[a, b, c]);
+        assert_eq!(equal, HunksEqual { a_b: true, a_c: false, b_c: false });
+        assert_eq!(region_style(Document::A, equal, 3), FROM_C);
+        assert_eq!(region_style(Document::C, equal, 3), RED);
+    }
+
+
+    #[test]
+    fn a_change_marked_on_one_side_only_keeps_hunks_different() {
+        let a = lines(&[vec![run(0..5, &[true, true, true])]]);
+        let b = lines(&[vec![run(0..2, &[true, true, true])], vec![run(0..1, &[false, true, false])], vec![]]);
+        let c = lines(&[vec![run(0..5, &[true, true, true])]]);
+        let equal = HunksEqual::from_status(&RegionStatus::Merge(MergeStatus::Conflict)).or_from_char_diffs(&reflowed_region(), &[a, b, c]);
+        assert_eq!(equal, HunksEqual { a_b: false, a_c: true, b_c: false });
+    }
+
+
+    #[test]
+    fn status_equality_holds_whatever_the_runs_say() {
+        let equal = HunksEqual::from_status(&RegionStatus::Merge(MergeStatus::ChangedInB)).or_from_char_diffs(&reflowed_region(), &[]);
+        assert_eq!(equal, HunksEqual { a_b: false, a_c: true, b_c: false });
+    }
+
+
+    #[test]
+    fn a_two_way_region_has_no_c_to_be_equal_to() {
+        let region = Region {
+            hunks: vec![1..2, 1..2],
+            status: RegionStatus::Diff(HunkChange::Modified),
+            rows: Vec::new(),
+        };
+        let both = lines(&[vec![run(0..1, &[true, true])]]);
+        let equal = HunksEqual::from_status(&region.status).or_from_char_diffs(&region, &[both.clone(), both]);
+        assert_eq!(equal, HunksEqual { a_b: true, a_c: false, b_c: false });
+        assert_eq!(region_style(Document::A, equal, 2), None);
     }
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use kdiff4_protocol::engine::{
-    CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, HunkChange, Job, ManualAlignment, MergeStatus, Progress, Region, RegionStatus, SourceLines,
+    CompareInput, Comparison, ComparisonEngine, ComparisonOptions, EngineCapabilities, EngineError, HunkChange, Job, ManualAlignment, MergeStatus, Progress, Region, RegionStatus, SourceLines,
     run_comparison,
 };
 use kdiff4_protocol::{
@@ -18,6 +18,7 @@ use crate::merge::{self, Merge, MergeStep, RegionState};
 use crate::normalizer;
 use crate::text::{self, SourceText};
 use crate::undo::{History, Step};
+use crate::whitespace_char_diff;
 
 #[derive(Debug)]
 struct Source {
@@ -220,8 +221,21 @@ impl Session {
         Ok(())
     }
 
-    /// Recomputes the regions and rows with `options` and the applied alignments, and rebuilds D from them, like a reload. On failure the session is unchanged.
+    /// Recomputes the regions and rows with `options` and the applied alignments, and rebuilds D from them, like a reload. When only options of character-level diffs change, just those are recomputed, and D keeps its choices, edits and undo history. On failure the session is unchanged.
     pub fn set_comparison_options(&mut self, options: ComparisonOptions, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
+        let only_char_diffs = ComparisonOptions {
+            ignore_whitespace: options.ignore_whitespace.clone(),
+            ..self.options.clone()
+        } == options;
+        if only_char_diffs {
+            let comparison = Comparison {
+                regions: self.merge.regions().to_vec(),
+            };
+            self.char_diffs = char_diffs(&self.sources, &comparison, engine, &options);
+            self.options = options;
+            self.revision += 1;
+            return Ok(());
+        }
         let comparison = compare(&self.sources, engine, &options, self.alignments.applied())?;
         self.options = options;
         self.rebuild(comparison, engine);
@@ -810,6 +824,12 @@ fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn Comparis
     if !engine.capabilities().char_diff {
         return diffs;
     }
+    if options.ignore_whitespace {
+        return whitespace_char_diffs(&lines, comparison, engine, options).unwrap_or_else(|error| {
+            log::warn!("char diff: {error}; lines are left unmarked");
+            unmarked()
+        });
+    }
     for row in comparison.regions.iter().flat_map(|region| region.rows.iter()) {
         let texts: Vec<Option<&str>> = row
             .lines
@@ -842,11 +862,64 @@ fn char_diffs(sources: &[Source], comparison: &Comparison, engine: &dyn Comparis
     diffs
 }
 
+/// The character-level diffs with whitespace ignored: each region whose hunks differ is diffed as a whole, or row by row when it is longer than the char-diff line limit.
+fn whitespace_char_diffs(lines: &[Vec<&str>], comparison: &Comparison, engine: &dyn ComparisonEngine, options: &ComparisonOptions) -> Result<Vec<LineCharRuns>, EngineError> {
+    let mut diffs: Vec<LineCharRuns> = lines
+        .iter()
+        .map(|lines| LineCharRuns {
+            lines: vec![Vec::new(); lines.len()],
+        })
+        .collect();
+    for region in &comparison.regions {
+        let hunks: Vec<Vec<(usize, &str)>> = region
+            .hunks
+            .iter()
+            .enumerate()
+            .map(|(document, hunk)| hunk.clone().filter_map(|line| Some((line.clone(), lines.get(document)?.get(line).copied()?))).collect())
+            .collect();
+        if hunks.iter().all(|hunk| texts(hunk) == texts(&hunks[0])) {
+            continue;
+        }
+        let chunks: Vec<Vec<Vec<(usize, &str)>>> = if whitespace_char_diff::exceeds_limit(&hunks.iter().map(|hunk| texts(hunk)).collect::<Vec<_>>(), options) {
+            region
+                .rows
+                .iter()
+                .map(|row| {
+                    row.lines
+                        .iter()
+                        .enumerate()
+                        .map(|(document, line)| line.and_then(|line| Some((line.clone(), lines.get(document)?.get(line).copied()?))).into_iter().collect())
+                        .collect()
+                })
+                .collect()
+        } else {
+            vec![hunks]
+        };
+        for chunk in chunks {
+            let runs = whitespace_char_diff::chunk_runs(engine, &chunk.iter().map(|part| texts(part)).collect::<Vec<_>>(), options)?;
+            for (document, (part, runs)) in chunk.iter().zip(runs).enumerate() {
+                for ((line, _), runs) in part.iter().zip(runs) {
+                    if let Some(slot) = diffs.get_mut(document).and_then(|diffs| diffs.lines.get_mut(line.clone())) {
+                        *slot = runs;
+                    }
+                }
+            }
+        }
+    }
+    Ok(diffs)
+}
+
+
+fn texts<'a>(part: &[(usize, &'a str)]) -> Vec<&'a str> {
+    part.iter().map(|(_, text)| *text).collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use kdiff4_protocol::engine::{CharDiff, EngineError, HunkChange, MergeStatus, RegionStatus, Row};
+    use kdiff4_protocol::engine::{CharDiff, HunkChange, MergeStatus, RegionStatus, Row};
     use kdiff4_protocol::{EntityKind, ErrorKind, Labels, MarkStatus, ProtocolError};
 
     use super::*;
@@ -2079,6 +2152,54 @@ cc
         assert_eq!(session.undo().unwrap(), None);
         assert_consistent(&session);
     }
+
+    #[test]
+    fn ignore_whitespace_recomputes_only_char_diffs_and_keeps_d() {
+        let dir = temp_dir("ignore-whitespace");
+        let mut session = merge_of(&dir, &["s", "call(a, b);"], &["s", "call(", "  a,", "  b);"], &["s", "call(a, b);", "x"]);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::C])).unwrap();
+        let before = session.snapshot();
+        assert!(before.char_diffs[0].line(1).iter().any(|run| !run.same_in[1]));
+        let options = ComparisonOptions {
+            ignore_whitespace: true,
+            ..ComparisonOptions::default()
+        };
+        session.set_comparison_options(options.clone(), &BuiltinEngine).unwrap();
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.options, options);
+        assert!(snapshot.revision.0 > before.revision.0);
+        assert_eq!(snapshot.comparison, before.comparison);
+        assert_eq!(snapshot.output, before.output);
+        assert_eq!(snapshot.current_region, before.current_region);
+        assert_eq!(choices(&session)[1], Choice::Hunks(vec![Document::C]));
+        for line in 1..4 {
+            assert!(snapshot.char_diffs[1].line(line).iter().all(|run| run.same_in[0]), "B line {line} is the same as A");
+        }
+        assert!(snapshot.char_diffs[0].line(1).iter().all(|run| run.same_in[1]));
+        assert!(snapshot.char_diffs[2].line(2).iter().all(|run| !run.same_in[0] && !run.same_in[1]));
+        assert!(session.undo().unwrap().is_some());
+        session.set_comparison_options(ComparisonOptions::default(), &BuiltinEngine).unwrap();
+        assert_eq!(session.snapshot().char_diffs, before.char_diffs);
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn ignore_whitespace_diffs_a_region_over_the_limit_row_by_row() {
+        let dir = temp_dir("ignore-whitespace-limit");
+        let mut session = merge_of(&dir, &["s", "ab", "cd"], &["s", "a b", "x d"], &["s", "ab", "cd"]);
+        let options = ComparisonOptions {
+            ignore_whitespace: true,
+            char_diff_line_limit: 3,
+            ..ComparisonOptions::default()
+        };
+        session.set_comparison_options(options, &BuiltinEngine).unwrap();
+        let snapshot = session.snapshot();
+        assert!(snapshot.char_diffs[1].line(1).iter().all(|run| run.same_in[0]));
+        let marked: Vec<usize> = snapshot.char_diffs[1].line(2).iter().filter(|run| !run.same_in[0]).flat_map(|run| run.columns.clone()).collect();
+        assert_eq!(marked, [0]);
+    }
+
 
     #[test]
     fn failed_comparison_options_keep_the_session() {

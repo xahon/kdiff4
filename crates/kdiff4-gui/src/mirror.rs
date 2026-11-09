@@ -69,6 +69,8 @@ pub struct Mirror {
     awaiting_resync: bool,
     /// Per document, in `documents` order: the character-level diff of its lines.
     char_diffs: Vec<LineCharRuns>,
+    /// The engine computes character-level diffs; without them `char_diffs` marks nothing.
+    has_char_diffs: bool,
     alignments: Alignments,
 }
 
@@ -99,6 +101,7 @@ impl Mirror {
             pending_edits: VecDeque::new(),
             awaiting_resync: false,
             char_diffs: snapshot.char_diffs,
+            has_char_diffs: snapshot.engine.char_diff,
             alignments: snapshot.alignments,
         };
         mirror.refresh_rows();
@@ -231,11 +234,12 @@ impl Mirror {
 
     fn refresh_rows(&mut self) {
         let heights = self.is_aligned().then(|| rows::aligned_heights(&self.comparison.regions, &self.merge));
+        let whitespace_runs = (self.options.ignore_whitespace && self.has_char_diffs).then_some(self.char_diffs.as_slice());
         self.row_maps = self
             .documents
             .iter()
             .enumerate()
-            .map(|(index, text)| RowMap::for_source(&self.comparison, &self.merge, index, text.line_count(), heights.as_deref()))
+            .map(|(index, text)| RowMap::for_source(&self.comparison, &self.merge, index, text.line_count(), heights.as_deref(), whitespace_runs))
             .collect();
         self.refresh_output_rows();
     }
@@ -468,13 +472,18 @@ mod tests {
 
     /// A 2-way merge of "a" and "b" with one modified region, unresolved, and D empty.
     fn conflict_mirror() -> Mirror {
+        Mirror::from_snapshot(conflict_mirror_snapshot(), false)
+    }
+
+
+    fn conflict_mirror_snapshot() -> Snapshot {
         let output = OutputDocument {
             path: None,
             text: String::new(),
             modified: false,
             eol: EolChoice::default(),
         };
-        let snapshot = Snapshot {
+        Snapshot {
             revision: Revision(1),
             documents: vec![source(Document::A, "a"), source(Document::B, "b")],
             output: Some(output),
@@ -485,9 +494,31 @@ mod tests {
             current_region: None,
             char_diffs: Vec::new(),
             alignments: Alignments::default(),
-        };
-        Mirror::from_snapshot(snapshot, false)
+        }
     }
+
+    #[test]
+    fn ignoring_whitespace_styles_gutter_blocks_from_the_char_diffs() {
+        let snapshot = |ignore_whitespace: bool, char_diff: bool| {
+            let mut snapshot = conflict_mirror_snapshot();
+            snapshot.options.ignore_whitespace = ignore_whitespace;
+            snapshot.engine.char_diff = char_diff;
+            snapshot.char_diffs = vec![
+                LineCharRuns {
+                    lines: vec![vec![kdiff4_protocol::engine::CharRun { columns: 0..1, same_in: vec![true, true] }]],
+                },
+                LineCharRuns {
+                    lines: vec![vec![kdiff4_protocol::engine::CharRun { columns: 0..1, same_in: vec![true, true] }]],
+                },
+            ];
+            snapshot
+        };
+        let style = |mirror: &Mirror| mirror.rows(Document::A).and_then(|rows| Rows::Mapped(rows).block_of_row(0)).and_then(|block| block.style);
+        assert_eq!(style(&Mirror::from_snapshot(snapshot(true, true), false)), None);
+        assert_eq!(style(&Mirror::from_snapshot(snapshot(false, true), false)), Some(CharStyle::Document(Document::B)));
+        assert_eq!(style(&Mirror::from_snapshot(snapshot(true, false), false)), Some(CharStyle::Document(Document::B)));
+    }
+
 
     #[test]
     fn unresolved_conflicts_show_in_d_and_the_summary() {

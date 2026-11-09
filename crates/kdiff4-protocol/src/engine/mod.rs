@@ -64,6 +64,9 @@ pub struct ComparisonOptions {
     /// Pair the lines of a changed chunk by how alike they are instead of by position.
     #[serde(default = "pair_similar_lines_default")]
     pub pair_similar_lines: bool,
+    /// Character-level diffs compare each region as a whole without its whitespace, line breaks included, so reflowed or reindented text is plain. Rows, regions and statuses don't change.
+    #[serde(default)]
+    pub ignore_whitespace: bool,
 }
 
 
@@ -79,6 +82,7 @@ impl Default for ComparisonOptions {
             align_b_with_c: false,
             char_diff_line_limit: 10_000,
             pair_similar_lines: true,
+            ignore_whitespace: false,
         }
     }
 }

@@ -406,6 +406,18 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
     assert_eq!(snapshot.current_region, None);
     expect_ok(&client, id);
 
+    let options = ComparisonOptions {
+        ignore_whitespace: true,
+        ..options
+    };
+    let id = client.send(Command::SetComparisonOptions(options.clone())).unwrap();
+    let reflowed = expect_snapshot(&client);
+    assert_eq!(reflowed.options, options);
+    assert_eq!(reflowed.comparison, snapshot.comparison);
+    assert_eq!(reflowed.output, snapshot.output);
+    assert_eq!(reflowed.merge, snapshot.merge);
+    expect_ok(&client, id);
+
     drop(client);
     host.join().unwrap();
 }

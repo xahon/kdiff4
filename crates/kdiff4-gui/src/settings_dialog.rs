@@ -72,6 +72,14 @@ impl SettingsDialog {
         self.draft.show_overview_strip = show;
     }
 
+    /// Follows the toolbar's ignore whitespace toggle, which also works while the dialog is open, so its OK doesn't undo it.
+    pub fn set_ignore_whitespace(&mut self, ignore: bool) {
+        if let Some((original, draft)) = self.comparison.as_mut() {
+            original.ignore_whitespace = ignore.clone();
+            draft.ignore_whitespace = ignore;
+        }
+    }
+
     /// Follows the toolbar's and the shortcut's minimap toggle, which also works while the dialog is open.
     pub fn set_show_minimap(&mut self, show: bool) {
         self.original.show_minimap = show;
@@ -581,6 +589,18 @@ mod tests {
         dialog.reset_to_defaults();
         assert_eq!(dialog.changed_comparison(), Some(&ComparisonOptions::default()));
     }
+
+    #[test]
+    fn ignore_whitespace_toggle_reaches_the_open_dialog_without_counting_as_a_change() {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), Some(&ComparisonOptions::default()));
+        dialog.set_ignore_whitespace(true);
+        assert_eq!(dialog.changed_comparison(), None);
+        if let Some((_, draft)) = dialog.comparison.as_mut() {
+            draft.try_hard = true;
+        }
+        assert_eq!(dialog.changed_comparison().map(|options| options.ignore_whitespace), Some(true));
+    }
+
 
     #[test]
     fn toolbar_toggle_reaches_the_open_dialog() {

@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn source_rows_line_up_with_d_by_their_place_in_the_region() {
         let comparison = comparison();
-        let source = RowMap::for_source(&comparison, &merge(), 0, 6, None);
+        let source = RowMap::for_source(&comparison, &merge(), 0, 6, None, None);
         let output = RowMap::for_output(&merge(), &comparison.regions, 4, None);
         let (source, output) = (Rows::Mapped(&source), Rows::Mapped(&output));
         assert_eq!(corresponding_row(source, 1, output), Some(1));
@@ -469,7 +469,7 @@ mod tests {
     fn with_void_space_d_has_a_row_for_every_source_row() {
         let comparison = comparison();
         let heights = rows::aligned_heights(&comparison.regions, &merge());
-        let source = RowMap::for_source(&comparison, &merge(), 0, 6, Some(&heights));
+        let source = RowMap::for_source(&comparison, &merge(), 0, 6, Some(&heights), None);
         let output = RowMap::for_output(&merge(), &comparison.regions, 4, Some(&heights));
         let (source, output) = (Rows::Mapped(&source), Rows::Mapped(&output));
         for row in 0..6 {
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn lens_rows_follow_the_pane_with_the_caret() {
         let comparison = comparison();
-        let source = RowMap::for_source(&comparison, &merge(), 0, 6, None);
+        let source = RowMap::for_source(&comparison, &merge(), 0, 6, None, None);
         let output = RowMap::for_output(&merge(), &comparison.regions, 4, None);
         let (source, output) = (Rows::Mapped(&source), Rows::Mapped(&output));
         assert_eq!(

@@ -11,6 +11,7 @@ mod session;
 mod similar_lines;
 mod text;
 mod undo;
+mod whitespace_char_diff;
 
 pub use builtin_engine::{BUILTIN_ENGINE_ID, BuiltinEngine};
 pub use engine_registry::EngineRegistry;

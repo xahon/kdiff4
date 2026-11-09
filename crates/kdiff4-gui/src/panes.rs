@@ -719,7 +719,7 @@ mod tests {
                 },
             ],
         };
-        let map = RowMap::for_source(&comparison, &[], 0, 12, None);
+        let map = RowMap::for_source(&comparison, &[], 0, 12, None, None);
         let rows = Some(Rows::Mapped(&map));
         let viewport = |offset: f32| {
             Some(Viewport {
@@ -851,7 +851,7 @@ mod tests {
                 },
             ],
         };
-        RowMap::for_source(&comparison, &[], 0, 32, None)
+        RowMap::for_source(&comparison, &[], 0, 32, None, None)
     }
 
     #[test]

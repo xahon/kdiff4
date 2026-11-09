@@ -49,6 +49,7 @@ const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
+const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
 const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
@@ -74,6 +75,8 @@ const MINIMAP_TOGGLE_LABEL: &str = "Minimap";
 const MINIMAP_TOGGLE_HINT: &str = "Toggle the Minimap: the whole document as a column right of the panes, to scroll by clicking or dragging";
 const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
 const OVERVIEW_TOGGLE_HINT: &str = "Toggle the Overview Strip: the current line of every document, with its character diff";
+const IGNORE_WHITESPACE_TOGGLE_LABEL: &str = "Ignore Whitespace";
+const IGNORE_WHITESPACE_TOGGLE_HINT: &str = "Toggle ignoring whitespace and line breaks in the character diff, so reflowed or reindented text shows only its real changes";
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
@@ -1472,6 +1475,9 @@ impl KdiffApp {
         if ctx.input_mut(|input| input.consume_shortcut(&MINIMAP_SHORTCUT)) {
             self.toggle_minimap();
         }
+        if ctx.input_mut(|input| input.consume_shortcut(&IGNORE_WHITESPACE_SHORTCUT)) {
+            self.toggle_ignore_whitespace();
+        }
     }
 
     /// Asks where to show the alignment the last mark completed, when the documents disagree on its order. The answer is a `PlaceAlignment` unless the user keeps the suggestion, which is in effect already.
@@ -1674,6 +1680,12 @@ impl KdiffApp {
                     if ui.add(item).on_hover_text(format!("{MINIMAP_TOGGLE_HINT} ({shortcut})")).clicked() {
                         self.toggle_minimap();
                     }
+                    let mut ignore_whitespace = self.ignores_whitespace();
+                    let item = egui::Checkbox::new(&mut ignore_whitespace, IGNORE_WHITESPACE_TOGGLE_LABEL);
+                    let shortcut = ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT);
+                    if ui.add_enabled(has_session, item).on_hover_text(format!("{IGNORE_WHITESPACE_TOGGLE_HINT} ({shortcut})")).clicked() {
+                        self.toggle_ignore_whitespace();
+                    }
                 });
                 ui.menu_button("Settings", |ui| {
                     let configure = egui::Button::new("Configure Kdiff4...").shortcut_text(ui.ctx().format_shortcut(&SETTINGS_SHORTCUT));
@@ -1697,7 +1709,7 @@ impl KdiffApp {
         });
     }
 
-    /// The strip under the menu bar: the void space toggle of the output pane and the overview strip toggle.
+    /// The strip under the menu bar: the void space toggle of the output pane, the overview strip, minimap and ignore whitespace toggles.
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         let is_merge = self.is_merge();
         let on = self.view().align_output;
@@ -1706,6 +1718,8 @@ impl KdiffApp {
         let mut overview_toggled = false;
         let mut minimap_toggled = false;
         let minimap_on = self.view().show_minimap;
+        let ignore_whitespace_on = self.ignores_whitespace();
+        let mut ignore_whitespace_toggled = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, paint_void_icon).on_hover_text(VOID_TOGGLE_HINT);
@@ -1724,6 +1738,12 @@ impl KdiffApp {
                 {
                     minimap_toggled = true;
                 }
+                if toolbar_toggle(ui, IGNORE_WHITESPACE_TOGGLE_LABEL, ignore_whitespace_on, true, paint_ignore_whitespace_icon)
+                    .on_hover_text(IGNORE_WHITESPACE_TOGGLE_HINT)
+                    .clicked()
+                {
+                    ignore_whitespace_toggled = true;
+                }
             });
         });
         if toggled {
@@ -1734,6 +1754,9 @@ impl KdiffApp {
         }
         if minimap_toggled {
             self.toggle_minimap();
+        }
+        if ignore_whitespace_toggled {
+            self.toggle_ignore_whitespace();
         }
     }
 
@@ -1775,6 +1798,25 @@ impl KdiffApp {
         }
         self.save_config(false);
     }
+
+    fn ignores_whitespace(&self) -> bool {
+        self.mirror.as_ref().is_some_and(|mirror| mirror.options().ignore_whitespace)
+    }
+
+
+    /// Turns ignoring whitespace in the character diff on or off, from the toolbar, the View menu or Ctrl+Shift+W. The engine recomputes the character diffs; D keeps its choices and edits.
+    fn toggle_ignore_whitespace(&mut self) {
+        let Some(mirror) = self.mirror.as_ref() else { return };
+        let options = kdiff4_protocol::engine::ComparisonOptions {
+            ignore_whitespace: !mirror.options().ignore_whitespace,
+            ..mirror.options().clone()
+        };
+        if let Some(dialog) = self.settings.as_mut() {
+            dialog.set_ignore_whitespace(options.ignore_whitespace.clone());
+        }
+        self.send(Command::SetComparisonOptions(options), Pending::ComparisonOptions);
+    }
+
 
     /// The view settings in effect: the settings dialog's draft while it is open, otherwise the saved ones.
     fn view(&self) -> &ViewConfig {
@@ -2072,6 +2114,26 @@ fn paint_minimap_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color
     ui.painter().rect_stroke(view, 0.0, stroke, egui::StrokeKind::Inside);
     ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
 }
+
+/// Two words with a dotted gap between them in a box: whitespace that doesn't count.
+fn paint_ignore_whitespace_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
+    let radius = theme::corner_radius_of(ui).max(3);
+    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
+    let stroke = egui::Stroke::new(1.0, stroke_color);
+    let left = square.left() + 3.0;
+    let right = square.right() - 3.0;
+    let width = right - left;
+    for (index, y) in [0.35, 0.65].iter().enumerate() {
+        let y = square.top() + square.height() * y;
+        let words = if index == 0 { (0.3, 0.6) } else { (0.45, 0.7) };
+        ui.painter().hline(left..=left + width * words.0, y, stroke);
+        ui.painter().hline(left + width * words.1..=right, y, stroke);
+        let dot = egui::pos2(left + width * (words.0 + words.1) / 2.0, y);
+        ui.painter().circle_filled(dot, 1.0, stroke_color.gamma_multiply(0.5));
+    }
+    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
+}
+
 
 /// Four lines of text of different lengths in a box.
 fn paint_overview_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
@@ -2838,7 +2900,7 @@ mod tests {
         let comparison = Comparison {
             regions: vec![region(0..1, Some(0)), region(1..1, None), region(1..2, Some(1))],
         };
-        rows::RowMap::for_source(&comparison, &[], 0, 2, None)
+        rows::RowMap::for_source(&comparison, &[], 0, 2, None, None)
     }
 
     #[test]
