@@ -3,7 +3,7 @@ use kdiff4_protocol::InsetChoice;
 
 use crate::alignment_gutter;
 
-const DIALOG_WIDTH: f32 = 440.0;
+pub(crate) const DIALOG_WIDTH: f32 = 440.0;
 const SUGGESTED_SUFFIX: &str = " (suggested)";
 pub const KEEP_LABEL: &str = "Keep Suggestion";
 

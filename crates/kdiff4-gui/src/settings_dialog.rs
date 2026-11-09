@@ -12,7 +12,7 @@ use crate::theme;
 const BUILTIN_FONT_LABEL: &str = "Built-in (Hack)";
 const MAX_CHAR_DIFF_LINE_LIMIT: usize = 1_000_000;
 /// The dialog keeps this size whatever the tab; a tab taller than the body scrolls.
-const DIALOG_WIDTH: f32 = 720.0;
+pub(crate) const DIALOG_WIDTH: f32 = 720.0;
 const BODY_HEIGHT: f32 = 440.0;
 const PREVIEW_LINES: [&str; 3] = [
     "fn main() { println!(\"Hello, world!\"); }",

@@ -3,6 +3,7 @@ mod app;
 mod autoscroll;
 mod char_diff;
 mod config;
+mod dialog_window;
 mod editing;
 mod eol;
 mod find;

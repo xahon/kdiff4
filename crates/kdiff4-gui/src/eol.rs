@@ -3,7 +3,7 @@ use kdiff4_protocol::{EolChoice, EolStyle};
 
 use crate::theme;
 
-const DIALOG_WIDTH: f32 = 380.0;
+pub(crate) const DIALOG_WIDTH: f32 = 380.0;
 const SELECTOR_WIDTH: f32 = 150.0;
 const STYLES: [EolStyle; 3] = [EolStyle::Lf, EolStyle::Cr, EolStyle::CrLf];
 pub const CONFLICT_LABEL: &str = "Conflict line ending";

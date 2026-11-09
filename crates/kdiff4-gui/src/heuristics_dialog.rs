@@ -3,7 +3,7 @@ use std::ops::Range;
 use egui::{DragValue, Grid, RichText, ScrollArea, Ui};
 use kdiff4_protocol::{Document, EntityKind, HeuristicMatch, HeuristicOptions, HeuristicProposal, MatchStage};
 
-const DIALOG_WIDTH: f32 = 760.0;
+pub(crate) const DIALOG_WIDTH: f32 = 760.0;
 const TABLE_HEIGHT: f32 = 320.0;
 pub const BLOCKS_LABEL: &str = "Blocks inside functions";
 pub const FIND_LABEL: &str = "Find Matches";

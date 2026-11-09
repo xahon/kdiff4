@@ -4,7 +4,7 @@ use semver::Version;
 
 use crate::update_check::ReleaseInfo;
 
-const DIALOG_WIDTH: f32 = 480.0;
+pub(crate) const DIALOG_WIDTH: f32 = 480.0;
 const NOTES_HEIGHT: f32 = 260.0;
 const NO_NOTES_TEXT: &str = "The release has no notes.";
 pub const INSTALL_LABEL: &str = "Update and Restart";

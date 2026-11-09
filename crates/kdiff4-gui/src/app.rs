@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use semver::Version;
@@ -8,6 +9,7 @@ use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, 
 
 use crate::Startup;
 use crate::config::{self, GuiConfig, ViewConfig};
+use crate::dialog_window::{self, DialogSpec, DialogWindows};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
@@ -21,13 +23,13 @@ use crate::panes::{self, PaneAction, PaneOptions, PaneState};
 use crate::paths;
 use crate::rows::{self, Rows};
 use crate::scroll::ScrollMotion;
-use crate::settings_dialog::{SettingsAction, SettingsDialog};
+use crate::settings_dialog::{self, SettingsAction, SettingsDialog};
 use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
 use crate::self_update::{self, UpdateInstall};
 use crate::theme;
 use crate::update_check::{self, CheckOutcome, ReleaseInfo, UpdateCheck, UpdateError};
-use crate::heuristics_dialog::{HeuristicsAction, HeuristicsDialog};
+use crate::heuristics_dialog::{self, HeuristicsAction, HeuristicsDialog};
 use crate::inset_dialog::{self, InsetAnswer};
 use crate::update_dialog::{self, AvailableAction, InstallOffer};
 use crate::window_frame;
@@ -96,8 +98,7 @@ const ADD_TO_START_MENU_HINT: &str = "Create a Kdiff4 shortcut in your Start men
 const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
 pub const WINDOW_TITLE: &str = "Kdiff4";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
-/// The startup window grows to this while the settings dialog is open, so the dialog fits.
-const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
+const UPDATE_DIALOG_ID: &str = "update_dialog";
 
 /// A save held back until the user chooses the output's line ending style.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,13 +187,11 @@ pub struct KdiffApp {
     shortcut_install: Option<ShortcutInstall>,
     update_window: Option<UpdateWindow>,
     update_cache: CommonMarkCache,
-    update_modal_id: egui::Id,
+    dialogs: DialogWindows,
     /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
     inset_prompt: Option<InsetChoice>,
-    inset_modal_id: egui::Id,
     /// The save waiting for the user to choose the output's line ending style.
     eol_prompt: Option<PendingSave>,
-    eol_modal_id: egui::Id,
     /// The Heuristics Alignment window, while it is open.
     heuristics: Option<HeuristicsDialog>,
     /// The request for fold ranges in flight; one at a time.
@@ -258,11 +257,9 @@ impl KdiffApp {
             shortcut_install: None,
             update_window: None,
             update_cache: CommonMarkCache::default(),
-            update_modal_id: egui::Id::unique("update_window"),
+            dialogs: DialogWindows::default(),
             inset_prompt: None,
-            inset_modal_id: egui::Id::unique("inset_prompt"),
             eol_prompt: None,
-            eol_modal_id: egui::Id::unique("eol_prompt"),
             heuristics: None,
             fold_request: None,
             folds_language: None,
@@ -451,10 +448,11 @@ Shortcut: {}", link.display()),
                     can_install: release.asset_for_this_platform().is_some(),
                     has_unsaved_changes,
                 };
-                let modal = egui::Modal::new(self.update_modal_id).show(ctx, |ui| {
-                    choice = update_dialog::show_available(ui, release, &self.current_version, offer, &mut self.update_cache);
+                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Update Available", width: update_dialog::DIALOG_WIDTH, closable: true };
+                let closed = self.dialogs.show(ctx, &spec, |ui| {
+                    choice = update_dialog::show_available(ui, release, &self.current_version, offer.clone(), &mut self.update_cache);
                 });
-                if choice.is_none() && modal.should_close() {
+                if choice.is_none() && closed {
                     choice = Some(AvailableAction::RemindLater);
                 }
             }
@@ -464,7 +462,8 @@ Shortcut: {}", link.display()),
                     ctx.request_repaint_after(std::time::Duration::from_millis(100));
                     let downloaded = install.downloaded.load(std::sync::atomic::Ordering::Relaxed);
                     let total = install.total.load(std::sync::atomic::Ordering::Relaxed);
-                    egui::Modal::new(self.update_modal_id).show(ctx, |ui| {
+                    let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Updating Kdiff4", width: update_dialog::DIALOG_WIDTH, closable: false };
+                    self.dialogs.show(ctx, &spec, |ui| {
                         if update_dialog::show_progress(ui, &release.version, install.fraction(), downloaded, total) {
                             install.cancel();
                         }
@@ -472,8 +471,9 @@ Shortcut: {}", link.display()),
                 }
             },
             Some(UpdateWindow::Message { title, text }) => {
-                let modal = egui::Modal::new(self.update_modal_id).show(ctx, |ui| dismissed = update_dialog::show_message(ui, title, text));
-                dismissed |= modal.should_close();
+                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title, width: update_dialog::DIALOG_WIDTH, closable: true };
+                let closed = self.dialogs.show(ctx, &spec, |ui| dismissed = update_dialog::show_message(ui, title, text));
+                dismissed |= closed;
             }
         }
         if dismissed {
@@ -508,9 +508,6 @@ Shortcut: {}", link.display()),
             self.font_scan.start(ctx);
             let options = self.mirror.as_ref().map(Mirror::options);
             self.settings = Some(SettingsDialog::new(&self.config.view, options));
-            if !self.window_enlarged {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(SETTINGS_WINDOW_SIZE.into()));
-            }
         }
     }
 
@@ -529,9 +526,6 @@ Shortcut: {}", link.display()),
                 }
             }
             SettingsAction::Cancel | SettingsAction::OpenConfigFile => self.apply_view(ctx, dialog.original()),
-        }
-        if !self.window_enlarged {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(INITIAL_WINDOW_SIZE.into()));
         }
     }
 
@@ -1563,8 +1557,9 @@ Shortcut: {}", link.display()),
     fn show_heuristics(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.heuristics.as_mut() else { return };
         let mut action = None;
-        let modal = egui::Modal::new(egui::Id::unique("heuristics_dialog")).show(ctx, |ui| action = dialog.show(ui));
-        if action.is_none() && modal.should_close() {
+        let spec = DialogSpec { id: "heuristics_dialog", title: "Heuristics Alignment", width: heuristics_dialog::DIALOG_WIDTH, closable: true };
+        let closed = self.dialogs.show(ctx, &spec, |ui| action = dialog.show(ui));
+        if action.is_none() && closed {
             action = Some(HeuristicsAction::Cancel);
         }
         let Some(action) = action else { return };
@@ -1715,8 +1710,9 @@ Shortcut: {}", link.display()),
     fn show_inset_prompt(&mut self, ctx: &egui::Context) {
         let Some(choice) = self.inset_prompt.as_ref() else { return };
         let mut answer = None;
-        let modal = egui::Modal::new(self.inset_modal_id).show(ctx, |ui| answer = inset_dialog::show(ui, choice));
-        if answer.is_none() && modal.should_close() {
+        let spec = DialogSpec { id: "inset_dialog", title: "Alignment Placement", width: inset_dialog::DIALOG_WIDTH, closable: true };
+        let closed = self.dialogs.show(ctx, &spec, |ui| answer = inset_dialog::show(ui, choice));
+        if answer.is_none() && closed {
             answer = Some(InsetAnswer::Keep);
         }
         if let Some(answer) = answer {
@@ -1737,8 +1733,9 @@ Shortcut: {}", link.display()),
             return;
         }
         let mut answer = None;
-        let modal = egui::Modal::new(self.eol_modal_id).show(ctx, |ui| answer = eol::show_dialog(ui));
-        if answer.is_none() && modal.should_close() {
+        let spec = DialogSpec { id: "eol_dialog", title: "Line Endings", width: eol::DIALOG_WIDTH, closable: true };
+        let closed = self.dialogs.show(ctx, &spec, |ui| answer = eol::show_dialog(ui));
+        if answer.is_none() && closed {
             answer = Some(EolAnswer::Cancel);
         }
         if let Some(answer) = answer {
@@ -1763,10 +1760,11 @@ Shortcut: {}", link.display()),
             None => return,
         };
         let mut action = None;
-        let modal = egui::Modal::new(egui::Id::unique("settings_dialog")).show(ctx, |ui| {
+        let spec = DialogSpec { id: "settings_dialog", title: "Settings", width: settings_dialog::DIALOG_WIDTH, closable: true };
+        let closed = self.dialogs.show(ctx, &spec, |ui| {
             action = dialog.show(ui, families);
         });
-        if action.is_none() && modal.should_close() {
+        if action.is_none() && closed {
             action = Some(SettingsAction::Cancel);
         }
         let draft = dialog.draft().clone();
@@ -2151,11 +2149,7 @@ Shortcut: {}", link.display()),
         if self.title_bar_refreshed || !ctx.input(|input| input.viewport().focused.unwrap_or(false)) {
             return;
         }
-        let theme = match ctx.options(|options| options.theme_preference) {
-            egui::ThemePreference::Light => egui::SystemTheme::Light,
-            egui::ThemePreference::Dark => egui::SystemTheme::Dark,
-            egui::ThemePreference::System => egui::SystemTheme::SystemDefault,
-        };
+        let theme = dialog_window::title_bar_theme(ctx.options(|options| options.theme_preference));
         ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
         self.title_bar_refreshed = true;
     }
@@ -2226,11 +2220,12 @@ impl eframe::App for KdiffApp {
                     find_events = find::show_bar(&ctx, find_corner, &mut self.panes.find);
                 }
                 if self.form_open {
-                    let modal = egui::Modal::new(egui::Id::unique("open_dialog")).show(&ctx, |ui| {
+                    let spec = DialogSpec { id: "open_dialog", title: "Open", width: open_dialog::FORM_MAX_WIDTH, closable: !busy };
+                    let closed = self.dialogs.show(&ctx, &spec, |ui| {
                         ui.heading("Open");
                         form_action = self.form.show(ui, self.error.as_deref(), busy, !busy);
                     });
-                    if !busy && modal.should_close() {
+                    if closed {
                         form_action = Some(FormAction::Cancel);
                     }
                 }
@@ -2253,6 +2248,7 @@ impl eframe::App for KdiffApp {
         self.show_heuristics(&ctx);
         self.show_settings(&ctx);
         self.show_update_window(&ctx);
+        self.dialogs.end_frame(frame.window_handle().ok().map(|handle| handle.as_raw()));
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
         self.update_window_title(&ctx);

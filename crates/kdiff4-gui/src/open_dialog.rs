@@ -6,7 +6,7 @@ use kdiff4_protocol::{Document, Labels, OpenFiles};
 use crate::paths::clean_path_text;
 
 /// The form fills the window or dialog up to this width; path fields take whatever the labels and buttons leave.
-const FORM_MAX_WIDTH: f32 = 720.0;
+pub(crate) const FORM_MAX_WIDTH: f32 = 720.0;
 const MIN_FIELD_WIDTH: f32 = 80.0;
 
 /// Paths typed or picked in the Open dialog, in `Document::ALL` order, plus labels from the command line, which the dialog keeps but doesn't show.
