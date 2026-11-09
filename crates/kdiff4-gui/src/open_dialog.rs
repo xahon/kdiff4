@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use egui::{Align, Color32, Label, Layout, RichText, TextEdit, TextStyle, TextWrapMode, Ui, WidgetText, vec2};
+use egui::{Align, Color32, Id, Label, Layout, RichText, TextEdit, TextStyle, TextWrapMode, Ui, WidgetText, vec2};
 use kdiff4_protocol::{Document, Labels, OpenFiles};
 
 use crate::paths::clean_path_text;
@@ -66,13 +66,16 @@ impl OpenForm {
             .fold(0.0, f32::max);
         for document in Document::ALL {
             ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(vec2(label_width, height), Layout::left_to_right(Align::Center), |ui| ui.label(label(document)));
+                ui.allocate_ui_with_layout(vec2(label_width, height), Layout::left_to_right(Align::Center), |ui| {
+                    ui.set_min_width(label_width);
+                    ui.label(label(document))
+                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Browse...").clicked() {
                         action = Some(FormAction::Browse(document));
                     }
                     let width = ui.available_width().max(MIN_FIELD_WIDTH);
-                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).desired_width(width));
+                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).id(field_id(document)).desired_width(width));
                 });
             });
         }
@@ -169,6 +172,11 @@ fn index(document: Document) -> usize {
     }
 }
 
+fn field_id(document: Document) -> Id {
+    Id::unique(("open_form_path", index(document)))
+}
+
+
 fn label(document: Document) -> &'static str {
     match document {
         Document::A => "A (Base):",
@@ -263,6 +271,27 @@ mod tests {
         assert_eq!(files.b, PathBuf::from("b.txt"));
         assert_eq!(files.c, None);
     }
+
+    #[test]
+    fn path_fields_are_aligned() {
+        let context = egui::Context::default();
+        let mut form = OpenForm::default();
+        for _ in 0..2 {
+            let mut output = context.run_ui(egui::RawInput::default(), |ui| {
+                form.show(ui, None, false, true);
+            });
+            output.textures_delta.clear();
+        }
+        let rects: Vec<_> = Document::ALL
+            .into_iter()
+            .map(|document| context.read_response(field_id(document)).unwrap().rect)
+            .collect();
+        for rect in &rects[1..] {
+            assert_eq!(rect.left(), rects[0].left(), "{rects:?}");
+            assert_eq!(rect.right(), rects[0].right(), "{rects:?}");
+        }
+    }
+
 
     #[test]
     fn remembered_dir_is_parent_of_picked_file() {
