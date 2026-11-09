@@ -53,6 +53,8 @@ pub enum PaneAction {
     /// Mark an anchor in a source pane before this line, which may be one past the last.
     MarkAnchor(Document, usize),
     RemoveAlignmentMark(Document, u32),
+    /// Move the mark `number` of a document to these lines.
+    SetAlignmentMarkLines(Document, u32, Range<usize>),
     /// Give the mark `number` of a document the number `to`.
     RenumberAlignmentMark(Document, u32, u32),
     /// Show the alignment `number` at the place with the index `slot` among the other alignments.
@@ -535,6 +537,7 @@ fn pane(
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
+                        Some(PointerAction::SetMarkLines(number, start, end)) => actions.push(PaneAction::SetAlignmentMarkLines(document.clone(), number, start..end)),
                         None => {}
                     }
                     match response.menu {

@@ -251,6 +251,12 @@ impl Session {
         Ok(self.marks_changed(None))
     }
 
+    /// Moves a mark to other lines (see `Command::SetAlignmentMarkLines`). The comparison does not change until the alignments are applied.
+    pub fn set_alignment_mark_lines(&mut self, document: Document, number: u32, lines: Range<usize>) -> Result<Change, CoreError> {
+        self.alignments.set_lines(document, number, lines, &self.line_counts())?;
+        Ok(self.marks_changed(None))
+    }
+
     /// Gives a mark another number; a mark of the same document that has it takes the old one.
     pub fn renumber_alignment_mark(&mut self, document: Document, number: u32, to: u32) -> Result<Change, CoreError> {
         self.alignments.renumber(document, number, to)?;

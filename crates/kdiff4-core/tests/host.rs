@@ -365,6 +365,47 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
 }
 
 #[test]
+fn a_mark_can_be_stretched_through_the_protocol() {
+    let dir = temp_dir("stretch");
+    let a = write(&dir, "a.txt", "1
+2
+3
+4
+");
+    let b = write(&dir, "b.txt", "1
+2
+3
+4
+");
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(OpenFiles { a, b, ..OpenFiles::default() })).unwrap();
+    expect_snapshot(&client);
+    expect_ok(&client, id);
+    let id = client.send(Command::MarkAlignment { document: Document::A, lines: 1..2 }).unwrap();
+    expect_delta(&client);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::SetAlignmentMarkLines { document: Document::A, number: 1, lines: 1..4 }).unwrap();
+    let delta = expect_delta(&client);
+    let Change::AlignmentsChanged(alignments) = delta.change else {
+        panic!("expected the marks")
+    };
+    assert_eq!(alignments.marks.iter().map(|mark| mark.lines.clone()).collect::<Vec<_>>(), [1..4]);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::SetAlignmentMarkLines { document: Document::A, number: 1, lines: 1..9 }).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response")
+    };
+    assert_eq!(response.id, id);
+    assert_eq!(response.result.unwrap_err().kind, ErrorKind::InvalidRequest);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
+#[test]
 fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
     let dir = temp_dir("alignment");
     let a = write(&dir, "a.txt", "Bar\nBaz\n");

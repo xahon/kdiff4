@@ -114,6 +114,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
         }
         Command::MarkAlignment { document, lines } => active(session)?.mark_alignment(document, lines)?,
         Command::RemoveAlignmentMark { document, number } => active(session)?.remove_alignment_mark(document, number)?,
+        Command::SetAlignmentMarkLines { document, number, lines } => active(session)?.set_alignment_mark_lines(document, number, lines)?,
         Command::RenumberAlignmentMark { document, number, to } => active(session)?.renumber_alignment_mark(document, number, to)?,
         Command::PlaceAlignment { number, slot } => active(session)?.place_alignment(number, slot)?,
         Command::ClearAlignmentMarks => match active(session)?.clear_alignment_marks() {

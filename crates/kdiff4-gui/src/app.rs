@@ -975,6 +975,9 @@ impl KdiffApp {
             PaneAction::RemoveAlignmentMark(document, number) => {
                 self.send(Command::RemoveAlignmentMark { document, number }, Pending::AlignmentEdit);
             }
+            PaneAction::SetAlignmentMarkLines(document, number, lines) => {
+                self.send(Command::SetAlignmentMarkLines { document, number, lines }, Pending::AlignmentEdit);
+            }
             PaneAction::RenumberAlignmentMark(document, number, to) => {
                 self.send(Command::RenumberAlignmentMark { document, number, to }, Pending::AlignmentEdit);
             }

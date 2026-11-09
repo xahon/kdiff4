@@ -2,9 +2,9 @@ use std::ops::Range;
 
 use egui::epaint::text::cursor::CCursor;
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align2, Color32, CursorIcon, FontId, Galley, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
+use egui::{Align2, Color32, CursorIcon, FontId, Galley, Key, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
 
-use kdiff4_protocol::{Document, LineCharRuns};
+use kdiff4_protocol::{AlignmentMark, Document, LineCharRuns};
 
 use crate::alignment_gutter::{self, PaneMarks, Place};
 use crate::char_diff::{self, CharStyle};
@@ -136,6 +136,15 @@ pub enum PointerAction {
     SelectLine(usize),
     /// A click on a gutter block of this region: make it current.
     SelectRegion(usize),
+    /// A drag of an edge or anchor of the alignment column ended: the mark with this number now takes the lines from the second to the third (an empty range for an anchor).
+    SetMarkLines(u32, usize, usize),
+}
+
+/// The edge or anchor of the alignment column the user holds with the primary button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MarkDrag {
+    number: u32,
+    grip: alignment_gutter::Grip,
 }
 
 /// What the user picked from the context menu of a source pane.
@@ -415,6 +424,13 @@ pub fn show(
         }
         alignment_gutter::hits(&places, &depths, row_height, bar_width, x - margin.alignment_left(), pointer.y - output.inner_rect.min.y + scroll.y)
     };
+    let grab_at = |pointer: Pos2| -> Option<(usize, alignment_gutter::Grip)> {
+        let x = pointer.x - output.inner_rect.min.x;
+        if style.alignment_color.is_none() || x < margin.alignment_left() || x >= margin.gutter_left() {
+            return None;
+        }
+        alignment_gutter::grab(&places, &depths, row_height, bar_width, x - margin.alignment_left(), pointer.y - output.inner_rect.min.y + scroll.y)
+    };
     let hovered_marks = hover_position.filter(|_| response.hovered()).map(alignment_hits).unwrap_or_default();
     if !hovered_marks.is_empty() {
         let text = hovered_marks
@@ -460,9 +476,46 @@ pub fn show(
             }
         });
     }
-    if response.hovered() && hover_position.and_then(gutter_at).is_some() {
+    let drag_id = ui.make_persistent_id((id_salt, "mark_drag"));
+    if response.hovered() && ui.input(|input| input.pointer.primary_pressed()) {
+        let grabbed = hover_position.and_then(grab_at).and_then(|(index, grip)| marks.marks.get(index).map(|mark| MarkDrag { number: mark.number, grip }));
+        if let Some(grabbed) = grabbed {
+            ui.data_mut(|data| data.insert_temp(drag_id, Some(grabbed)));
+        }
+    }
+    let mark_drag = ui.data(|data| data.get_temp::<Option<MarkDrag>>(drag_id)).flatten();
+    let mut resized = None;
+    if let Some(active) = mark_drag {
+        let index = marks.marks.iter().position(|mark| mark.number == active.number);
+        let released = ui.input(|input| input.pointer.primary_released());
+        let canceled = ui.input(|input| input.key_pressed(Key::Escape));
+        let target = index.zip(ui.input(|input| input.pointer.latest_pos())).and_then(|(index, pointer)| {
+            let content_y = pointer.y - output.inner_rect.min.y + scroll.y;
+            alignment_gutter::dragged_lines(&marks.marks[index], active.grip, rows, lines.count(), row_height, content_y).map(|dragged| (index, dragged))
+        });
+        let ended = released || canceled || target.is_none();
+        match (index, target) {
+            (Some(index), Some((_, dragged))) if released && dragged != marks.marks[index].lines => resized = Some((active.number, dragged.start, dragged.end)),
+            (Some(_), Some((index, dragged))) if !released && !canceled => {
+                let place = alignment_gutter::place(&AlignmentMark { lines: dragged, ..marks.marks[index].clone() }, rows, lines.count());
+                let top = output.inner_rect.min.y - scroll.y;
+                let left = output.inner_rect.min.x + margin.alignment_left();
+                let color = style.alignment_color.unwrap_or(palette.text);
+                alignment_gutter::paint_drag(&ui.painter_at(output.inner_rect), &place, depths[index], top, row_height, left, bar_width, color);
+                ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+                ui.ctx().request_repaint();
+            }
+            _ => {}
+        }
+        if ended {
+            ui.data_mut(|data| data.insert_temp(drag_id, None::<MarkDrag>));
+        }
+    }
+    if mark_drag.is_none() && response.hovered() && hover_position.and_then(grab_at).is_some() {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+    } else if mark_drag.is_none() && response.hovered() && hover_position.and_then(gutter_at).is_some() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    } else if response.hovered() || held {
+    } else if mark_drag.is_none() && (response.hovered() || held) {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
     }
     let hit = |pointer: Pos2| {
@@ -480,6 +533,7 @@ pub fn show(
     }
     let in_gutter_press = ui.data(|data| data.get_temp::<bool>(gutter_press_id)).unwrap_or(false);
     let pointer = match pointer_position {
+        _ if mark_drag.is_some() => resized.map(|(number, start, end)| PointerAction::SetMarkLines(number, start, end)),
         _ if gutter_region_pressed.is_some() => gutter_region_pressed.map(PointerAction::SelectRegion),
         _ if in_gutter_press => None,
         Some(pointer) if response.triple_clicked() => Some(PointerAction::SelectLine(hit(pointer).0.line)),
@@ -1212,6 +1266,7 @@ mod tests {
         alignment_color: Option<Color32>,
         caret: Option<Caret>,
         menu: Option<MenuAction>,
+        resized: Option<PointerAction>,
         origin: Pos2,
         row_height: f32,
         margin: Margin,
@@ -1233,6 +1288,7 @@ mod tests {
             alignment_color,
             caret,
             menu: None,
+            resized: None,
             origin: Pos2::ZERO,
             row_height: 0.0,
             margin: Margin {
@@ -1264,6 +1320,9 @@ mod tests {
                 let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None);
                 if response.menu.is_some() {
                     test.menu = response.menu;
+                }
+                if response.pointer.is_some() {
+                    test.resized = response.pointer;
                 }
             },
             test,
@@ -1300,6 +1359,59 @@ mod tests {
             test.origin.x + test.margin.numbers + test.margin.alignment / 2.0,
             test.origin.y + (row as f32 + 0.5) * test.row_height,
         )
+    }
+
+    /// Presses the primary button at `from`, moves to `to` and releases it there.
+    fn drag(harness: &mut egui_kittest::Harness<'_, MenuTest>, from: Pos2, to: Pos2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        harness.hover_at(from);
+        harness.run_steps(2);
+        harness.event(button(from, true));
+        harness.run_steps(2);
+        harness.hover_at(to);
+        harness.run_steps(2);
+        harness.event(button(to, false));
+        harness.run_steps(4);
+    }
+
+    /// A point in the alignment column on the edge above the row `row`, a pixel into it.
+    fn on_alignment_edge(test: &MenuTest, row: usize, inside: f32) -> Pos2 {
+        pos2(test.origin.x + test.margin.numbers + test.margin.alignment / 2.0, test.origin.y + row as f32 * test.row_height + inside)
+    }
+
+    #[test]
+    fn dragging_the_bottom_edge_of_a_mark_stretches_it_without_selecting_text() {
+        let mut harness = menu_harness(Some(Color32::BLUE), None);
+        let test = harness.state();
+        let (from, to) = (on_alignment_edge(test, 3, -1.0), on_alignment_edge(test, 4, 1.0));
+        drag(&mut harness, from, to);
+        assert_eq!(harness.state().resized, Some(PointerAction::SetMarkLines(1, 1, 4)));
+    }
+
+    #[test]
+    fn dragging_the_top_edge_of_a_mark_up_stretches_it_and_a_click_changes_nothing() {
+        let mut harness = menu_harness(Some(Color32::BLUE), None);
+        let test = harness.state();
+        let (from, to) = (on_alignment_edge(test, 1, 1.0), on_alignment_edge(test, 0, 1.0));
+        drag(&mut harness, from, to);
+        assert_eq!(harness.state().resized, Some(PointerAction::SetMarkLines(1, 0, 3)));
+        harness.state_mut().resized = None;
+        drag(&mut harness, from, from);
+        assert_eq!(harness.state().resized, None);
+    }
+
+    #[test]
+    fn the_middle_of_a_mark_does_not_start_a_resize() {
+        let mut harness = menu_harness(Some(Color32::BLUE), None);
+        let from = on_alignment_column(harness.state(), 1);
+        let to = on_alignment_column(harness.state(), 3);
+        drag(&mut harness, from, to);
+        assert!(!matches!(harness.state().resized, Some(PointerAction::SetMarkLines(..))));
     }
 
     fn caret_on(line: usize) -> Option<Caret> {

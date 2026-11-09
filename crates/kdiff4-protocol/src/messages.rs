@@ -96,6 +96,12 @@ pub enum Command {
         document: Document,
         number: u32,
     },
+    /// Moves the mark `number` of a source document to `lines`: stretches a range or shrinks it, or moves an anchor (an empty range) to another position. A range stays a range and an anchor stays an anchor. The mark becomes the user's own if Heuristics Alignment made it. Nothing is compared again until `ApplyAlignments`. Rejected when `lines` do not fit the document or cross another mark of that document.
+    SetAlignmentMarkLines {
+        document: Document,
+        number: u32,
+        lines: Range<usize>,
+    },
     /// Gives the mark `number` of a source document the number `to`. When that document already has a mark `to`, the two swap numbers.
     RenumberAlignmentMark {
         document: Document,

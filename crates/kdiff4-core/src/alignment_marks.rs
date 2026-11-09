@@ -84,6 +84,27 @@ impl AlignmentMarks {
         Ok(())
     }
 
+    /// Moves the lines of the mark `number` of `document` to `lines`. A range stays a range and an anchor stays an anchor. The mark becomes the user's own, so Heuristics Alignment keeps it.
+    pub fn set_lines(&mut self, document: Document, number: u32, lines: Range<usize>, line_counts: &[usize]) -> Result<(), CoreError> {
+        let position = self.index_of(&document, number)?;
+        let index = self.marks[position].document;
+        let count = line_counts.get(index).cloned().ok_or(CoreError::NoSuchDocument { document: document.clone() })?;
+        if lines.start > lines.end || lines.end > count {
+            return Err(invalid(format!("lines {}..{} do not fit the {count} lines of {}", lines.start, lines.end, document.letter())));
+        }
+        if self.marks[position].lines.is_empty() != lines.is_empty() {
+            return Err(invalid(format!("alignment {number} of {} cannot change between a range and an anchor", document.letter())));
+        }
+        if let Some(other) = self.of(index).find(|mark| mark.number != number && crosses(&mark.lines, &lines)) {
+            return Err(invalid(format!("alignment {} of {} is in the way of {}", other.number, document.letter(), subject(&lines))));
+        }
+        let mark = &mut self.marks[position];
+        mark.lines = lines;
+        mark.heuristic = false;
+        self.settle();
+        Ok(())
+    }
+
     /// Gives the mark `number` of `document` the number `to`; a mark that has `to` already takes `number`.
     pub fn renumber(&mut self, document: Document, number: u32, to: u32) -> Result<(), CoreError> {
         if to == 0 {
@@ -614,6 +635,36 @@ mod tests {
         assert_eq!(numbers(&marks, Document::A), [(2, 2..3), (3, 0..1), (7, 4..5)]);
         marks.renumber(Document::A, 2, 2).unwrap();
         assert_eq!(numbers(&marks, Document::B), [(1, 6..7)]);
+    }
+
+    #[test]
+    fn set_lines_stretches_a_range_or_moves_an_anchor() {
+        let mut marks = marks(&[(Document::A, 2..4), (Document::A, 6..6), (Document::B, 1..2)]);
+        marks.set_lines(Document::A, 1, 1..5, &COUNTS).unwrap();
+        marks.set_lines(Document::A, 2, 9..9, &COUNTS).unwrap();
+        assert_eq!(numbers(&marks, Document::A), [(1, 1..5), (2, 9..9)]);
+        assert_eq!(numbers(&marks, Document::B), [(1, 1..2)]);
+    }
+
+    #[test]
+    fn set_lines_rejects_what_marking_rejects_and_a_change_of_kind() {
+        let mut marks = marks(&[(Document::A, 2..4), (Document::A, 4..6), (Document::A, 8..8)]);
+        assert_eq!(reason(marks.set_lines(Document::A, 1, 2..5, &COUNTS)), "alignment 2 of A is in the way of lines 3 to 5");
+        assert_eq!(reason(marks.set_lines(Document::A, 1, 2..11, &COUNTS)), "lines 2..11 do not fit the 10 lines of A");
+        assert_eq!(reason(marks.set_lines(Document::A, 1, 2..2, &COUNTS)), "alignment 1 of A cannot change between a range and an anchor");
+        assert_eq!(reason(marks.set_lines(Document::A, 3, 7..9, &COUNTS)), "alignment 3 of A cannot change between a range and an anchor");
+        assert_eq!(reason(marks.set_lines(Document::A, 4, 1..2, &COUNTS)), "A has no alignment 4");
+        assert_eq!(numbers(&marks, Document::A), [(1, 2..4), (2, 4..6), (3, 8..8)]);
+    }
+
+    #[test]
+    fn stretching_a_heuristic_mark_makes_it_the_users() {
+        let mut marks = AlignmentMarks::default();
+        marks.replace_heuristic(&[vec![0..2, 0..2, 0..2]], &COUNTS).unwrap();
+        assert!(marks.summary(3).of(Document::A).all(|mark| mark.heuristic));
+        marks.set_lines(Document::A, 1, 0..3, &COUNTS).unwrap();
+        assert!(marks.summary(3).of(Document::A).all(|mark| !mark.heuristic));
+        assert!(marks.summary(3).of(Document::B).all(|mark| mark.heuristic));
     }
 
     #[test]

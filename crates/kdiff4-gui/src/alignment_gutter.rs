@@ -17,6 +17,9 @@ const ARROW_RUN: f32 = 6.5;
 const ARROW_HEAD_LENGTH: f32 = 4.5;
 const ARROW_HEAD_WIDTH: f32 = 5.0;
 const ARROW_DOT_RADIUS: f32 = 2.5;
+/// How far from an edge of a range, in pixels, the pointer still takes hold of it, and the line width of the outline shown while dragging.
+const EDGE_GRAB: f32 = 4.0;
+const DRAG_STROKE: f32 = 2.0;
 /// The border of a mark nothing in the other documents pairs with, as a share of the color's strength.
 const UNMATCHED_BORDER_SHARE: f32 = 0.45;
 
@@ -150,6 +153,72 @@ pub fn hits(places: &[Place], depths: &[usize], row_height: f32, bar_width: f32,
         .collect();
     let innermost = covered.iter().map(depth).max();
     covered.into_iter().filter(|index| Some(depth(index)) == innermost).collect()
+}
+
+
+/// The part of a mark the pointer takes hold of to move it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grip {
+    /// The top edge of a range: its first line.
+    Top,
+    /// The bottom edge of a range: its end.
+    Bottom,
+    /// An anchor, which moves as a whole.
+    Anchor,
+}
+
+/// The mark whose edge (or anchor chip) is under a point of the alignment column, given like in `hits`. Only the bar of the mark itself counts, and of several edges within reach the nearest one wins.
+pub fn grab(places: &[Place], depths: &[usize], row_height: f32, bar_width: f32, x: f32, content_y: f32) -> Option<(usize, Grip)> {
+    if row_height <= 0.0 || bar_width <= 0.0 || content_y < 0.0 {
+        return None;
+    }
+    let lane = (x.max(0.0) / bar_width).floor() as usize;
+    let reach = EDGE_GRAB.min(row_height / 3.0);
+    let near = |edge: usize, reach: f32| Some((content_y - edge as f32 * row_height).abs()).filter(|distance| *distance <= reach);
+    let mut best: Option<(f32, usize, Grip)> = None;
+    for (index, place) in places.iter().enumerate().filter(|(index, _)| depths.get(*index).cloned().unwrap_or(0) == lane) {
+        let candidates = match place {
+            Place::Rows(rows) => [(near(rows.start, reach), Grip::Top), (near(rows.end, reach), Grip::Bottom)],
+            Place::Edge(edge) => [(near(*edge, row_height * CHIP_HEIGHT_SHARE / 2.0), Grip::Anchor), (None, Grip::Anchor)],
+        };
+        for (distance, grip) in candidates {
+            if let Some(distance) = distance
+                && best.is_none_or(|(nearest, _, _)| distance < nearest)
+            {
+                best = Some((distance, index, grip));
+            }
+        }
+    }
+    best.map(|(_, index, grip)| (index, grip))
+}
+
+/// The lines a dragged mark takes when the pointer is at `content_y`, in pixels from the top of the content: the edge it drags goes to the line boundary nearest to the pointer, but a range keeps at least one line and an anchor goes to the boundary itself. `None` when the mark has no such grip.
+pub fn dragged_lines(mark: &AlignmentMark, grip: Grip, rows: Rows<'_>, line_count: usize, row_height: f32, content_y: f32) -> Option<Range<usize>> {
+    if row_height <= 0.0 || mark.is_anchor() != (grip == Grip::Anchor) {
+        return None;
+    }
+    let edge = ((content_y / row_height).round().max(0.0) as usize).min(rows.len());
+    let boundary = rows.line_at_or_after(edge).unwrap_or(line_count).min(line_count);
+    Some(match grip {
+        Grip::Top => boundary.min(mark.lines.end.saturating_sub(1))..mark.lines.end,
+        Grip::Bottom => mark.lines.start..boundary.max(mark.lines.start + 1).min(line_count),
+        Grip::Anchor => boundary..boundary,
+    })
+}
+
+/// Paints where a dragged mark would stand: an outline of its range in its bar, or a line at its anchor. `top` is the screen y of the first row, and `column_left` the screen x of the first bar.
+pub fn paint_drag(painter: &Painter, place: &Place, depth: usize, top: f32, row_height: f32, column_left: f32, bar_width: f32, color: Color32) {
+    let left = column_left + depth as f32 * bar_width;
+    let stroke = Stroke::new(DRAG_STROKE, color);
+    match place {
+        Place::Rows(rows) => {
+            let rect = Rect::from_min_max(pos2(left, top + rows.start as f32 * row_height), pos2(left + bar_width, top + rows.end as f32 * row_height));
+            painter.rect_stroke(rect, 1.0, stroke, StrokeKind::Inside);
+        }
+        Place::Edge(edge) => {
+            painter.hline(left..=left + bar_width, top + *edge as f32 * row_height, stroke);
+        }
+    }
 }
 
 
@@ -612,5 +681,49 @@ mod tests {
         assert_eq!(option_label(&option(Some(1), None, &[Document::B])), "Below alignment 1 (moves B)");
         assert_eq!(option_label(&option(Some(1), Some(3), &[Document::A, Document::B, Document::C])), "Between alignments 1 and 3 (moves A, B and C)");
         assert_eq!(option_label(&option(Some(2), None, &[])), "Below alignment 2");
+    }
+
+    #[test]
+    fn the_edges_of_a_range_and_the_chip_of_an_anchor_can_be_grabbed() {
+        let places = [Place::Rows(2..5), Place::Edge(8)];
+        let depths = [0, 0];
+        let at = |x: f32, y: f32| grab(&places, &depths, 20.0, 10.0, x, y);
+        assert_eq!(at(3.0, 41.0), Some((0, Grip::Top)));
+        assert_eq!(at(3.0, 103.0), Some((0, Grip::Bottom)));
+        assert_eq!(at(3.0, 70.0), None);
+        assert_eq!(at(3.0, 160.0 + 5.0), Some((1, Grip::Anchor)));
+        assert_eq!(at(13.0, 41.0), None);
+    }
+
+    #[test]
+    fn only_the_bar_of_a_nested_mark_grabs_it() {
+        let places = [Place::Rows(0..6), Place::Rows(1..3)];
+        let depths = [0, 1];
+        assert_eq!(grab(&places, &depths, 20.0, 10.0, 15.0, 21.0), Some((1, Grip::Top)));
+        assert_eq!(grab(&places, &depths, 20.0, 10.0, 5.0, 21.0), None);
+        assert_eq!(grab(&places, &depths, 20.0, 10.0, 5.0, 119.0), Some((0, Grip::Bottom)));
+    }
+
+    #[test]
+    fn dragging_an_edge_moves_it_to_the_nearest_line_boundary_and_keeps_a_line() {
+        let range = mark(1, 3..6, MarkStatus::Pending);
+        let rows = Rows::PerLine(10);
+        let dragged = |grip, y: f32| dragged_lines(&range, grip, rows, 10, 20.0, y);
+        assert_eq!(dragged(Grip::Top, 29.0), Some(1..6));
+        assert_eq!(dragged(Grip::Top, 500.0), Some(5..6));
+        assert_eq!(dragged(Grip::Top, -20.0), Some(0..6));
+        assert_eq!(dragged(Grip::Bottom, 170.0), Some(3..9));
+        assert_eq!(dragged(Grip::Bottom, 0.0), Some(3..4));
+        assert_eq!(dragged(Grip::Bottom, 900.0), Some(3..10));
+        assert_eq!(dragged(Grip::Anchor, 100.0), None);
+    }
+
+    #[test]
+    fn dragging_an_anchor_moves_it_between_lines_up_to_the_end_of_the_text() {
+        let anchor = mark(1, 4..4, MarkStatus::Pending);
+        let rows = Rows::PerLine(10);
+        assert_eq!(dragged_lines(&anchor, Grip::Anchor, rows, 10, 20.0, 41.0), Some(2..2));
+        assert_eq!(dragged_lines(&anchor, Grip::Anchor, rows, 10, 20.0, 999.0), Some(10..10));
+        assert_eq!(dragged_lines(&anchor, Grip::Top, rows, 10, 20.0, 41.0), None);
     }
 }
