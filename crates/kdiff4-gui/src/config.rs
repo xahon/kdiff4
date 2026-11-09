@@ -19,6 +19,10 @@ pub const DEFAULT_SMOOTH_SCROLL_MS: u16 = 150;
 pub const MIN_SCROLL_STEP_LINES: u8 = 1;
 pub const MAX_SCROLL_STEP_LINES: u8 = 20;
 pub const DEFAULT_SCROLL_STEP_LINES: u8 = 3;
+pub const MIN_AUTOSCROLL_LINES_PER_SECOND: u8 = 1;
+pub const MAX_AUTOSCROLL_LINES_PER_SECOND: u8 = 100;
+pub const DEFAULT_DRAG_SCROLL_LINES_PER_SECOND: u8 = 8;
+pub const DEFAULT_MIDDLE_SCROLL_LINES_PER_SECOND: u8 = 25;
 /// A translucent yellow: text keeps its contrast on both themes.
 pub const DEFAULT_CURRENT_REGION_COLOR: [u8; 4] = [255, 214, 0, 72];
 pub const MAX_REGION_CORNER_RADIUS: u8 = 8;
@@ -98,6 +102,10 @@ pub struct ViewConfig {
     pub smooth_scroll_ms: u16,
     /// Lines one notch of the mouse wheel scrolls.
     pub scroll_step_lines: u8,
+    /// Lines per second a selection drag scrolls with the pointer just past a pane's edge; it goes faster farther out.
+    pub drag_scroll_lines_per_second: u8,
+    /// Lines per second middle-button scrolling goes with the pointer 100 pixels from where the button went down.
+    pub middle_scroll_lines_per_second: u8,
     /// RGBA background of the jumped-to region, void space included.
     pub current_region_color: [u8; 4],
     /// Rounding of the region boxes, in pixels.
@@ -136,6 +144,8 @@ impl Default for ViewConfig {
             smooth_scrolling: true,
             smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS,
             scroll_step_lines: DEFAULT_SCROLL_STEP_LINES,
+            drag_scroll_lines_per_second: DEFAULT_DRAG_SCROLL_LINES_PER_SECOND,
+            middle_scroll_lines_per_second: DEFAULT_MIDDLE_SCROLL_LINES_PER_SECOND,
             current_region_color: DEFAULT_CURRENT_REGION_COLOR,
             region_corner_radius: DEFAULT_REGION_CORNER_RADIUS,
             other_region_border_percent: DEFAULT_OTHER_REGION_BORDER_PERCENT,
@@ -163,6 +173,8 @@ impl ViewConfig {
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.smooth_scroll_ms = self.smooth_scroll_ms.clamp(MIN_SMOOTH_SCROLL_MS, MAX_SMOOTH_SCROLL_MS);
         self.scroll_step_lines = self.scroll_step_lines.clamp(MIN_SCROLL_STEP_LINES, MAX_SCROLL_STEP_LINES);
+        self.drag_scroll_lines_per_second = self.drag_scroll_lines_per_second.clamp(MIN_AUTOSCROLL_LINES_PER_SECOND, MAX_AUTOSCROLL_LINES_PER_SECOND);
+        self.middle_scroll_lines_per_second = self.middle_scroll_lines_per_second.clamp(MIN_AUTOSCROLL_LINES_PER_SECOND, MAX_AUTOSCROLL_LINES_PER_SECOND);
         self.region_corner_radius = self.region_corner_radius.min(MAX_REGION_CORNER_RADIUS);
         self.other_region_border_percent = self.other_region_border_percent.min(MAX_OTHER_REGION_BORDER_PERCENT);
         self.inset_arrow_gap = self.inset_arrow_gap.min(MAX_INSET_ARROW_GAP);
@@ -421,6 +433,8 @@ last_dir = \"x\"
             smooth_scrolling: false,
             smooth_scroll_ms: 400,
             scroll_step_lines: 5,
+            drag_scroll_lines_per_second: 12,
+            middle_scroll_lines_per_second: 40,
             current_region_color: [1, 2, 3, 4],
             region_corner_radius: 4,
             other_region_border_percent: 30,
@@ -519,7 +533,7 @@ show_overview_strip = false
     fn view_values_out_of_range_are_sanitized() {
         let dir = temp_dir("sanitize");
         let path = dir.join("gui.toml");
-        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\nregion_corner_radius = 50\nother_region_border_percent = 250\ninset_arrow_gap = 99\n").unwrap();
+        fs::write(&path, "[view]\nfont_family = \"  \"\nfont_size = 500.0\ncorner_radius = 200\njump_context_lines = 99\nsmooth_scroll_ms = 9999\nscroll_step_lines = 0\ndrag_scroll_lines_per_second = 0\nmiddle_scroll_lines_per_second = 250\nregion_corner_radius = 50\nother_region_border_percent = 250\ninset_arrow_gap = 99\n").unwrap();
         let view = load(&path).unwrap().view;
         assert_eq!(view.font_family, None);
         assert_eq!(view.region_corner_radius, MAX_REGION_CORNER_RADIUS);
@@ -528,6 +542,7 @@ show_overview_strip = false
         assert_eq!(view.corner_radius, MAX_CORNER_RADIUS);
         assert_eq!(view.jump_context_lines, MAX_JUMP_CONTEXT_LINES);
         assert_eq!((view.smooth_scroll_ms, view.scroll_step_lines), (MAX_SMOOTH_SCROLL_MS, MIN_SCROLL_STEP_LINES));
+        assert_eq!((view.drag_scroll_lines_per_second, view.middle_scroll_lines_per_second), (MIN_AUTOSCROLL_LINES_PER_SECOND, MAX_AUTOSCROLL_LINES_PER_SECOND));
 
         assert_eq!(view.font_size, MAX_FONT_SIZE);
         let tiny = ViewConfig {

@@ -216,6 +216,8 @@ pub struct PaneOptions {
     pub jump_context_rows: usize,
     /// Rows one wheel notch scrolls.
     pub scroll_step_rows: usize,
+    pub drag_scroll_lines_per_second: u8,
+    pub middle_scroll_lines_per_second: u8,
     pub scroll_motion: ScrollMotion,
     pub region_corner_radius: u8,
     pub other_region_border_percent: u8,
@@ -278,6 +280,8 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         current_region: mirror.current_region(),
         current_region_color: options.current_region_color,
         scroll_step_rows: options.scroll_step_rows,
+        drag_scroll_lines_per_second: f32::from(options.drag_scroll_lines_per_second),
+        middle_scroll_lines_per_second: f32::from(options.middle_scroll_lines_per_second),
         region_corner_radius: options.region_corner_radius,
         other_region_border_opacity: f32::from(options.other_region_border_percent) / 100.0,
         whitespace: options.whitespace.clone(),

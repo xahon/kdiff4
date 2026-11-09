@@ -83,6 +83,8 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 - A jump scrolls only when some pane doesn't show all rows of the region yet, and then leaves 12 lines above it by default, fewer in a pane too short to show the region below them. The caret moves to the region's start but stays hidden until it is moved again. kdiff3 always scrolls to the difference and shows its cursor there.
 - Clicking a gutter block makes its region current and scrolls every pane there like a jump, from the source panes and from D alike.
 - Wheel scrolling and jumps can be smooth, with a configurable duration, and the rows a wheel notch scrolls are configurable. kdiff3 scrolls at once, by the system's wheel step.
+- Dragging a selection past a pane's edge scrolls at a configurable speed (`drag_scroll_lines_per_second`) that grows with the distance past the edge. kdiff3 scrolls, every 50 ms, a number of lines that grows with the square of that distance.
+- Middle-button scrolling: a held or clicked middle button scrolls the pane toward the pointer, as in web browsers, at a configurable speed (`middle_scroll_lines_per_second`). kdiff3 pastes the clipboard at the pointer on a middle click in the merge pane, X11 style, and ignores the middle button in the other panes.
 
 
 ### Appearance

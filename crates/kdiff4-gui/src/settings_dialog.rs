@@ -4,7 +4,7 @@ use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
 use crate::config::{
     MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_INSET_ARROW_GAP, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES,
-    MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig,
+    MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MAX_AUTOSCROLL_LINES_PER_SECOND, MIN_AUTOSCROLL_LINES_PER_SECOND, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig,
 };
 use crate::fonts::MonospaceFamily;
 use crate::theme;
@@ -271,6 +271,26 @@ impl SettingsDialog {
                             .suffix(" lines"),
                     )
                     .on_hover_text("Lines one notch of the mouse wheel scrolls.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Selection drag speed");
+                    ui.add(
+                        DragValue::new(&mut self.draft.drag_scroll_lines_per_second)
+                            .range(MIN_AUTOSCROLL_LINES_PER_SECOND..=MAX_AUTOSCROLL_LINES_PER_SECOND)
+                            .speed(0.2)
+                            .suffix(" lines/s"),
+                    )
+                    .on_hover_text("How fast a pane scrolls while you drag a selection past its edge, with the pointer just past it. It goes faster the farther out the pointer is.");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Middle-button scroll speed");
+                    ui.add(
+                        DragValue::new(&mut self.draft.middle_scroll_lines_per_second)
+                            .range(MIN_AUTOSCROLL_LINES_PER_SECOND..=MAX_AUTOSCROLL_LINES_PER_SECOND)
+                            .speed(0.2)
+                            .suffix(" lines/s"),
+                    )
+                    .on_hover_text("How fast a pane scrolls with the pointer 100 pixels from where the middle button went down. Hold the middle button and move, or click it to scroll until the next click or Escape.");
                 });
             });
             ui.end_row();

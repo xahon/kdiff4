@@ -2,11 +2,12 @@ use std::ops::Range;
 
 use egui::epaint::text::cursor::CCursor;
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Align2, Color32, CursorIcon, FontId, Galley, Key, Painter, Pos2, Rangef, Rect, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, pos2, vec2};
+use egui::{Align2, Color32, CursorIcon, FontId, Galley, Key, LayerId, Modifiers, Order, Painter, PointerButton, Pos2, Rangef, Rect, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2, pos2, vec2};
 
 use kdiff4_protocol::{AlignmentMark, Document, LineCharRuns};
 
 use crate::alignment_gutter::{self, PaneMarks, Place};
+use crate::autoscroll::{self, MiddleInput, MiddleScroll};
 use crate::char_diff::{self, CharStyle};
 use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
@@ -38,6 +39,9 @@ const REGION_BORDER_WIDTH: f32 = 1.0;
 const WHITESPACE_OPACITY: f32 = 0.6;
 /// The fold column is this share of a row height wide, and its buttons this share of a row height high.
 const FOLD_COLUMN_SHARE: f32 = 0.9;
+/// Longest frame an autoscroll moves by, so a stall doesn't make it jump.
+const MAX_AUTOSCROLL_STEP: f32 = 0.1;
+const MIDDLE_CURSOR_RADIUS: f32 = 13.0;
 const FOLD_BUTTON_SHARE: f32 = 0.55;
 pub const FOLD_ELLIPSIS: &str = "...";
 /// Space between a folded header's text and its Fold Ellipsis, and around the dots inside the ellipsis' frame, in characters.
@@ -64,6 +68,10 @@ pub struct ViewStyle<'a> {
     pub current_region_color: Color32,
     /// Rows one wheel notch scrolls.
     pub scroll_step_rows: usize,
+    /// Lines per second a selection drag scrolls with the pointer just past the view's edge.
+    pub drag_scroll_lines_per_second: f32,
+    /// Lines per second middle-button scrolling goes at its reference distance.
+    pub middle_scroll_lines_per_second: f32,
     pub region_corner_radius: u8,
     /// Opacity of the borders of the regions other than the current one, from 0 to 1.
     pub other_region_border_opacity: f32,
@@ -324,7 +332,13 @@ pub fn show(
     if let Some(target) = revealed.or(offset) {
         area = area.vertical_scroll_offset(target);
     }
-    let wheel = take_vertical_wheel(ui, row_height, viewport_height, style.scroll_step_rows);
+    let horizontal_id = ui.make_persistent_id((id_salt, "autoscroll_x"));
+    if let Some(x) = ui.data_mut(|data| data.remove_temp::<f32>(horizontal_id)) {
+        area = area.horizontal_scroll_offset(x);
+    }
+    let mut wheel = take_vertical_wheel(ui, row_height, viewport_height, style.scroll_step_rows);
+    // One target for the whole visible pane, so empty space, the margin and the space right of a line take the mouse too. It goes in before the scroll area, so the scroll bars floating over the text are on top of it and can be grabbed.
+    let response = ui.interact(ui.available_rect_before_wrap(), ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
 
     let output = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -450,10 +464,22 @@ pub fn show(
     });
     let output = output.inner;
 
-    // One target for the whole visible pane, so empty space, the margin and the space right of a line take the mouse too.
-    let response = ui.interact(output.inner_rect, ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
     let held = response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
     let scroll = output.state.clamped_offset();
+    let middle_id = ui.make_persistent_id((id_salt, "middle_scroll"));
+    let previous_middle = ui.data(|data| data.get_temp::<Option<MiddleScroll>>(middle_id)).flatten();
+    let middle_input = ui.input_mut(|input| MiddleInput {
+        pointer: input.pointer.latest_pos(),
+        middle_pressed_here: response.hovered() && input.pointer.button_pressed(PointerButton::Middle),
+        middle_pressed: input.pointer.button_pressed(PointerButton::Middle),
+        middle_released: input.pointer.button_released(PointerButton::Middle),
+        other_pressed: input.pointer.button_pressed(PointerButton::Primary) || input.pointer.button_pressed(PointerButton::Secondary),
+        escape: previous_middle.is_some() && input.consume_key(Modifiers::NONE, Key::Escape),
+    });
+    let middle = MiddleScroll::next(previous_middle, middle_input);
+    ui.data_mut(|data| data.insert_temp(middle_id, middle));
+    // The press that ends middle-button scrolling only ends it.
+    let press_ended_middle = previous_middle.is_some() && middle_input.other_pressed;
     let gutter_at = |pointer: Pos2| {
         gutter_region(
             rows,
@@ -609,7 +635,7 @@ pub fn show(
         }
         position_at(ui, lines, rows, &font_id, palette, row_height, text_x, content_y)
     };
-    let pressed = response.hovered() && ui.input(|input| input.pointer.primary_pressed());
+    let pressed = response.hovered() && !press_ended_middle && ui.input(|input| input.pointer.primary_pressed());
     let pointer_position = ui.input(|input| input.pointer.interact_pos());
     // A press on a gutter selects its region; the rest of that click and drag must not select text.
     let gutter_press_id = ui.make_persistent_id((id_salt, "gutter_press"));
@@ -618,7 +644,33 @@ pub fn show(
     if pressed {
         ui.data_mut(|data| data.insert_temp(gutter_press_id, gutter_region_pressed.is_some() || fold_pressed.is_some()));
     }
+    if press_ended_middle {
+        ui.data_mut(|data| data.insert_temp(gutter_press_id, true));
+    }
     let in_gutter_press = ui.data(|data| data.get_temp::<bool>(gutter_press_id)).unwrap_or(false);
+    let text_rect = Rect::from_min_max(pos2(output.inner_rect.left() + margin.total(), output.inner_rect.top()), output.inner_rect.max);
+    let autoscroll = match (middle, middle_input.pointer) {
+        (Some(middle), Some(pointer)) => {
+            let velocity = middle.velocity(pointer, row_height, style.middle_scroll_lines_per_second);
+            paint_middle_scroll(ui, middle.origin, pointer, velocity, palette);
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+            ui.ctx().request_repaint();
+            velocity
+        }
+        _ => match pointer_position {
+            Some(pointer) if held && mark_drag.is_none() && !in_gutter_press => autoscroll::drag_velocity_2d(pointer, text_rect, row_height, style.drag_scroll_lines_per_second),
+            _ => Vec2::ZERO,
+        },
+    };
+    if autoscroll != Vec2::ZERO {
+        let dt = ui.input(|input| input.stable_dt).min(MAX_AUTOSCROLL_STEP);
+        wheel.direct += autoscroll.y * dt;
+        if autoscroll.x != 0.0 {
+            let max_x = (output.content_size.x - output.inner_rect.width()).max(0.0);
+            ui.data_mut(|data| data.insert_temp(horizontal_id, autoscroll::advance(scroll.x.clone(), autoscroll.x.clone(), dt, max_x)));
+        }
+        ui.ctx().request_repaint();
+    }
     let pointer = match pointer_position {
         _ if mark_drag.is_some() => resized.map(|(number, start, end)| PointerAction::SetMarkLines(number, start, end)),
         _ if gutter_region_pressed.is_some() => gutter_region_pressed.map(PointerAction::SelectRegion),
@@ -635,7 +687,9 @@ pub fn show(
             })
         }
         Some(pointer) if held => {
-            let (position, void_row) = hit(pointer);
+            let content_y = fully_visible_content_y(pointer.y - output.inner_rect.min.y + scroll.y, scroll.y, output.inner_rect.height(), row_height);
+            let x = pointer.x.min(output.inner_rect.right() - 1.0);
+            let (position, void_row) = hit(pos2(x, output.inner_rect.min.y + content_y - scroll.y));
             Some(PointerAction::Drag { position, void_row })
         }
         _ => None,
@@ -1124,6 +1178,42 @@ pub fn row_at(content_y: f32, row_height: f32, line_count: usize) -> Option<usiz
     (row < line_count).then_some(row)
 }
 
+/// `content_y`, a point in a view's content, moved into the rows a viewport scrolled to `scroll` and `height` high shows in full, so a selection dragged past an edge stops at the last row in view and doesn't scroll by itself. A viewport too small for a whole row keeps the point inside it.
+pub fn fully_visible_content_y(content_y: f32, scroll: f32, height: f32, row_height: f32) -> f32 {
+    if !content_y.is_finite() || !(height > 0.0) {
+        return content_y;
+    }
+    let (top, bottom) = match row_height > 0.0 {
+        true => ((scroll / row_height).ceil() * row_height, ((scroll + height) / row_height).floor() * row_height - 1.0),
+        false => (scroll.clone(), scroll + height - 1.0),
+    };
+    if bottom < top {
+        return content_y.clamp(scroll.clone(), scroll + (height - 1.0).max(0.0));
+    }
+    content_y.clamp(top, bottom)
+}
+
+
+/// Middle-button scrolling's cursor, drawn over everything since egui has none like it: a circle with an arrow each way, the arrows the view is scrolling toward stronger, and a dot where the button went down.
+fn paint_middle_scroll(ui: &Ui, origin: Pos2, pointer: Pos2, velocity: Vec2, palette: &Palette) {
+    let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, egui::Id::unique("middle_scroll_cursor")));
+    let ink = palette.pane_text;
+    let faint = ink.gamma_multiply(0.35);
+    painter.circle_filled(origin, 2.5, faint);
+    painter.circle(pointer, MIDDLE_CURSOR_RADIUS, palette.pane_bg.gamma_multiply(0.85), Stroke::new(1.5, ink));
+    let arrows = [(vec2(0.0, -1.0), velocity.y < 0.0), (vec2(0.0, 1.0), velocity.y > 0.0), (vec2(-1.0, 0.0), velocity.x < 0.0), (vec2(1.0, 0.0), velocity.x > 0.0)];
+    let idle = velocity == Vec2::ZERO;
+    for (direction, active) in arrows {
+        let tip = pointer + direction * (MIDDLE_CURSOR_RADIUS - 3.0);
+        let base = pointer + direction * (MIDDLE_CURSOR_RADIUS - 8.0);
+        let side = direction.rot90() * 4.0;
+        let color = if active || idle { ink } else { faint };
+        painter.add(Shape::convex_polygon(vec![tip, base + side, base - side], color, Stroke::NONE));
+    }
+    painter.circle_filled(pointer, 1.5, ink);
+}
+
+
 /// The scroll offset that brings `line` fully into a viewport scrolled to `current`, or `None` if it is already visible.
 pub fn reveal_offset(line: usize, row_height: f32, viewport_height: f32, current: f32) -> Option<f32> {
     let top = line as f32 * row_height;
@@ -1293,6 +1383,8 @@ mod tests {
             current_region: None,
             current_region_color: Color32::TRANSPARENT,
             scroll_step_rows: 3,
+            drag_scroll_lines_per_second: 8.0,
+            middle_scroll_lines_per_second: 25.0,
             region_corner_radius: 0,
             other_region_border_opacity: 1.0,
             whitespace: WhitespaceConfig::default(),
@@ -1680,6 +1772,190 @@ mod tests {
         harness.event(button(false));
         harness.run_steps(4);
         assert_eq!(harness.state().resized, None);
+    }
+
+
+    #[test]
+    fn a_dragged_point_stays_in_the_fully_visible_rows() {
+        assert_eq!(fully_visible_content_y(50.0, 0.0, 100.0, 20.0), 50.0);
+        assert_eq!(fully_visible_content_y(150.0, 0.0, 110.0, 20.0), 99.0);
+        assert_eq!(fully_visible_content_y(-30.0, 5.0, 100.0, 20.0), 20.0);
+        assert_eq!(fully_visible_content_y(500.0, 0.0, 10.0, 20.0), 9.0);
+        assert!(fully_visible_content_y(f32::NAN, 0.0, 100.0, 20.0).is_nan());
+    }
+
+
+    struct ScrollTest {
+        offset: f32,
+        actions: Vec<PointerAction>,
+        origin: Pos2,
+        size: Vec2,
+        row_height: f32,
+        text_left: f32,
+    }
+
+
+    const SCROLL_TEST_SIZE: Vec2 = vec2(400.0, 200.0);
+
+
+    /// A view of 200 long lines whose vertical offset the test keeps the way the panes do: it follows the scroll bar and adds the wheel.
+    fn scroll_harness() -> egui_kittest::Harness<'static, ScrollTest> {
+        let text: &'static str = Box::leak((0..200).map(|line| format!("{line:03}{}\n", "x".repeat(300))).collect::<String>().into_boxed_str());
+        let test = ScrollTest { offset: 0.0, actions: Vec::new(), origin: Pos2::ZERO, size: Vec2::ZERO, row_height: 0.0, text_left: 0.0 };
+        let mut harness = egui_kittest::Harness::builder().with_size(SCROLL_TEST_SIZE).with_step_dt(0.01).build_ui_state(
+            move |ui, test: &mut ScrollTest| {
+                let ranges = editing::editor_lines(text);
+                let lines = Lines { text, ranges: &ranges };
+                let style = style(true, MarginKind::Nothing);
+                test.origin = ui.max_rect().min;
+                test.size = ui.available_size();
+                test.row_height = row_height(ui);
+                let font_id = TextStyle::Monospace.resolve(ui.style());
+                let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
+                test.text_left = test.origin.x + margin_widths(&style, lines.count(), char_width, test.row_height, 0).total();
+                let marks = PaneMarks { marks: &[], highest: 0, insets: &[] };
+                let given = test.offset.clone();
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, None, false, Some(given), &style, marks, None, None);
+                let max = response.viewport.max_offset();
+                test.offset = match (response.viewport.offset - given).abs() > 0.5 {
+                    true => response.viewport.offset,
+                    false => (given + response.wheel.stepped + response.wheel.direct).min(max).max(0.0),
+                };
+                test.actions.extend(response.pointer);
+            },
+            test,
+        );
+        harness.run_steps(2);
+        harness
+    }
+
+
+    fn button_event(pos: Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// The column a primary click at the left edge of the text lands in.
+    fn column_at_text_left(harness: &mut egui_kittest::Harness<'_, ScrollTest>) -> usize {
+        let pos = pos2(harness.state().text_left + 1.0, harness.state().origin.y + harness.state().row_height * 2.5);
+        harness.state_mut().actions.clear();
+        harness.hover_at(pos);
+        harness.run_steps(2);
+        harness.event(button_event(pos, egui::PointerButton::Primary, true));
+        harness.run_steps(2);
+        harness.event(button_event(pos, egui::PointerButton::Primary, false));
+        harness.run_steps(2);
+        match harness.state().actions.first() {
+            Some(PointerAction::Press { position, .. }) => position.column,
+            other => panic!("expected a press, got {other:?}"),
+        }
+    }
+
+
+    fn primary_drag(harness: &mut egui_kittest::Harness<'_, ScrollTest>, from: Pos2, to: Pos2, hold_steps: usize) {
+        harness.hover_at(from);
+        harness.run_steps(2);
+        harness.event(button_event(from, egui::PointerButton::Primary, true));
+        harness.run_steps(2);
+        harness.hover_at(to);
+        harness.run_steps(hold_steps);
+        harness.event(button_event(to, egui::PointerButton::Primary, false));
+        harness.run_steps(2);
+    }
+
+
+    #[test]
+    fn the_horizontal_scroll_bar_can_be_dragged() {
+        let mut harness = scroll_harness();
+        let (origin, size) = (harness.state().origin, harness.state().size);
+        let bar_y = origin.y + size.y - 4.0;
+        primary_drag(&mut harness, pos2(origin.x + 40.0, bar_y), pos2(origin.x + 200.0, bar_y), 4);
+        assert!(harness.state().actions.is_empty(), "the drag selected text: {:?}", harness.state().actions);
+        assert!(column_at_text_left(&mut harness) > 0, "the view did not scroll sideways");
+    }
+
+
+    #[test]
+    fn the_vertical_scroll_bar_can_be_dragged() {
+        let mut harness = scroll_harness();
+        let (origin, size) = (harness.state().origin, harness.state().size);
+        let bar_x = origin.x + size.x - 4.0;
+        primary_drag(&mut harness, pos2(bar_x, origin.y + 10.0), pos2(bar_x, origin.y + 100.0), 4);
+        assert!(harness.state().actions.is_empty(), "the drag selected text: {:?}", harness.state().actions);
+        assert!(harness.state().offset > 0.0);
+    }
+
+
+    #[test]
+    fn a_selection_dragged_past_the_bottom_scrolls_at_a_steady_pace() {
+        let mut harness = scroll_harness();
+        let (origin, size, row_height) = (harness.state().origin, harness.state().size, harness.state().row_height);
+        let from = pos2(origin.x + 100.0, origin.y + row_height * 2.5);
+        let below = pos2(origin.x + 100.0, origin.y + size.y + 2.0);
+        harness.hover_at(from);
+        harness.run_steps(2);
+        harness.event(button_event(from, egui::PointerButton::Primary, true));
+        harness.run_steps(2);
+        harness.hover_at(below);
+        harness.run_steps(50);
+        let offset = harness.state().offset;
+        let rows = offset / row_height;
+        assert!(rows > 1.0 && rows < 20.0, "scrolled {rows} rows in half a second");
+        let last_visible = ((offset + size.y) / row_height).floor() as usize;
+        match harness.state().actions.last() {
+            Some(PointerAction::Drag { position, .. }) => assert!(position.line < last_visible, "the selection ran ahead of the view to line {}", position.line),
+            other => panic!("expected a drag, got {other:?}"),
+        }
+        harness.event(button_event(below, egui::PointerButton::Primary, false));
+        harness.run_steps(2);
+    }
+
+
+    #[test]
+    fn a_middle_click_scrolls_toward_the_pointer_until_the_next_click() {
+        let mut harness = scroll_harness();
+        let (origin, size) = (harness.state().origin, harness.state().size);
+        let center = origin + size / 2.0;
+        harness.hover_at(center);
+        harness.run_steps(2);
+        harness.event(button_event(center, egui::PointerButton::Middle, true));
+        harness.run_steps(1);
+        harness.event(button_event(center, egui::PointerButton::Middle, false));
+        harness.run_steps(1);
+        assert_eq!(harness.state().offset, 0.0);
+        let below = center + vec2(0.0, 80.0);
+        harness.hover_at(below);
+        harness.run_steps(30);
+        let scrolled = harness.state().offset;
+        assert!(scrolled > 0.0, "middle-button scrolling did not scroll");
+        harness.event(button_event(below, egui::PointerButton::Primary, true));
+        harness.run_steps(1);
+        harness.event(button_event(below, egui::PointerButton::Primary, false));
+        harness.run_steps(1);
+        let stopped = harness.state().offset;
+        harness.run_steps(10);
+        assert_eq!(harness.state().offset, stopped, "the click did not stop scrolling");
+        assert!(harness.state().actions.is_empty(), "the stopping click selected text: {:?}", harness.state().actions);
+    }
+
+
+    #[test]
+    fn middle_button_hold_scrolls_until_released() {
+        let mut harness = scroll_harness();
+        let (origin, size) = (harness.state().origin, harness.state().size);
+        let center = origin + size / 2.0;
+        harness.hover_at(center);
+        harness.run_steps(2);
+        harness.event(button_event(center, egui::PointerButton::Middle, true));
+        harness.run_steps(1);
+        let below = center + vec2(0.0, 60.0);
+        harness.hover_at(below);
+        harness.run_steps(20);
+        assert!(harness.state().offset > 0.0);
+        harness.event(button_event(below, egui::PointerButton::Middle, false));
+        harness.run_steps(1);
+        let stopped = harness.state().offset;
+        harness.run_steps(10);
+        assert_eq!(harness.state().offset, stopped);
     }
 
 

@@ -2123,6 +2123,8 @@ Shortcut: {}", link.display()),
             current_region_color: egui::Color32::from_rgba_unmultiplied(r, g, b, a),
             jump_context_rows: view.jump_context_lines as usize,
             scroll_step_rows: view.scroll_step_lines as usize,
+            drag_scroll_lines_per_second: view.drag_scroll_lines_per_second,
+            middle_scroll_lines_per_second: view.middle_scroll_lines_per_second,
             scroll_motion: ScrollMotion {
                 smooth: view.smooth_scrolling,
                 duration: view.smooth_scroll_ms as f32 / 1000.0,

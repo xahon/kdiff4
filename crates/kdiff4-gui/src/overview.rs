@@ -706,6 +706,8 @@ mod tests {
                     current_region: None,
                     current_region_color: Color32::TRANSPARENT,
                     scroll_step_rows: 3,
+                    drag_scroll_lines_per_second: 8.0,
+                    middle_scroll_lines_per_second: 25.0,
                     region_corner_radius: 0,
                     other_region_border_opacity: 1.0,
                     whitespace: WhitespaceConfig::default(),

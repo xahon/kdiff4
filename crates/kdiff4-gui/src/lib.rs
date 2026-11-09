@@ -1,5 +1,6 @@
 mod alignment_gutter;
 mod app;
+mod autoscroll;
 mod char_diff;
 mod config;
 mod editing;
