@@ -1,3 +1,6 @@
+#![windows_subsystem = "windows"]
+
+mod console;
 mod logging;
 
 use std::path::PathBuf;
@@ -114,6 +117,7 @@ fn run(launch: Launch) -> anyhow::Result<()> {
 
 /// Usage errors exit with 1, like kdiff3, not clap's 2.
 fn main() -> ExitCode {
+    console::attach_to_parent();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {

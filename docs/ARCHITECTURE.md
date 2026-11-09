@@ -87,6 +87,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | gui | `paths.rs` | cleaning path text from the command line, the Open form and pane headers |
 | bin | `main.rs` | the command line, mapping it to a launch, and wiring the host to the GUI |
 | bin | `logging.rs` | the logger: rotating files next to the executable, stdout, the level override and the panic hook |
+| bin | `console.rs` | Windows only: attaching to the launching terminal's console so stdout and stderr reach it |
 
 
 ## Crates
@@ -719,6 +720,7 @@ Usage: `kdiff4 [OPTIONS] FILE1 [FILE2] [FILE3]`
 - Compatible with `git mergetool` / `git difftool` invocations used for kdiff3.
 - Implemented so far: the positional files, `-b`/`--base`, `-o`/`--output`/`--out`, `--L1`/`--L2`/`--L3` and `-L`/`--fname`. A set with A and B opens directly, with no Open window and no overwrite question; fewer files open the Open window with what was given filled in. Paths from the command line, the Open window and the pane headers are cleaned the same way: surrounding whitespace, line breaks and other control characters are dropped, and on Windows surrounding quotes too, so a pasted "Copy as path" value or an IDE run configuration that adds a trailing line break still names the file.
 - Wiring: the binary starts the host, connects a client over the in-process transport and sends the open command. With `--auto` it drives the session headless; if conflicts remain, the GUI takes over the same client and session, so nothing is loaded twice.
+- On Windows the binary is a GUI-subsystem executable, so no console window opens. At startup it attaches to the parent's console, if there is one, so `--help`, usage errors and log output appear in the launching terminal; stdout and stderr that are already redirected to a pipe or file are kept. Shells don't wait for GUI-subsystem programs, so the prompt returns at once; `git mergetool` and `git difftool` still wait and get the exit code.
 - Exit codes follow kdiff3: `0` when the output was saved, `1` when the user quit without saving, on error, and on invalid usage (clap's default of `2` is overridden).
 - Any option not in the table is rejected with a usage error. Differences from kdiff3's command line are listed in `DEVIATIONS.md`.
 
