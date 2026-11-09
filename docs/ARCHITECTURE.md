@@ -77,6 +77,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | gui | `settings_dialog.rs` | the Settings dialog: Panes, Appearance and Comparison tabs, with live preview of the view settings |
 | gui | `config.rs` | `gui.toml`: loading, saving and backing up a broken file |
 | gui | `update_check.rs` | finding out whether a newer release exists: the GitHub latest-release request on a worker thread, parsing the release (version, Markdown notes, page, files), choosing the file for this platform, the once-a-day rule and the skipped-version rule |
+| gui | `start_menu.rs` | Windows only: writing `Kdiff4.lnk` for the running executable into the current user's Start menu with PowerShell's `WScript.Shell`, on a worker thread |
 | gui | `self_update.rs` | installing a release: downloading the platform's executable to `<exe>.new` with progress and cancel, checking it is complete and looks like an executable, moving the running executable to `<exe>.old`, putting the download in its place, restarting, and removing the leftovers at the next start |
 | gui | `update_dialog.rs` | the update windows: Update Available with the release notes rendered as Markdown, the download progress, and plain notices |
 | gui | `fonts.rs` | discovering monospace font families and installing the chosen one |
@@ -249,6 +250,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Settings dialog**: the window where GUI config is edited, with a live preview.
 - **Update check**: asking GitHub for the latest published release, at most once a day on start, or at once from Help → Check for Updates... Runs on its own thread; a failure is logged, and shown only when the user asked.
 - **Update window**: the modal that follows a check: Update Available with the release notes and the choices Update and Restart, Remind Me Later and Skip This Version; the download progress; or a notice. While one is open the rest of the window takes no input.
+- **Start menu shortcut**: `Kdiff4.lnk` in the current user's Start menu, pointing at the running executable; written from Settings → Add to Start Menu on Windows.
 - **Update install**: downloading the release's executable for this platform, replacing the running executable in place and restarting it with the same command line.
 - **Theme**: light or dark appearance of the GUI; the user picks light, dark, or following the system.
 - **Palette**: the colors one theme draws with: window and pane backgrounds, pane border, UI text, pane text, the document colors of A, B, C and D, the red of what differs from every other document, and the Fold Ellipsis. The user can override the UI text and pane text colors, the colors of A, B and C, the red and the Fold Ellipsis, per theme.
@@ -683,6 +685,12 @@ The binary routes each override by its section to the engine (in the open comman
 - While the download runs, a modal window with a progress bar covers the program: shortcuts and pane keys are off, and only Cancel works. Canceling removes the partial file and leaves the program as it was.
 - Restarting reopens the same files from the command line; an Open window started without arguments reopens empty. Edits to D that were not saved are lost, hence the warning.
 - Not done: a checksum or signature check of the download beyond TLS to GitHub, and updating a copy of the program that was started from a read-only location.
+
+### Start menu shortcut
+
+- Windows only: Settings → Add to Start Menu writes `Kdiff4.lnk` into `%APPDATA%\Microsoft\Windows\Start Menu\Programs`, the current user's Start menu, so no administrator rights are needed. The shortcut starts the running executable (the path it was started from) in its own folder. Running it again overwrites the shortcut, which points it at the executable now running. A self-update keeps the executable's path, so the shortcut stays valid.
+- PowerShell runs on a worker thread without a console window, and the paths reach it through environment variables, so no quoting is involved. The result, with the shortcut's path or the reason it failed, is shown in the same modal as update notices.
+- Not done: removing the shortcut, and an all-users shortcut.
 
 ### Releasing
 

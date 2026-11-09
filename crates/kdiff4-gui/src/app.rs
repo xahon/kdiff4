@@ -22,6 +22,7 @@ use crate::paths;
 use crate::rows::{self, Rows};
 use crate::scroll::ScrollMotion;
 use crate::settings_dialog::{SettingsAction, SettingsDialog};
+use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
 use crate::self_update::{self, UpdateInstall};
 use crate::theme;
@@ -90,6 +91,8 @@ const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
+const ADD_TO_START_MENU_LABEL: &str = "Add to Start Menu";
+const ADD_TO_START_MENU_HINT: &str = "Create a Kdiff4 shortcut in your Start menu that starts this executable";
 const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
 pub const WINDOW_TITLE: &str = "Kdiff4";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
@@ -179,6 +182,8 @@ pub struct KdiffApp {
     window_title: String,
     current_version: Version,
     update_check: Option<UpdateCheck>,
+    /// The Start menu shortcut being written, while PowerShell runs.
+    shortcut_install: Option<ShortcutInstall>,
     update_window: Option<UpdateWindow>,
     update_cache: CommonMarkCache,
     update_modal_id: egui::Id,
@@ -250,6 +255,7 @@ impl KdiffApp {
             window_title: WINDOW_TITLE.to_string(),
             current_version: update_check::current_version(),
             update_check: None,
+            shortcut_install: None,
             update_window: None,
             update_cache: CommonMarkCache::default(),
             update_modal_id: egui::Id::unique("update_window"),
@@ -349,6 +355,38 @@ impl KdiffApp {
         }
     }
 
+    fn begin_shortcut_install(&mut self, ctx: &egui::Context) {
+        if self.shortcut_install.is_some() {
+            return;
+        }
+        let repaint_ctx = ctx.clone();
+        self.shortcut_install = Some(ShortcutInstall::start(move || repaint_ctx.request_repaint()));
+    }
+
+    fn poll_shortcut_install(&mut self) {
+        let Some(install) = self.shortcut_install.as_ref() else {
+            return;
+        };
+        let Some(result) = install.poll() else {
+            return;
+        };
+        self.shortcut_install = None;
+        self.finish_shortcut_install(result);
+    }
+
+    fn finish_shortcut_install(&mut self, result: Result<PathBuf, ShortcutError>) {
+        let text = match result {
+            Ok(link) => format!("Kdiff4 is now in the Start menu.
+
+Shortcut: {}", link.display()),
+            Err(error) => {
+                log::warn!("{error}");
+                format!("Cannot add Kdiff4 to the Start menu: {error}")
+            }
+        };
+        self.update_window = Some(UpdateWindow::Message { title: "Start Menu Shortcut".to_string(), text });
+    }
+
     fn update_message(&mut self, title: &str, error: &UpdateError) {
         self.update_window = Some(UpdateWindow::Message {
             title: title.to_string(),
@@ -401,6 +439,7 @@ impl KdiffApp {
 
     fn show_update_window(&mut self, ctx: &egui::Context) {
         self.poll_update_check();
+        self.poll_shortcut_install();
         let has_unsaved_changes = self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.modified);
         let mut choice = None;
         let mut finished = None;
@@ -1912,6 +1951,14 @@ impl KdiffApp {
                     if ui.add(configure).clicked() {
                         let ctx = ui.ctx().clone();
                         self.open_settings(&ctx);
+                    }
+                    if cfg!(windows) {
+                        ui.separator();
+                        let installing = self.shortcut_install.is_some();
+                        if ui.add_enabled(!installing, egui::Button::new(ADD_TO_START_MENU_LABEL)).on_hover_text(ADD_TO_START_MENU_HINT).clicked() {
+                            let ctx = ui.ctx().clone();
+                            self.begin_shortcut_install(&ctx);
+                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {
@@ -3610,6 +3657,29 @@ mod tests {
         let (mut app, ctx) = app_without_config_file();
         app.finish_install(&ctx, Path::new("kdiff4.exe"), Err(UpdateError::Canceled));
         assert!(app.update_window.is_none());
+    }
+
+    #[test]
+    fn an_installed_start_menu_shortcut_is_reported_with_its_path() {
+        let (mut app, _ctx) = app_without_config_file();
+        app.finish_shortcut_install(Ok(PathBuf::from("C:\\Start Menu\\Programs\\Kdiff4.lnk")));
+        match app.update_window {
+            Some(UpdateWindow::Message { ref title, ref text }) => {
+                assert_eq!(title, "Start Menu Shortcut");
+                assert!(text.contains("C:\\Start Menu\\Programs\\Kdiff4.lnk"), "{text}");
+            }
+            _ => panic!("the result should be shown"),
+        }
+    }
+
+    #[test]
+    fn a_failed_start_menu_shortcut_is_reported_with_the_reason() {
+        let (mut app, _ctx) = app_without_config_file();
+        app.finish_shortcut_install(Err(ShortcutError::Script("access denied".to_string())));
+        match app.update_window {
+            Some(UpdateWindow::Message { ref text, .. }) => assert!(text.contains("Cannot add Kdiff4 to the Start menu") && text.contains("access denied"), "{text}"),
+            _ => panic!("the failure should be shown"),
+        }
     }
 
     #[test]

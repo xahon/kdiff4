@@ -20,6 +20,7 @@ mod rows;
 mod scroll;
 mod self_update;
 mod settings_dialog;
+mod start_menu;
 mod text_view;
 mod theme;
 mod update_check;
