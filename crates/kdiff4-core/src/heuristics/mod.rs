@@ -5,7 +5,7 @@ mod matching;
 
 use std::ops::Range;
 
-use kdiff4_protocol::{EntityKind, HeuristicOptions, MatchStage};
+use kdiff4_protocol::{EntityKind, Extractor, HeuristicOptions, MatchStage};
 
 use crate::error::CoreError;
 
@@ -64,6 +64,25 @@ pub fn propose(language: &str, documents: &[DocumentLines<'_>], options: &Heuris
         })
         .collect();
     Ok((proposed, found))
+}
+
+
+/// The functions, methods, types and blocks of one document of `language` at every depth, each as the lines from its header to its closing line, sorted by start. `None` when the tree-sitter extractor can't parse `language`.
+pub fn entity_spans(language: &str, document: &DocumentLines<'_>) -> Option<Vec<Range<usize>>> {
+    let kinds = [EntityKind::Function, EntityKind::Method, EntityKind::Type, EntityKind::Block];
+    let entities = extract::extract(Extractor::TreeSitter, language, document.text, document.lines, &kinds)?;
+    let mut spans = Vec::new();
+    collect_spans(&entities, &mut spans);
+    spans.sort_by_key(|span: &Range<usize>| (span.start.clone(), std::cmp::Reverse(span.end.clone())));
+    Some(spans)
+}
+
+
+fn collect_spans(entities: &[extract::Entity], spans: &mut Vec<Range<usize>>) {
+    for entity in entities {
+        spans.push(entity.header.clone()..entity.lines.end.clone());
+        collect_spans(&entity.children, spans);
+    }
 }
 
 

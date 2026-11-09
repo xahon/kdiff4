@@ -13,6 +13,7 @@ use kdiff4_protocol::{
 
 use crate::alignment_marks::AlignmentMarks;
 use crate::error::CoreError;
+use crate::folding;
 use crate::heuristics::{self, DocumentLines, Proposed};
 use crate::merge::{self, Merge, MergeStep, RegionState};
 use crate::normalizer;
@@ -343,6 +344,27 @@ impl Session {
     }
 
     /// Finds the functions, methods, types and blocks of the source documents and pairs them (see `Command::ProposeHeuristicAlignments`). Matches that collide with a mark the user made are left out with the matches inside them, and counted. Changes nothing.
+    /// The fold ranges of each of `documents` the session has, in the order asked.
+    pub fn fold_ranges(&self, language: &str, documents: &[Document]) -> Vec<(Document, Vec<Range<usize>>)> {
+        documents
+            .iter()
+            .filter_map(|document| {
+                let ranges = match document {
+                    Document::D => {
+                        let output = self.output.as_ref()?;
+                        folding::fold_ranges(language, &output.text, &text::split_lines(&output.text))
+                    }
+                    _ => {
+                        let source = self.sources.iter().find(|source| source.document == *document)?;
+                        folding::fold_ranges(language, &source.text.text, &source.text.lines)
+                    }
+                };
+                Some((document.clone(), ranges))
+            })
+            .collect()
+    }
+
+
     pub fn propose_heuristic_alignments(&self, language: &str, options: &HeuristicOptions, within: Option<u32>) -> Result<HeuristicProposal, CoreError> {
         let scope = match within {
             Some(number) => Some(self.alignments.applied_parts(number, self.sources.len()).ok_or(CoreError::NotApplied { number })?),

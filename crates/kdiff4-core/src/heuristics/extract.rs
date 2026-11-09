@@ -22,6 +22,8 @@ pub struct Entity {
     pub signature: String,
     /// From the comments right above it to the line of its closing brace.
     pub lines: Range<usize>,
+    /// The line its signature ends on, where folding it leaves the text visible.
+    pub header: usize,
     /// The trimmed lines of its body that hold a letter or a digit.
     pub body: Vec<String>,
     /// The members of a type and the blocks of a function or block: ordered by position, not overlapping and inside `lines`.
@@ -291,6 +293,7 @@ impl Walker<'_> {
         let signature = self.normalized(outer.start_byte(), signature_end, &comments);
         let start = self.first_line(outer);
         let end = self.line_of(outer.end_byte().saturating_sub(1)) + 1;
+        let header = self.header_line(outer.start_byte(), signature_end).clamp(start, end.saturating_sub(1));
         let body_start = self.line_of(body_start);
         let body = (body_start..end)
             .filter_map(|line| self.lines.get(line).and_then(|range| self.text.get(range.clone())))
@@ -303,6 +306,7 @@ impl Walker<'_> {
             name: name.unwrap_or_else(|| signature.clone()),
             signature,
             lines: start..end,
+            header,
             body,
             children: tidy(children),
         }
@@ -328,6 +332,14 @@ impl Walker<'_> {
         let line = self.line_of(node.start_byte());
         let start = self.lines.get(line).map_or(0, |range| range.start.clone());
         self.text.get(start..node.start_byte()).is_some_and(|before| before.trim().is_empty())
+    }
+
+
+    /// The line of the last character before `signature_end` that is not whitespace, but not above the line of `start`.
+    fn header_line(&self, start: usize, signature_end: usize) -> usize {
+        let before = self.text.get(start..signature_end).unwrap_or("");
+        let last = before.trim_end().len();
+        self.line_of(start + last.saturating_sub(1))
     }
 
 

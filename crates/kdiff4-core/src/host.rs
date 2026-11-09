@@ -1,7 +1,7 @@
 use std::io;
 use std::thread::{self, JoinHandle};
 
-use kdiff4_protocol::{Change, Command, CurrentRegion, Delta, Event, HeuristicProposal, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
+use kdiff4_protocol::{Change, Command, CurrentRegion, Delta, Event, FoldRanges, HeuristicProposal, HostEndpoint, HostMessage, ProtocolError, RequestId, Response};
 
 use crate::engine_registry::EngineRegistry;
 use crate::error::CoreError;
@@ -108,6 +108,16 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let proposal = active(session)?.propose_heuristic_alignments(&language, &options, within)?;
             log::info!("host: Heuristics Alignment proposes {} alignments for {language}", proposal.matches.len());
             let _ = endpoint.send(HostMessage::Event(Event::HeuristicProposal(HeuristicProposal { cause: Some(id), ..proposal })));
+            return Ok(());
+        }
+        Command::FindFoldRanges { language, documents } => {
+            let active = active(session)?;
+            let found = FoldRanges {
+                cause: Some(id),
+                revision: active.revision(),
+                documents: active.fold_ranges(&language, &documents),
+            };
+            let _ = endpoint.send(HostMessage::Event(Event::FoldRanges(found)));
             return Ok(());
         }
         Command::ApplyHeuristicAlignments { alignments, confirmed, within } => {

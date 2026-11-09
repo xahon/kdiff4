@@ -3,6 +3,7 @@ mod builtin_engine;
 mod engine_registry;
 mod error;
 mod fine_diff;
+mod folding;
 mod heuristics;
 mod host;
 mod merge;

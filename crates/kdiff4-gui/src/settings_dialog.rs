@@ -362,6 +362,15 @@ impl SettingsDialog {
                 &format!("The color in the {name} theme of gutter blocks and characters that differ from every other document, and of the <Merge Conflict> marker."),
             );
             ui.end_row();
+
+            ui.label("Fold Ellipsis:");
+            color_override(
+                ui,
+                &mut colors.fold_ellipsis,
+                defaults.fold_ellipsis,
+                &format!("The color in the {name} theme of the ... that stands for the hidden lines of folded code, and of the button of a fold."),
+            );
+            ui.end_row();
         });
         ui.add_space(4.0);
         ui.label(
@@ -729,6 +738,7 @@ mod tests {
         view.dark_colors.pane_text = Some([1, 1, 1]);
         view.dark_colors.document_b = Some([2, 2, 2]);
         view.light_colors.red = Some([3, 3, 3]);
+        view.light_colors.fold_ellipsis = Some([4, 4, 4]);
         view.whitespace.render = false;
         let mut dialog = SettingsDialog::new(&view, None);
         dialog.reset_to_defaults();
@@ -736,6 +746,7 @@ mod tests {
         assert_eq!(dialog.draft().dark_colors.pane_text, None);
         assert_eq!(dialog.draft().dark_colors.document_b, None);
         assert_eq!(dialog.draft().light_colors.red, None);
+        assert_eq!(dialog.draft().light_colors.fold_ellipsis, None);
         assert!(dialog.draft().whitespace.render);
     }
 

@@ -62,12 +62,13 @@ pub fn height(ui: &Ui, documents: usize) -> f32 {
     documents as f32 * text_view::row_height(ui) + FRAME_HEIGHT
 }
 
-/// One line of the strip: a document, its lines, rows and character diff, and the row of it the strip shows.
+/// One line of the strip: a document, its lines, its rows without folds, which line up with the other documents' rows, the rows its pane shows, its character diff, and the row of it the strip shows.
 #[derive(Clone, Copy)]
 struct Lens<'a> {
     document: Document,
     lines: Lines<'a>,
     rows: Rows<'a>,
+    pane_rows: Rows<'a>,
     char_runs: Option<&'a LineCharRuns>,
     row: Option<usize>,
 }
@@ -82,17 +83,20 @@ impl Lens<'_> {
     }
 }
 
-/// The lines and rows of `document` as its pane shows them.
-fn view_of(mirror: &Mirror, document: Document) -> Option<(Lines<'_>, Rows<'_>)> {
+/// The lines of `document`, its rows without folds and the rows its pane shows.
+fn view_of(mirror: &Mirror, document: Document) -> Option<(Lines<'_>, Rows<'_>, Rows<'_>)> {
     match document {
-        Document::D => mirror.output().map(|output| (output.lines(), Rows::Mapped(mirror.output_rows()))),
+        Document::D => mirror
+            .output()
+            .map(|output| (output.lines(), Rows::Mapped(mirror.unfolded_rows(Document::D).unwrap_or(mirror.output_rows())), Rows::Mapped(mirror.output_rows()))),
         document => mirror.document(document.clone()).map(|text| {
             let lines = Lines {
                 text: &text.text,
                 ranges: &text.lines,
             };
-            let rows = mirror.rows(document).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
-            (lines, rows)
+            let rows = mirror.unfolded_rows(document.clone()).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
+            let pane_rows = mirror.rows(document).map_or(Rows::PerLine(lines.count()), Rows::Mapped);
+            (lines, rows, pane_rows)
         }),
     }
 }
@@ -103,49 +107,51 @@ fn lenses<'a>(mirror: &'a Mirror, state: &PaneState) -> Vec<Lens<'a>> {
 }
 
 fn lenses_for<'a>(mirror: &'a Mirror, caret: Option<(Document, Cursor)>, void_row: Option<usize>) -> Vec<Lens<'a>> {
-    let sources: Vec<(Document, Lines<'a>, Rows<'a>)> = mirror
+    let sources: Vec<(Document, Lines<'a>, Rows<'a>, Rows<'a>)> = mirror
         .documents()
         .iter()
-        .filter_map(|text| view_of(mirror, text.document.clone()).map(|(lines, rows)| (text.document.clone(), lines, rows)))
+        .filter_map(|text| view_of(mirror, text.document.clone()).map(|(lines, rows, pane_rows)| (text.document.clone(), lines, rows, pane_rows)))
         .collect();
     let output = view_of(mirror, Document::D);
-    let Some(first) = sources.first().map(|(_, _, rows)| *rows) else {
+    let Some(first) = sources.first().map(|(_, _, rows, _)| *rows) else {
         return Vec::new();
     };
-    let caret_row = |rows: Rows<'_>, cursor: Cursor| {
+    let caret_row = |rows: Rows<'_>, pane_rows: Rows<'_>, cursor: Cursor| {
         text_view::caret_row(
             rows,
             Caret {
                 cursor,
-                void_row: void_row.clone(),
+                void_row: void_row.map(|row| pane_rows.unfolded_row(row)),
             },
         )
     };
     let (reference, focus) = match caret {
-        Some((Document::D, cursor)) => (first, output.map(|(_, rows)| Focus::Output(caret_row(rows, cursor)))),
-        Some((document, cursor)) => match sources.iter().find(|(source, _, _)| *source == document) {
-            Some((_, _, rows)) => (*rows, Some(Focus::Sources(caret_row(*rows, cursor)))),
+        Some((Document::D, cursor)) => (first, output.map(|(_, rows, pane_rows)| Focus::Output(caret_row(rows, pane_rows, cursor)))),
+        Some((document, cursor)) => match sources.iter().find(|(source, _, _, _)| *source == document) {
+            Some((_, _, rows, pane_rows)) => (*rows, Some(Focus::Sources(caret_row(*rows, *pane_rows, cursor)))),
             None => (first, None),
         },
         None => (first, None),
     };
     let focus = focus.unwrap_or_else(|| Focus::Sources(mirror.current_region().and_then(|region| first.region_start(region)).unwrap_or(0)));
-    let rows = lens_rows(reference, output.map(|(_, rows)| rows), focus);
+    let rows = lens_rows(reference, output.map(|(_, rows, _)| rows), focus);
     let mut lenses: Vec<Lens<'a>> = sources
         .into_iter()
-        .map(|(document, lines, source_rows)| Lens {
+        .map(|(document, lines, source_rows, pane_rows)| Lens {
             document: document.clone(),
             lines,
             rows: source_rows,
+            pane_rows,
             char_runs: mirror.char_diffs(document),
             row: rows.sources.filter(|row| *row < source_rows.len()),
         })
         .collect();
-    if let Some((lines, output_rows)) = output {
+    if let Some((lines, output_rows, pane_rows)) = output {
         lenses.push(Lens {
             document: Document::D,
             lines,
             rows: output_rows,
+            pane_rows,
             char_runs: None,
             row: rows.output,
         });
@@ -260,7 +266,10 @@ fn paint_lines(
         );
         let text_rect = Rect::from_min_max(pos2(rect.left() + TEXT_INSET, rect.top()), rect.max);
         let caret = state.caret_in(lens.document.clone()).filter(|_| !state.caret_hidden);
-        let void_row = state.void_row.filter(|row| lens.rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none()));
+        let void_row = state
+            .void_row
+            .map(|row| lens.pane_rows.unfolded_row(row))
+            .filter(|row| lens.rows.row(*row).is_some_and(|pane_row| pane_row.line.is_none()));
         let (Some(line), Some(galley)) = (lens.line(), galley) else {
             if lens.pane_row().is_some_and(|pane_row| pane_row.conflict_marker) {
                 painter.text(
@@ -369,6 +378,7 @@ fn press(lens: &Lens<'_>, column: usize, extend: bool) -> Option<PaneAction> {
         Some(line) => (Position { line, column }, None),
         None => lens.rows.caret_at_row(row, 0, end),
     };
+    let void_row = void_row.map(|row| lens.pane_rows.folded_row(row));
     Some(PaneAction::Press {
         document: lens.document.clone(),
         position,

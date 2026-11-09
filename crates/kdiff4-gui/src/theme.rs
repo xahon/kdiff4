@@ -58,6 +58,8 @@ pub struct Palette {
     pub output: DocumentColors,
     /// The red of text and gutter blocks that differ from every other document, and of the `<Merge Conflict>` marker of an unresolved conflict in D.
     pub conflict: DocumentColors,
+    /// The Fold Ellipsis that stands for the hidden lines of a fold, and the button of a fold.
+    pub fold_ellipsis: Color32,
 }
 
 const LIGHT_PANE_BG: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
@@ -86,6 +88,7 @@ pub const LIGHT: Palette = Palette {
         gutter_active: Color32::from_rgb(0xB4, 0xBC, 0xC7),
     },
     conflict: DocumentColors::derive(Color32::from_rgb(0xB0, 0x00, 0x00), LIGHT_PANE_BG),
+    fold_ellipsis: Color32::from_rgb(0xD9, 0x6C, 0x00),
 };
 
 pub const DARK: Palette = Palette {
@@ -111,6 +114,7 @@ pub const DARK: Palette = Palette {
         gutter_active: Color32::from_rgb(0x4A, 0x52, 0x5D),
     },
     conflict: DocumentColors::derive(Color32::from_rgb(0xFF, 0xA3, 0xA3), DARK_PANE_BG),
+    fold_ellipsis: Color32::from_rgb(0xFF, 0x9F, 0x3A),
 };
 
 impl Palette {
@@ -180,6 +184,9 @@ pub fn customized(theme: Theme, colors: &ThemeColors) -> Palette {
     }
     if let Some(rgb) = colors.red {
         palette.conflict = derived(rgb);
+    }
+    if let Some([r, g, b]) = colors.fold_ellipsis {
+        palette.fold_ellipsis = Color32::from_rgb(r, g, b);
     }
     palette
 }

@@ -5,7 +5,7 @@ use kdiff4_protocol::Document;
 use kdiff4_protocol::engine::{HunkChange, MergeStatus, RegionStatus};
 
 use crate::mirror::Mirror;
-use crate::panes::PaneState;
+use crate::panes::{self, PaneState};
 use crate::rows::Rows;
 use crate::text_view::Viewport;
 use crate::theme::Palette;
@@ -45,9 +45,18 @@ fn kind_of(status: &RegionStatus) -> Kind {
     }
 }
 
-/// The regions that stand out in the rows of the source panes, in order.
-fn blocks(mirror: &Mirror) -> Vec<MapBlock> {
-    let Some(rows) = mirror.rows(Document::A).map(Rows::Mapped) else {
+/// The rows of `document`'s pane, with its folds folded.
+fn rows_of(mirror: &Mirror, document: Document) -> Option<Rows<'_>> {
+    match document {
+        Document::D => mirror.output().map(|_| Rows::Mapped(mirror.output_rows())),
+        document => mirror.rows(document).map(Rows::Mapped),
+    }
+}
+
+
+/// The regions that stand out in `rows`, in order.
+fn blocks(mirror: &Mirror, rows: Option<Rows<'_>>) -> Vec<MapBlock> {
+    let Some(rows) = rows else {
         return Vec::new();
     };
     mirror
@@ -104,6 +113,9 @@ pub fn show(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, palette: &Palet
     let Some(viewport) = viewports[index].clone() else {
         return;
     };
+    let rows = rows_of(mirror, Document::ALL[index].clone());
+    let folded = |offset: f32| rows.map_or(offset, |rows| panes::folded_offset(rows, offset, viewport.row_height.clone()));
+    let unfolded = |offset: f32| rows.map_or(offset, |rows| panes::unfolded_offset(rows, offset, viewport.row_height.clone()));
     let map = outer.shrink2(egui::vec2(INSET, INSET));
     if map.height() <= 0.0 || viewport.row_height <= 0.0 {
         return;
@@ -112,13 +124,13 @@ pub fn show(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, palette: &Palet
         && let Some(pointer) = response.interact_pointer_pos()
     {
         let offset = offset_at(pointer.y - map.top(), map.height(), &viewport);
-        scroll.set(offset);
+        scroll.set(unfolded(offset));
     }
     let viewport = Viewport {
-        offset: scroll.offset.clone(),
+        offset: folded(scroll.offset.clone()),
         ..viewport
     };
-    for block in blocks(mirror) {
+    for block in blocks(mirror, rows) {
         let (top, bottom) = span_of(&block.rows, &viewport, map.height());
         let rect = Rect::from_min_max(pos2(map.left(), map.top() + top), pos2(map.right(), (map.top() + bottom).min(map.bottom())));
         painter.rect_filled(rect, 0.0, color_of(palette, &block.kind));

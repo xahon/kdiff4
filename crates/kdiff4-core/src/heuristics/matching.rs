@@ -374,6 +374,7 @@ mod tests {
             kind: EntityKind::Function,
             name: name.to_string(),
             signature: signature.to_string(),
+            header: lines.start.clone(),
             lines,
             body: body.iter().map(|line| line.to_string()).collect(),
             children: Vec::new(),

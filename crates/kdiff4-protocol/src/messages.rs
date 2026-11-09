@@ -137,6 +137,21 @@ pub enum Command {
         #[serde(default)]
         within: Option<u32>,
     },
+    /// Finds the fold ranges of `documents` as they are at the current revision, for `language` (a name the language selector shows): the functions, methods, types and blocks where the extractor parses the language, the indentation otherwise. The host answers with `Event::FoldRanges` and changes nothing. A document the session doesn't have is left out.
+    FindFoldRanges {
+        language: String,
+        documents: Vec<Document>,
+    },
+}
+
+
+/// The answer to `FindFoldRanges`: per document, its fold ranges sorted by start. A range starts at the header line that stays visible when it is folded; the lines after it up to its end are hidden.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FoldRanges {
+    pub cause: Option<RequestId>,
+    /// The revision the ranges of D were found at.
+    pub revision: Revision,
+    pub documents: Vec<(Document, Vec<Range<usize>>)>,
 }
 
 
@@ -304,6 +319,7 @@ pub enum Event {
     Delta(Delta),
     CurrentRegion(CurrentRegion),
     HeuristicProposal(HeuristicProposal),
+    FoldRanges(FoldRanges),
 }
 
 /// The current region changed by navigation. It does not change the revision: `revision` is the one `region` refers to. Changes of D also make their region current, without this event.

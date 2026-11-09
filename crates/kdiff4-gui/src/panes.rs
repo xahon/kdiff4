@@ -9,6 +9,7 @@ use crate::config::WhitespaceConfig;
 use crate::editing::{Cursor, Lines, Position};
 use crate::eol;
 use crate::find::FindState;
+use crate::folding::Folds;
 use crate::minimap;
 use crate::mirror::Mirror;
 use crate::overview;
@@ -66,6 +67,8 @@ pub enum PaneAction {
     Browse(Document),
     /// The overview strip took a press; Up and Down now switch between its lines.
     FocusStrip,
+    /// Fold or unfold the range whose header is this line.
+    ToggleFold(Document, usize),
 }
 
 /// View state of the panes, kept by the app between frames.
@@ -445,19 +448,19 @@ fn jump_target(panes: &[(Rows<'_>, Option<Viewport>)], region: usize, context: u
     if panes.iter().any(|(_, viewport)| viewport.is_none()) {
         return JumpTarget::NotReady;
     }
-    let rows = panes.iter().find_map(|(rows, _)| rows.region_rows(region));
+    let rows = panes.iter().find_map(|(rows, _)| rows.region_rows(region).map(|range| (*rows, range)));
     let shortest = panes
         .iter()
         .filter_map(|(_, viewport)| *viewport)
         .min_by(|left, right| left.height.total_cmp(&right.height));
     match (rows, shortest) {
-        (Some(rows), Some(viewport)) => {
+        (Some((rows, range)), Some(viewport)) => {
             let max = panes
                 .iter()
-                .filter_map(|(_, viewport)| viewport.map(|viewport| viewport.max_offset()))
+                .filter_map(|(rows, viewport)| viewport.map(|viewport| unfolded_offset(*rows, viewport.max_offset(), viewport.row_height)))
                 .fold(f32::INFINITY, f32::min);
             JumpTarget::Offset {
-                offset: jump_offset(rows, context, viewport),
+                offset: unfolded_offset(rows, jump_offset(range, context, viewport), viewport.row_height),
                 max,
             }
         }
@@ -520,8 +523,10 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
             let marks: Vec<AlignmentMark> = mirror.alignments().of(text.document.clone()).cloned().collect();
             let highest = mirror.alignments().marks.iter().map(|mark| mark.number).max().unwrap_or(0);
             let group = scroll_group(text.document.clone(), mirror.is_aligned(), state.independent_scroll.clone());
-            let given = state.scroll_of(group.clone()).offset.clone();
-            scrolls.push(pane(
+            let shared = state.scroll_of(group.clone()).offset.clone();
+            let row_height = text_view::row_height(column);
+            let given = folded_offset(rows, shared.clone(), row_height.clone());
+            let scroll = pane(
                 column,
                 style,
                 text.document.clone(),
@@ -537,11 +542,13 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
                     highest,
                     insets: &mirror.alignments().insets,
                 },
+                Some(mirror.folds(text.document.clone())),
                 group,
                 given,
                 state,
                 actions,
-            ));
+            );
+            scrolls.push(unfold_scroll(scroll, rows, shared, row_height));
         }
     });
 }
@@ -551,9 +558,11 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
     if let Some(output) = mirror.output() {
         let lines = output.lines();
         let group = scroll_group(Document::D, mirror.is_aligned(), state.independent_scroll.clone());
-        let given = state.scroll_of(group.clone()).offset.clone();
+        let shared = state.scroll_of(group.clone()).offset.clone();
         let rows = Rows::Mapped(mirror.output_rows());
-        scrolls.push(pane(
+        let row_height = text_view::row_height(ui);
+        let given = folded_offset(rows, shared.clone(), row_height.clone());
+        let scroll = pane(
             ui,
             style,
             Document::D,
@@ -569,11 +578,48 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
                 highest: 0,
                 insets: &[],
             },
+            Some(mirror.folds(Document::D)),
             group,
             given,
             state,
             actions,
-        ));
+        );
+        scrolls.push(unfold_scroll(scroll, rows, shared, row_height));
+    }
+}
+
+
+/// The scroll offset of a pane with folds that stands for `shared`, an offset in the rows without folds, which its scroll group shares.
+pub fn folded_offset(rows: Rows<'_>, shared: f32, row_height: f32) -> f32 {
+    if row_height <= 0.0 {
+        return shared;
+    }
+    rows.folded_position(shared / row_height) * row_height
+}
+
+
+/// The inverse of `folded_offset`.
+pub fn unfolded_offset(rows: Rows<'_>, offset: f32, row_height: f32) -> f32 {
+    if row_height <= 0.0 {
+        return offset;
+    }
+    rows.unfolded_position(offset / row_height) * row_height
+}
+
+
+/// How a pane scrolled in its own rows, taken to the rows without folds that its scroll group shares, which it was given at `shared`. The wheel scrolls the pane by its own rows, so scrolling over a fold in it moves the other panes over the rows the fold hides.
+fn unfold_scroll(scroll: PaneScroll, rows: Rows<'_>, shared: f32, row_height: f32) -> PaneScroll {
+    let unfold = |offset: f32| unfolded_offset(rows, offset, row_height.clone());
+    let moved = (scroll.after - scroll.given).abs() > MOVED_BY_PANE;
+    PaneScroll {
+        given: shared.clone(),
+        after: if moved { unfold(scroll.after.clone()) } else { shared },
+        wheel: Wheel {
+            stepped: unfold(scroll.given + scroll.wheel.stepped) - unfold(scroll.given.clone()),
+            direct: unfold(scroll.given + scroll.wheel.direct) - unfold(scroll.given.clone()),
+        },
+        max: unfold(scroll.max.clone()),
+        ..scroll
     }
 }
 
@@ -590,6 +636,7 @@ fn pane(
     rows: Rows<'_>,
     char_runs: Option<CharRuns<'_>>,
     marks: PaneMarks<'_>,
+    folds: Option<&Folds>,
     group: ScrollGroup,
     given: f32,
     state: &mut PaneState,
@@ -618,6 +665,7 @@ fn pane(
                         style,
                         marks,
                         find,
+                        folds,
                     );
                     if state.caret_in(document.clone()).is_some() {
                         state.page_rows = response.page_rows;
@@ -639,6 +687,7 @@ fn pane(
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
                         Some(PointerAction::SetMarkLines(number, start, end)) => actions.push(PaneAction::SetAlignmentMarkLines(document.clone(), number, start..end)),
+                        Some(PointerAction::ToggleFold(line)) => actions.push(PaneAction::ToggleFold(document.clone(), line)),
                         None => {}
                     }
                     match response.menu {
@@ -856,6 +905,27 @@ mod tests {
             max: 500.0,
         }
     }
+
+    #[test]
+    fn the_wheel_over_a_fold_scrolls_the_group_over_the_rows_it_hides() {
+        let map = crate::rows::RowMap::from_rows((0..8).map(|line| crate::rows::PaneRow { line: Some(line), ..Default::default() }).collect()).folded(&[0..5]);
+        let rows = Rows::Mapped(&map);
+        let given = folded_offset(rows, 0.0, 10.0);
+        let pane = PaneScroll {
+            given,
+            after: given,
+            wheel: Wheel { stepped: 10.0, direct: 0.0 },
+            max: 30.0,
+            ..scroll(ScrollGroup::Sources, given, given, 0.0)
+        };
+        let shared = unfold_scroll(pane, rows, 0.0, 10.0);
+        assert_eq!((shared.given, shared.after, shared.wheel.stepped, shared.max), (0.0, 0.0, 50.0, 70.0));
+        assert_eq!(folded_offset(rows, 25.0, 10.0), 5.0);
+        assert_eq!(folded_offset(rows, 60.0, 10.0), 20.0);
+        let moved = unfold_scroll(PaneScroll { after: 20.0, ..pane }, rows, 0.0, 10.0);
+        assert_eq!(moved.after, 60.0);
+    }
+
 
     #[test]
     fn shared_offset_follows_the_pane_that_moved() {

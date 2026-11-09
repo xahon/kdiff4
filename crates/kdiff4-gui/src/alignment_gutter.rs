@@ -22,6 +22,9 @@ const EDGE_GRAB: f32 = 4.0;
 const DRAG_STROKE: f32 = 2.0;
 /// The border of a mark nothing in the other documents pairs with, as a share of the color's strength.
 const UNMATCHED_BORDER_SHARE: f32 = 0.45;
+/// A mark hidden in a fold is a small block on the fold's header row: this share of the row high, in its color at this opacity.
+const FOLDED_HEIGHT_SHARE: f32 = 0.4;
+const FOLDED_OPACITY: f32 = 0.45;
 
 /// The alignment marks of one source pane, and the highest number any document uses, so a mark can be renumbered to pair with a mark of another document. `insets` are the places the alignments that some document has in another place could be shown at.
 #[derive(Debug, Clone, Copy)]
@@ -38,10 +41,15 @@ pub enum Place {
     Rows(Range<usize>),
     /// The edge above this row; one past the last row is the end of the text.
     Edge(usize),
+    /// Every line of the mark, or the place of the anchor, is hidden in the fold whose header is on this row. Drawn small and light, and takes no pointer.
+    Folded(usize),
 }
 
 pub fn place(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Place {
     if mark.is_anchor() {
+        if mark.lines.start < line_count && rows.is_line_hidden(mark.lines.start) {
+            return Place::Folded(rows.row_of_line(mark.lines.start));
+        }
         let edge = if mark.lines.start >= line_count {
             rows.len()
         } else {
@@ -51,6 +59,9 @@ pub fn place(mark: &AlignmentMark, rows: Rows<'_>, line_count: usize) -> Place {
     }
     let first = rows.row_of_line(mark.lines.start);
     let last = rows.row_of_line(mark.lines.end - 1);
+    if first == last && rows.is_line_hidden(mark.lines.start) && rows.is_line_hidden(mark.lines.end - 1) {
+        return Place::Folded(first);
+    }
     Place::Rows(first..last.max(first) + 1)
 }
 
@@ -76,6 +87,7 @@ pub fn arrow(mark: &AlignmentMark, marks: &[AlignmentMark], places: &[Place]) ->
     let from = match position_of(replaced_by).and_then(|index| places.get(index))? {
         Place::Rows(rows) => rows.start as f32 + 0.5,
         Place::Edge(edge) => *edge as f32,
+        Place::Folded(row) => *row as f32 + 0.5,
     };
     let to = shown.start as f32 + 0.5;
     ((from - to).abs() >= 1.0).then_some(Arrow { from, to })
@@ -147,6 +159,7 @@ pub fn hits(places: &[Place], depths: &[usize], row_height: f32, bar_width: f32,
         .filter(|(_, place)| match place {
             Place::Rows(rows) => rows.contains(&row),
             Place::Edge(edge) => (content_y - *edge as f32 * row_height).abs() <= half_chip,
+            Place::Folded(_) => false,
         })
         .map(|(index, _)| index)
         .filter(|index| depth(index) <= lane)
@@ -180,6 +193,7 @@ pub fn grab(places: &[Place], depths: &[usize], row_height: f32, bar_width: f32,
         let candidates = match place {
             Place::Rows(rows) => [(near(rows.start, reach), Grip::Top), (near(rows.end, reach), Grip::Bottom)],
             Place::Edge(edge) => [(near(*edge, row_height * CHIP_HEIGHT_SHARE / 2.0), Grip::Anchor), (None, Grip::Anchor)],
+            Place::Folded(_) => [(None, Grip::Anchor), (None, Grip::Anchor)],
         };
         for (distance, grip) in candidates {
             if let Some(distance) = distance
@@ -218,6 +232,7 @@ pub fn paint_drag(painter: &Painter, place: &Place, depth: usize, top: f32, row_
         Place::Edge(edge) => {
             painter.hline(left..=left + bar_width, top + *edge as f32 * row_height, stroke);
         }
+        Place::Folded(_) => {}
     }
 }
 
@@ -296,6 +311,14 @@ pub fn paint_row(
     font_id: &FontId,
 ) {
     for ((mark, place), depth) in marks.iter().zip(places).zip(depths) {
+        if *place == Place::Folded(row) {
+            let bar_left = column_left + *depth as f32 * bar_width;
+            let (set, _) = colors(mark.status, color, palette);
+            let height = rect.height() * FOLDED_HEIGHT_SHARE;
+            let block = Rect::from_center_size(pos2(bar_left + bar_width / 2.0, rect.center().y), egui::vec2((bar_width - 2.0).max(1.0), height));
+            painter.rect_filled(block, 1.0, set.gutter_border.gamma_multiply(FOLDED_OPACITY));
+            continue;
+        }
         let Place::Rows(rows) = place else { continue };
         if !rows.contains(&row) {
             continue;
@@ -428,6 +451,22 @@ mod tests {
             heuristic: false,
         }
     }
+
+    #[test]
+    fn marks_hidden_in_a_fold_sit_small_on_its_header_and_take_no_pointer() {
+        let rows = RowMap::from_rows((0..6).map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect()).folded(&[1..5]);
+        let rows = Rows::Mapped(&rows);
+        let hidden = mark(1, 2..4, MarkStatus::Applied);
+        let around = mark(2, 0..5, MarkStatus::Applied);
+        let leaving = mark(3, 3..6, MarkStatus::Pending);
+        let anchor = mark(4, 3..3, MarkStatus::Pending);
+        let places: Vec<Place> = [&hidden, &around, &leaving, &anchor].into_iter().map(|mark| place(mark, rows, 6)).collect();
+        assert_eq!(places, [Place::Folded(1), Place::Rows(0..2), Place::Rows(1..3), Place::Folded(1)]);
+        let depths = [1, 0, 1, 1];
+        assert_eq!(hits(&places, &depths, 10.0, 10.0, 15.0, 15.0), [2]);
+        assert_eq!(grab(&places[..1], &depths[..1], 10.0, 10.0, 15.0, 10.0), None);
+    }
+
 
     /// Lines 0 and 1, then a void, then lines 2 and 3.
     fn rows_with_a_void() -> RowMap {

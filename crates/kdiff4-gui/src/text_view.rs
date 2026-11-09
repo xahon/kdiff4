@@ -11,6 +11,7 @@ use crate::char_diff::{self, CharStyle};
 use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
 use crate::find::Match;
+use crate::folding::{self, Folds};
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
 
@@ -35,6 +36,13 @@ const CHAR_DIFF_BACKGROUND_ALPHA: u8 = 80;
 const REGION_BORDER_WIDTH: f32 = 1.0;
 /// Whitespace markers are drawn in the weak text color at this opacity, so they stay behind the text.
 const WHITESPACE_OPACITY: f32 = 0.6;
+/// The fold column is this share of a row height wide, and its buttons this share of a row height high.
+const FOLD_COLUMN_SHARE: f32 = 0.9;
+const FOLD_BUTTON_SHARE: f32 = 0.55;
+pub const FOLD_ELLIPSIS: &str = "...";
+/// Space between a folded header's text and its Fold Ellipsis, and around the dots inside the ellipsis' frame, in characters.
+const FOLD_ELLIPSIS_GAP: f32 = 0.5;
+const FOLD_ELLIPSIS_PADDING: f32 = 0.25;
 
 /// What a pane shows left of its text, after the line numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +146,8 @@ pub enum PointerAction {
     SelectRegion(usize),
     /// A drag of an edge or anchor of the alignment column ended: the mark with this number now takes the lines from the second to the third (an empty range for an anchor).
     SetMarkLines(u32, usize, usize),
+    /// A click on the fold button of the range whose header is this line, or on its Fold Ellipsis: fold or unfold it.
+    ToggleFold(usize),
 }
 
 /// The edge or anchor of the alignment column the user holds with the primary button.
@@ -229,28 +239,35 @@ struct Margin {
     /// The arrows of moved hunks, left of the line numbers.
     arrows: f32,
     numbers: f32,
-    /// The marks of manual alignments, between the line numbers and the gutter.
+    /// The fold buttons, right of the line numbers.
+    fold: f32,
+    /// The marks of manual alignments, between the fold buttons and the gutter.
     alignment: f32,
     column: f32,
 }
 
 impl Margin {
     fn total(&self) -> f32 {
-        self.arrows + self.numbers + self.alignment + self.column + TEXT_GAP
+        self.arrows + self.numbers + self.fold + self.alignment + self.column + TEXT_GAP
+    }
+
+    /// Where the fold column starts, from the left edge of the view.
+    fn fold_left(&self) -> f32 {
+        self.arrows + self.numbers
     }
 
     /// Where the alignment column starts, from the left edge of the view.
     fn alignment_left(&self) -> f32 {
-        self.arrows + self.numbers
+        self.arrows + self.numbers + self.fold
     }
 
     /// Where the gutter starts, from the left edge of the view.
     fn gutter_left(&self) -> f32 {
-        self.arrows + self.numbers + self.alignment
+        self.arrows + self.numbers + self.fold + self.alignment
     }
 }
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset, so several views can scroll together. Vertical wheel scrolling is not applied but reported, for the caller to scroll with.
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset, so several views can scroll together. Vertical wheel scrolling is not applied but reported, for the caller to scroll with. With `folds`, a fold column right of the line numbers has a button for each fold range, shown while the pointer is over the margin and always for a fold, and a folded header row ends in the Fold Ellipsis.
 pub fn show(
     ui: &mut Ui,
     id_salt: &str,
@@ -263,6 +280,7 @@ pub fn show(
     style: &ViewStyle<'_>,
     marks: PaneMarks<'_>,
     find: Option<FindHits<'_>>,
+    folds: Option<&Folds>,
 ) -> ViewResponse {
     let palette = style.palette;
     let font_id = TextStyle::Monospace.resolve(ui.style());
@@ -286,8 +304,13 @@ pub fn show(
     let bar_width = base_margin.alignment;
     let margin = Margin {
         alignment: alignment_gutter::column_width(bar_width, &depths),
+        fold: if folds.is_some() { (row_height * FOLD_COLUMN_SHARE).round() } else { 0.0 },
         ..base_margin
     };
+    let ellipsis_width = (FOLD_ELLIPSIS.chars().count() as f32 + 2.0 * FOLD_ELLIPSIS_PADDING) * char_width;
+    let margin_hovered = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|pointer| ui.max_rect().contains(pointer) && pointer.x < ui.max_rect().left() + margin.total());
 
     let mut area = ScrollArea::both().id_salt(id_salt).auto_shrink(false);
     let current = offset.unwrap_or_else(|| {
@@ -321,7 +344,10 @@ pub fn show(
                 let galley = pane_row.line.map(|line| layout_styled(ui, lines.line(line), &segments, &font_id, palette));
                 let terminator = pane_row.line.map(|line| shown_terminator(lines, line, &style.whitespace)).unwrap_or_default();
                 let text_width = galley.as_ref().map_or(0.0, |galley| galley.size().x) + terminator.len() as f32 * char_width;
-                let width = (margin.total() + text_width + CARET_WIDTH * 2.0).max(ui.available_width());
+                let closing = pane_row.line.filter(|_| pane_row.folded).and_then(|line| shown_closing(folds, lines, line));
+                let closing_width = closing.as_ref().map_or(0.0, |(_, token)| (FOLD_ELLIPSIS_GAP + token.len() as f32) * char_width);
+                let ellipsis_space = if pane_row.folded { FOLD_ELLIPSIS_GAP * char_width + ellipsis_width + closing_width } else { 0.0 };
+                let width = (margin.total() + text_width + ellipsis_space + CARET_WIDTH * 2.0).max(ui.available_width());
                 let (rect, _) = ui.allocate_exact_size(vec2(width, row_height), Sense::hover());
                 let text_rect = Rect::from_min_max(pos2(rect.left() + margin.total(), rect.top()), pos2(rect.right().max(viewport.right()), rect.bottom()));
                 if let Some(region) = pane_row.region
@@ -339,6 +365,12 @@ pub fn show(
                 }
                 previous_region = pane_row.region;
                 paint_margin(ui, rows, row, &pane_row, viewport.left(), rect, margin, style, &font_id);
+                if let (Some(folds), Some(line)) = (folds, pane_row.line)
+                    && folds.range_at(line).is_some()
+                    && (pane_row.folded || margin_hovered)
+                {
+                    paint_fold_button(ui.painter(), viewport.left() + margin.fold_left(), margin.fold, rect, pane_row.folded, palette);
+                }
                 if let Some(color) = style.alignment_color {
                     alignment_gutter::paint_arrows(ui.painter(), &arrows, &lanes, row, rows.len(), rect, viewport.left(), margin.arrows, style.inset_arrow_gap, color);
                     alignment_gutter::paint_row(
@@ -382,10 +414,24 @@ pub fn show(
                 if let Some(caret) = caret {
                     paint_selection(&text_painter, lines, line, text_rect, &galley, caret.cursor, row_height, palette);
                 }
-                let caret_x = caret
-                    .filter(|caret| caret.void_row.is_none() && caret.cursor.head.line == line)
-                    .map(|caret| text_origin.x + galley.pos_from_cursor(CCursor::new(caret.cursor.head.column)).min.x);
+                let closing_left = text_origin.x + text_width + (2.0 * FOLD_ELLIPSIS_GAP) * char_width + ellipsis_width;
+                let caret_x = caret.filter(|caret| caret.void_row.is_none()).and_then(|caret| {
+                    let head = caret.cursor.head;
+                    match &closing {
+                        _ if head.line == line => Some(text_origin.x + galley.pos_from_cursor(CCursor::new(head.column)).min.x),
+                        Some((last, token)) if head.line == *last && token.start <= head.column && head.column <= token.end => Some(closing_left + (head.column - token.start) as f32 * char_width),
+                        _ => None,
+                    }
+                });
                 paint_whitespace(&text_painter, lines.line(line), &terminator, &galley, text_origin.x, rect, char_width, style);
+                if pane_row.folded {
+                    let left = text_origin.x + text_width + FOLD_ELLIPSIS_GAP * char_width;
+                    paint_fold_ellipsis(&text_painter, left, ellipsis_width, rect, &font_id, palette);
+                }
+                if let Some((last, token)) = &closing {
+                    let text: String = lines.line(*last).chars().skip(token.start.clone()).take(token.len()).collect();
+                    text_painter.text(pos2(closing_left, rect.center().y), Align2::LEFT_CENTER, text, font_id.clone(), palette.pane_text);
+                }
                 text_painter.galley(text_origin, galley, palette.pane_text);
                 if let Some(x) = caret_x {
                     paint_caret(&text_painter, x, rect, palette);
@@ -419,6 +465,24 @@ pub fn show(
         )
     };
     let hover_position = ui.input(|input| input.pointer.hover_pos());
+    let ellipsis_left = |line: usize| layout(ui, lines, line, &font_id, palette).size().x + shown_terminator(lines, line, &style.whitespace).len() as f32 * char_width + FOLD_ELLIPSIS_GAP * char_width;
+    let fold_at = |pointer: Pos2| -> Option<usize> {
+        let folds = folds?;
+        let x = pointer.x - output.inner_rect.min.x;
+        let row = row_at(pointer.y - output.inner_rect.min.y + scroll.y, row_height, rows.len())?;
+        let pane_row = rows.row(row)?;
+        let line = pane_row.line?;
+        folds.range_at(line)?;
+        if x >= margin.fold_left() && x < margin.alignment_left() {
+            return Some(line);
+        }
+        if !pane_row.folded {
+            return None;
+        }
+        let text_x = x - margin.total() + scroll.x;
+        let left = ellipsis_left(line);
+        (text_x >= left && text_x < left + ellipsis_width).then_some(line)
+    };
     let alignment_hits = |pointer: Pos2| -> Vec<usize> {
         let x = pointer.x - output.inner_rect.min.x;
         if style.alignment_color.is_none() || x < margin.alignment_left() || x >= margin.gutter_left() {
@@ -452,7 +516,10 @@ pub fn show(
             let row = row_at(pointer.y - output.inner_rect.min.y + scroll.y, row_height, rows.len());
             let count = lines.count();
             let (before, after, on_void) = match row.and_then(|row| rows.row(row).map(|pane_row| (row, pane_row))) {
-                Some((_, PaneRow { line: Some(line), .. })) => (line, (line + 1).min(count), false),
+                Some((_, PaneRow { line: Some(line), folded, .. })) => {
+                    let fold_end = folds.filter(|_| folded).and_then(|folds| folds.folded().iter().find(|fold| fold.start == line).map(|fold| fold.end.clone()));
+                    (line, fold_end.unwrap_or(line + 1).min(count), false)
+                }
                 Some((row, _)) => {
                     let at = rows.line_at_or_after(row).unwrap_or(count);
                     (at, at, true)
@@ -521,7 +588,7 @@ pub fn show(
     }
     if mark_drag.is_none() && response.hovered() && hover_position.and_then(grab_at).is_some() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
-    } else if mark_drag.is_none() && response.hovered() && hover_position.and_then(gutter_at).is_some() {
+    } else if mark_drag.is_none() && response.hovered() && (hover_position.and_then(gutter_at).is_some() || hover_position.and_then(fold_at).is_some()) {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     } else if mark_drag.is_none() && (response.hovered() || held) {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
@@ -529,6 +596,17 @@ pub fn show(
     let hit = |pointer: Pos2| {
         let text_x = (pointer.x - output.inner_rect.min.x - margin.total()).max(0.0) + scroll.x;
         let content_y = pointer.y - output.inner_rect.min.y + scroll.y;
+        let closing = row_at(content_y, row_height, rows.len())
+            .and_then(|row| rows.row(row))
+            .filter(|pane_row| pane_row.folded)
+            .and_then(|pane_row| pane_row.line)
+            .and_then(|line| shown_closing(folds, lines, line).map(|(last, token)| (ellipsis_left(line) + ellipsis_width + FOLD_ELLIPSIS_GAP * char_width, last, token)));
+        if let Some((left, last, token)) = closing
+            && text_x >= left - char_width / 2.0
+        {
+            let column = token.start + ((text_x - left) / char_width).round().max(0.0) as usize;
+            return (Position { line: last, column: column.min(token.end) }, None);
+        }
         position_at(ui, lines, rows, &font_id, palette, row_height, text_x, content_y)
     };
     let pressed = response.hovered() && ui.input(|input| input.pointer.primary_pressed());
@@ -536,13 +614,15 @@ pub fn show(
     // A press on a gutter selects its region; the rest of that click and drag must not select text.
     let gutter_press_id = ui.make_persistent_id((id_salt, "gutter_press"));
     let gutter_region_pressed = pointer_position.filter(|_| pressed).and_then(gutter_at);
+    let fold_pressed = pointer_position.filter(|_| pressed && mark_drag.is_none()).and_then(fold_at);
     if pressed {
-        ui.data_mut(|data| data.insert_temp(gutter_press_id, gutter_region_pressed.is_some()));
+        ui.data_mut(|data| data.insert_temp(gutter_press_id, gutter_region_pressed.is_some() || fold_pressed.is_some()));
     }
     let in_gutter_press = ui.data(|data| data.get_temp::<bool>(gutter_press_id)).unwrap_or(false);
     let pointer = match pointer_position {
         _ if mark_drag.is_some() => resized.map(|(number, start, end)| PointerAction::SetMarkLines(number, start, end)),
         _ if gutter_region_pressed.is_some() => gutter_region_pressed.map(PointerAction::SelectRegion),
+        _ if fold_pressed.is_some() => fold_pressed.map(PointerAction::ToggleFold),
         _ if in_gutter_press => None,
         Some(pointer) if response.triple_clicked() => Some(PointerAction::SelectLine(hit(pointer).0.line)),
         Some(pointer) if response.double_clicked() => Some(PointerAction::SelectWord(hit(pointer).0)),
@@ -686,7 +766,44 @@ fn margin_widths(style: &ViewStyle<'_>, line_count: usize, char_width: f32, row_
     };
     let alignment = style.alignment_color.map_or(0.0, |_| row_height.max(char_width * 2.0 + MARGIN_PADDING));
     let arrows = alignment_gutter::arrows_width(arrow_lanes, style.inset_arrow_gap);
-    Margin { arrows, numbers, alignment, column }
+    Margin {
+        arrows,
+        numbers,
+        fold: 0.0,
+        alignment,
+        column,
+    }
+}
+
+
+/// A small square in the fold column, `left` to `left + width`, centered on the row: a minus to fold, or a plus on a folded header to unfold.
+fn paint_fold_button(painter: &Painter, left: f32, width: f32, rect: Rect, folded: bool, palette: &Palette) {
+    let size = rect.height() * FOLD_BUTTON_SHARE;
+    let square = Rect::from_center_size(pos2(left + width / 2.0, rect.center().y), vec2(size, size));
+    let color = if folded { palette.fold_ellipsis } else { palette.weak_text };
+    let stroke = Stroke::new(1.0, color);
+    painter.rect_stroke(square, 1.0, stroke, StrokeKind::Inside);
+    let arm = size * 0.3;
+    painter.hline(square.center().x - arm..=square.center().x + arm, square.center().y, stroke);
+    if folded {
+        painter.vline(square.center().x, square.center().y - arm..=square.center().y + arm, stroke);
+    }
+}
+
+
+/// The last line of the fold whose header is `line`, and the columns of the closing token it shows after its Fold Ellipsis.
+fn shown_closing(folds: Option<&Folds>, lines: Lines<'_>, line: usize) -> Option<(usize, Range<usize>)> {
+    let last = folds?.folded().iter().find(|fold| fold.start == line)?.end.checked_sub(1)?;
+    folding::closing_token(lines.line(last)).map(|token| (last, token))
+}
+
+
+/// The Fold Ellipsis of a folded header row: the dots in a light frame, `width` wide from `left`.
+fn paint_fold_ellipsis(painter: &Painter, left: f32, width: f32, rect: Rect, font_id: &FontId, palette: &Palette) {
+    let frame = Rect::from_min_max(pos2(left, rect.top() + 2.0), pos2(left + width, rect.bottom() - 2.0));
+    painter.rect_filled(frame, 2.0, palette.fold_ellipsis.gamma_multiply(0.15));
+    painter.rect_stroke(frame, 2.0, Stroke::new(1.0, palette.fold_ellipsis.gamma_multiply(0.6)), StrokeKind::Inside);
+    painter.text(frame.center(), Align2::CENTER_CENTER, FOLD_ELLIPSIS, font_id.clone(), palette.fold_ellipsis);
 }
 
 /// The region of the gutter block under a point, given in pixels from the view's left edge and from the top of its content.
@@ -714,7 +831,7 @@ fn paint_margin(ui: &Ui, rows: Rows<'_>, row: usize, pane_row: &PaneRow, left: f
         && let Some(line) = pane_row.line
     {
         painter.text(
-            pos2(left + margin.alignment_left() - MARGIN_PADDING, rect.center().y),
+            pos2(left + margin.fold_left() - MARGIN_PADDING, rect.center().y),
             Align2::RIGHT_CENTER,
             (line + 1).to_string(),
             font_id.clone(),
@@ -1196,6 +1313,7 @@ mod tests {
             Margin {
                 arrows: 0.0,
                 numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
+                fold: 0.0,
                 alignment: 0.0,
                 column: 0.0
             }
@@ -1210,6 +1328,7 @@ mod tests {
             Margin {
                 arrows: 0.0,
                 numbers: 0.0,
+                fold: 0.0,
                 alignment: 0.0,
                 column: 16.0
             }
@@ -1230,6 +1349,7 @@ mod tests {
             Margin {
                 arrows: 0.0,
                 numbers: 3.0 * 7.0 + MARGIN_PADDING * 2.0,
+                fold: 0.0,
                 alignment: 18.0,
                 column: 16.0
             }
@@ -1302,6 +1422,7 @@ mod tests {
             margin: Margin {
                 arrows: 0.0,
                 numbers: 0.0,
+                fold: 0.0,
                 alignment: 0.0,
                 column: 0.0,
             },
@@ -1325,7 +1446,7 @@ mod tests {
                     highest: test.highest,
                     insets: &test.insets,
                 };
-                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None);
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None, None);
                 if response.menu.is_some() {
                     test.menu = response.menu;
                 }
@@ -1337,6 +1458,108 @@ mod tests {
         );
         harness.run_steps(4);
         harness
+    }
+
+    /// A view of four lines whose first three are folded, the third closing them with `};`, with where its Fold Ellipsis, fold button and closing token are and what the pointer did.
+    struct FoldTest {
+        pointer: Option<PointerAction>,
+        ellipsis: Pos2,
+        button: Pos2,
+        text: Pos2,
+        closing: Pos2,
+    }
+
+    fn fold_harness() -> egui_kittest::Harness<'static, FoldTest> {
+        let test = FoldTest {
+            pointer: None,
+            ellipsis: Pos2::ZERO,
+            button: Pos2::ZERO,
+            text: Pos2::ZERO,
+            closing: Pos2::ZERO,
+        };
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(400.0, 200.0)).with_step_dt(0.01).build_ui_state(
+            |ui, test: &mut FoldTest| {
+                let text = "ab\nc\n};\ne\n";
+                let ranges = editing::editor_lines(text);
+                let lines = Lines { text, ranges: &ranges };
+                let rows = crate::rows::RowMap::from_rows((0..5).map(|line| PaneRow { line: Some(line), ..PaneRow::default() }).collect()).folded(&[0..3]);
+                let mut folds = Folds::default();
+                folds.set_ranges(vec![0..3]);
+                folds.fold(0..3);
+                let style = style(true, MarginKind::Gutters);
+                let origin = ui.max_rect().min;
+                let row_height = row_height(ui);
+                let font_id = TextStyle::Monospace.resolve(ui.style());
+                let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
+                let margin = Margin {
+                    fold: (row_height * FOLD_COLUMN_SHARE).round(),
+                    ..margin_widths(&style, lines.count(), char_width, row_height, 0)
+                };
+                let middle = origin.y + row_height / 2.0;
+                let ellipsis_width = (FOLD_ELLIPSIS.chars().count() as f32 + 2.0 * FOLD_ELLIPSIS_PADDING) * char_width;
+                test.ellipsis = pos2(origin.x + margin.total() + (2.0 + FOLD_ELLIPSIS_GAP) * char_width + ellipsis_width / 2.0, middle);
+                test.button = pos2(origin.x + margin.fold_left() + margin.fold / 2.0, middle);
+                test.text = pos2(origin.x + margin.total() + char_width / 2.0, middle);
+                let header_width = (2 + shown_terminator(lines, 0, &style.whitespace).len()) as f32;
+                test.closing = pos2(origin.x + margin.total() + (header_width + 2.0 * FOLD_ELLIPSIS_GAP + 1.1) * char_width + ellipsis_width, middle);
+                let marks = PaneMarks {
+                    marks: &[],
+                    highest: 0,
+                    insets: &[],
+                };
+                let response = show(ui, "pane", lines, Rows::Mapped(&rows), None, None, false, None, &style, marks, None, Some(&folds));
+                if response.pointer.is_some() {
+                    test.pointer = response.pointer;
+                }
+            },
+            test,
+        );
+        harness.run_steps(4);
+        harness
+    }
+
+    fn click(harness: &mut egui_kittest::Harness<'_, FoldTest>, pos: Pos2) {
+        harness.hover_at(pos);
+        harness.run_steps(2);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+    }
+
+    #[test]
+    fn a_click_on_the_fold_ellipsis_or_the_fold_button_toggles_the_fold() {
+        let mut harness = fold_harness();
+        let ellipsis = harness.state().ellipsis;
+        click(&mut harness, ellipsis);
+        assert_eq!(harness.state().pointer, Some(PointerAction::ToggleFold(0)));
+        let mut harness = fold_harness();
+        let button = harness.state().button;
+        click(&mut harness, button);
+        assert_eq!(harness.state().pointer, Some(PointerAction::ToggleFold(0)));
+    }
+
+    #[test]
+    fn a_click_on_the_text_of_a_folded_header_puts_the_caret_there() {
+        let mut harness = fold_harness();
+        let text = harness.state().text;
+        click(&mut harness, text);
+        assert!(matches!(harness.state().pointer, Some(PointerAction::Press { position: Position { line: 0, .. }, .. })));
+    }
+
+
+    #[test]
+    fn a_click_on_the_closing_token_after_the_fold_ellipsis_puts_the_caret_in_it() {
+        let mut harness = fold_harness();
+        let closing = harness.state().closing;
+        click(&mut harness, closing);
+        assert!(matches!(harness.state().pointer, Some(PointerAction::Press { position: Position { line: 2, column: 1 }, .. })));
     }
 
     fn right_click(harness: &mut egui_kittest::Harness<'_, MenuTest>, pos: Pos2) {
@@ -1628,6 +1851,7 @@ mod tests {
         let margin = Margin {
             arrows: 0.0,
             numbers: 20.0,
+            fold: 0.0,
             alignment: 0.0,
             column: 16.0,
         };

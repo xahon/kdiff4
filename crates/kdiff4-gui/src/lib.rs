@@ -5,6 +5,7 @@ mod config;
 mod editing;
 mod eol;
 mod find;
+mod folding;
 mod fonts;
 mod heuristics_dialog;
 mod inset_dialog;

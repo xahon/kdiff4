@@ -212,6 +212,9 @@ pub struct ThemeColors {
     /// The red of text and gutter blocks that differ from every other document, and of the `<Merge Conflict>` marker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub red: Option<[u8; 3]>,
+    /// The Fold Ellipsis of folded code and the button of a fold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fold_ellipsis: Option<[u8; 3]>,
 }
 
 /// Which whitespace the panes mark. Each kind shows only while `render` is on too.
@@ -433,6 +436,7 @@ last_dir = \"x\"
                 document_b: None,
                 document_c: Some([7, 8, 9]),
                 red: Some([10, 11, 12]),
+                fold_ellipsis: Some([16, 17, 18]),
             },
             dark_colors: ThemeColors {
                 ui_text: None,
@@ -441,6 +445,7 @@ last_dir = \"x\"
                 document_b: Some([13, 14, 15]),
                 document_c: None,
                 red: None,
+                fold_ellipsis: None,
             },
             whitespace: WhitespaceConfig {
                 render: true,

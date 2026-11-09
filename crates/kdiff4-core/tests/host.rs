@@ -617,3 +617,41 @@ fn insets_ask_where_to_show_them_and_can_be_placed_again() {
     drop(client);
     host.join().unwrap();
 }
+
+#[test]
+fn fold_ranges_are_found_for_every_document_asked_without_a_new_revision() {
+    let dir = temp_dir("fold-ranges");
+    let a = write(&dir, "a.cpp", "int f() {\n    return 0;\n}\n");
+    let b = write(&dir, "b.cpp", "int g() {\n    int x = 1;\n    return x;\n}\n");
+    let (mut client, host) = start();
+
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            output: Some(dir.join("out.cpp")),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+
+    let id = client
+        .send(Command::FindFoldRanges {
+            language: "C++".to_string(),
+            documents: vec![Document::B, Document::C, Document::D],
+        })
+        .unwrap();
+    let HostMessage::Event(Event::FoldRanges(found)) = next_message(&client) else {
+        panic!("expected fold ranges");
+    };
+    expect_ok(&client, id.clone());
+    assert_eq!(found.cause, Some(id));
+    assert_eq!(found.revision, snapshot.revision);
+    assert_eq!(found.documents.len(), 2);
+    assert_eq!(found.documents[0], (Document::B, vec![0..4]));
+    assert_eq!(found.documents[1].0, Document::D);
+
+    drop(client);
+    host.join().unwrap();
+}

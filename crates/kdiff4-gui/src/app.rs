@@ -11,6 +11,7 @@ use crate::config::{self, GuiConfig, ViewConfig};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
 use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
+use crate::folding::{self, Folds};
 use crate::fonts::{self, FontScan};
 use crate::language::{self, Language, LanguageState};
 use crate::mirror::{DeltaOutcome, Mirror};
@@ -51,6 +52,11 @@ const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers
 const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
 const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
 const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
+/// egui can't tell the numeric keypad's minus and plus from the main ones, so both fold and unfold.
+const FOLD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
+const UNFOLD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
+const FOLD_ALL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Minus);
+const UNFOLD_ALL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Plus);
 /// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
 const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
@@ -125,6 +131,8 @@ enum Pending {
     HeuristicPropose,
     /// The heuristic alignments sent, and the alignment they were limited to, to send again once the user confirms dropping D's work.
     HeuristicApply(Vec<Vec<std::ops::Range<usize>>>, Option<u32>),
+    /// A request for the fold ranges of the documents.
+    FoldRanges,
 }
 
 /// A message under the panes: the differences found on open and reload, or the outcome of the last save, reload or path change.
@@ -182,6 +190,12 @@ pub struct KdiffApp {
     eol_modal_id: egui::Id,
     /// The Heuristics Alignment window, while it is open.
     heuristics: Option<HeuristicsDialog>,
+    /// The request for fold ranges in flight; one at a time.
+    fold_request: Option<RequestId>,
+    /// The language the fold ranges of the session were asked for; `None` asks again for every document.
+    folds_language: Option<String>,
+    /// D changed since its fold ranges were asked for.
+    output_folds_stale: bool,
 }
 
 impl KdiffApp {
@@ -244,7 +258,11 @@ impl KdiffApp {
             eol_prompt: None,
             eol_modal_id: egui::Id::unique("eol_prompt"),
             heuristics: None,
+            fold_request: None,
+            folds_language: None,
+            output_folds_stale: false,
         };
+        ctx.options_mut(|options| options.zoom_with_keyboard = false);
         app.apply_view(ctx, &view);
         app
     }
@@ -578,9 +596,13 @@ impl KdiffApp {
                 if let Some(dialog) = self.heuristics.as_mut() {
                     dialog.forget_proposal();
                 }
-                let mirror = Mirror::from_snapshot(snapshot, self.view().align_output);
+                let mut mirror = Mirror::from_snapshot(snapshot, self.view().align_output);
+                if let Some(previous) = self.mirror.as_ref() {
+                    mirror.keep_folds_from(previous);
+                }
                 self.language.follow(&mirror);
                 self.mirror = Some(mirror);
+                self.folds_language = None;
                 self.panes.void_row = None;
                 self.form_open = false;
                 self.error = None;
@@ -603,6 +625,7 @@ impl KdiffApp {
                     Change::AlignmentsChanged(alignments) => alignments.ask,
                     _ => None,
                 };
+                let edits_output = matches!(delta.change, Change::OutputEdited { .. });
                 let outcome = match self.mirror.as_mut() {
                     Some(mirror) => mirror.apply_delta(delta),
                     None => DeltaOutcome::Ignored,
@@ -613,6 +636,7 @@ impl KdiffApp {
                         self.request_resync();
                     }
                     DeltaOutcome::Applied => {
+                        self.output_folds_stale |= edits_output;
                         if let Some(offset) = changed_end
                             && let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, Document::D))
                         {
@@ -652,12 +676,135 @@ impl KdiffApp {
                     dialog.set_proposal(proposal);
                 }
             }
+            HostMessage::Event(Event::FoldRanges(found)) => {
+                if found.cause.is_some() && found.cause == self.fold_request {
+                    self.fold_request = None;
+                }
+                if let Some(mirror) = self.mirror.as_mut() {
+                    self.output_folds_stale |= mirror.set_fold_ranges(found);
+                }
+            }
             HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
+        }
+    }
+
+
+    /// Asks for the fold ranges of every document when the session or its language is new, and for those of D after it changed. One request is in flight at a time.
+    fn request_fold_ranges(&mut self) {
+        if self.mirror.is_none() || self.fold_request.is_some() || self.engine_stopped {
+            return;
+        }
+        let language = self.language.current().name().to_string();
+        let documents = if self.folds_language.as_deref() != Some(language.as_str()) {
+            Document::ALL.to_vec()
+        } else if self.output_folds_stale {
+            vec![Document::D]
+        } else {
+            return;
+        };
+        self.folds_language = Some(language.clone());
+        self.output_folds_stale = false;
+        self.fold_request = self.send(Command::FindFoldRanges { language, documents }, Pending::FoldRanges);
+    }
+
+
+    /// The pane folding acts on: the one with the caret, or else the scroll leader.
+    fn fold_pane(&self) -> Document {
+        match self.panes.caret {
+            Some((document, _)) => document,
+            None => self.panes.scroll_leader(self.mirror.as_ref().is_some_and(|mirror| mirror.is_aligned())),
+        }
+    }
+
+
+    /// Folds the innermost range around the caret that is not folded yet, and puts the caret at the end of its header line, before the Fold Ellipsis.
+    fn fold_at_caret(&mut self) {
+        let document = self.fold_pane();
+        let Some(mirror) = self.mirror.as_mut() else { return };
+        let line = self.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
+        let Some(range) = mirror.folds(document.clone()).innermost_unfolded(line) else {
+            return;
+        };
+        if mirror.change_folds(document.clone(), |folds| folds.fold(range.clone())) && self.panes.caret_in(document.clone()).is_some() {
+            self.caret_to_line_end(document, range.start);
+        }
+    }
+
+
+    /// Unfolds the fold whose header has the caret, or else the innermost fold around it.
+    fn unfold_at_caret(&mut self) {
+        let document = self.fold_pane();
+        let line = self.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
+        if let Some(mirror) = self.mirror.as_mut() {
+            mirror.change_folds(document, |folds| folds.unfold_at(line));
+        }
+    }
+
+
+    fn fold_all(&mut self, fold: bool) {
+        let document = self.fold_pane();
+        if let Some(mirror) = self.mirror.as_mut() {
+            mirror.change_folds(document.clone(), |folds| if fold { folds.fold_all() } else { folds.unfold_all() });
+        }
+        self.park_caret_out_of_folds(document);
+    }
+
+
+    /// Folds or unfolds the range whose header is `line`, as its button in the fold column does.
+    fn toggle_fold(&mut self, document: Document, line: usize) {
+        let Some(mirror) = self.mirror.as_mut() else { return };
+        let folds = mirror.folds(document.clone());
+        if folds.is_folded(line) {
+            mirror.change_folds(document, |folds| folds.unfold_at(line));
+            return;
+        }
+        if let Some(range) = folds.range_at(line) {
+            mirror.change_folds(document.clone(), |folds| folds.fold(range));
+            self.park_caret_out_of_folds(document);
+        }
+    }
+
+
+    /// A fold that now hides the caret in `document` would unfold again at once, so the caret goes to the end of the header of the outermost fold that hides it.
+    fn park_caret_out_of_folds(&mut self, document: Document) {
+        let Some(cursor) = self.panes.caret_in(document.clone()) else { return };
+        let header = self.mirror.as_ref().and_then(|mirror| mirror.folds(document.clone()).outermost_hiding(cursor.head.line));
+        if let Some(header) = header {
+            self.caret_to_line_end(document, header);
+        }
+    }
+
+
+    fn caret_to_line_end(&mut self, document: Document, line: usize) {
+        let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) else { return };
+        let position = editing::Position {
+            line: line.clone(),
+            column: lines.line_chars(line),
+        };
+        self.panes.set_caret(document, Cursor::at(position), None);
+        self.panes.reveal_caret = true;
+    }
+
+
+    /// The caret entered a fold, by keys, a find or a jump: the folds that hide it unfold. On the closing token shown after a Fold Ellipsis it stays folded.
+    fn unfold_around_caret(&mut self) {
+        let Some((document, cursor)) = self.panes.caret else { return };
+        let Some(mirror) = self.mirror.as_mut() else { return };
+        let line = cursor.head.line;
+        let text = lines_of(mirror, document.clone()).map_or("", |lines| lines.line(line));
+        if folding::on_shown_closing(mirror.folds(document.clone()), line, text, cursor.head.column) {
+            return;
+        }
+        if mirror.change_folds(document, |folds| folds.reveal(line..line)) {
+            self.panes.void_row = None;
         }
     }
 
     /// Scrolls every pane to `region`, with context rows above it, unless every pane already shows all of it, and puts the caret, hidden, at its start in the pane that has it (A when none does).
     fn jump_to(&mut self, region: usize) {
+        if let Some(mirror) = self.mirror.as_mut() {
+            mirror.reveal_region(region);
+        }
         self.panes.jump = Some(region);
         let document = self.panes.caret.map_or(Document::A, |(document, _)| document);
         self.caret_to_region(document, region, true);
@@ -720,6 +867,7 @@ impl KdiffApp {
                         is_error: false,
                     }),
                     Pending::HeuristicPropose => self.status.take(),
+                    Pending::FoldRanges => self.status.take(),
                 };
                 return;
             }
@@ -727,6 +875,10 @@ impl KdiffApp {
         };
         match kind {
             Pending::Open => self.error = Some(error.message),
+            Pending::FoldRanges => {
+                self.fold_request = None;
+                log::warn!("cannot find the fold ranges: {}", error.message);
+            }
             Pending::Edit => {
                 let rejected = self.mirror.as_ref().is_some_and(|mirror| mirror.edit_rejected(&id));
                 self.report_error(format!("The engine rejected an edit: {}", error.message));
@@ -993,6 +1145,7 @@ impl KdiffApp {
                 }
             }
             PaneAction::Copy => self.copy_selection(ctx),
+            PaneAction::ToggleFold(document, line) => self.toggle_fold(document, line),
             PaneAction::MarkSelection(_) => self.mark_selected_lines(),
             PaneAction::MarkAnchor(document, position) => self.mark_anchor(document, position),
             PaneAction::RemoveAlignmentMark(document, number) => {
@@ -1257,6 +1410,10 @@ impl KdiffApp {
         } else {
             editing::selected_lines(cursor, count)
         };
+        let lines = match (lines, self.mirror.as_ref()) {
+            (Some(lines), Some(mirror)) => Some(through_folds(mirror.folds(document.clone()), lines)),
+            (lines, _) => lines,
+        };
         match lines {
             Some(lines) => {
                 self.send(Command::MarkAlignment { document, lines }, Pending::AlignmentEdit);
@@ -1485,6 +1642,20 @@ impl KdiffApp {
         if ctx.input_mut(|input| input.consume_shortcut(&IGNORE_WHITESPACE_SHORTCUT)) {
             self.toggle_ignore_whitespace();
         }
+        if self.mirror.is_some() && !ctx.text_edit_focused() {
+            if ctx.input_mut(|input| input.consume_shortcut(&FOLD_ALL_SHORTCUT)) {
+                self.fold_all(true);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&UNFOLD_ALL_SHORTCUT)) {
+                self.fold_all(false);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&FOLD_SHORTCUT)) {
+                self.fold_at_caret();
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&UNFOLD_SHORTCUT)) {
+                self.unfold_at_caret();
+            }
+        }
     }
 
     /// Asks where to show the alignment the last mark completed, when the documents disagree on its order. The answer is a `PlaceAlignment` unless the user keeps the suggestion, which is in effect already.
@@ -1693,6 +1864,25 @@ impl KdiffApp {
                     if ui.add(item).on_hover_text(format!("{INDEPENDENT_SCROLL_TOGGLE_HINT} ({shortcut})")).clicked() {
                         self.toggle_independent_scroll();
                     }
+                    ui.separator();
+                    let folds = [
+                        ("Fold", &FOLD_SHORTCUT, "Fold the innermost function, type or block around the caret"),
+                        ("Unfold", &UNFOLD_SHORTCUT, "Unfold the fold at the caret"),
+                        ("Fold All", &FOLD_ALL_SHORTCUT, "Fold the outermost functions, types and blocks of the pane with the caret"),
+                        ("Unfold All", &UNFOLD_ALL_SHORTCUT, "Unfold everything in the pane with the caret"),
+                    ];
+                    for (index, (label, shortcut, hint)) in folds.into_iter().enumerate() {
+                        let button = egui::Button::new(label).shortcut_text(ui.ctx().format_shortcut(shortcut));
+                        if ui.add_enabled(has_session, button).on_hover_text(hint).clicked() {
+                            match index {
+                                0 => self.fold_at_caret(),
+                                1 => self.unfold_at_caret(),
+                                2 => self.fold_all(true),
+                                _ => self.fold_all(false),
+                            }
+                        }
+                    }
+                    ui.separator();
                     let mut ignore_whitespace = self.ignores_whitespace();
                     let item = egui::Checkbox::new(&mut ignore_whitespace, IGNORE_WHITESPACE_TOGGLE_LABEL);
                     let shortcut = ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT);
@@ -1933,6 +2123,8 @@ impl eframe::App for KdiffApp {
             self.handle_shortcuts(&ctx);
         }
         self.handle_pane_keys(&ctx);
+        self.unfold_around_caret();
+        self.request_fold_ranges();
         self.refresh_find();
         self.show_menu(ui);
         if self.mirror.is_some() {
@@ -2226,6 +2418,16 @@ fn innermost_applied_alignment(alignments: &Alignments, document: Document, line
         .filter(|(_, parts)| holds(parts))
         .min_by_key(|(_, parts)| (parts[index].len(), std::cmp::Reverse(depth(parts))))
         .map(|(number, _)| number.clone())
+}
+
+
+/// `lines` with the lines of the fold their last line is the header of, so marking a folded entity's header row marks all of it.
+fn through_folds(folds: &Folds, lines: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let last = lines.end.saturating_sub(1);
+    match folds.folded().iter().find(|fold| fold.start == last) {
+        Some(fold) => lines.start..lines.end.max(fold.end.clone()),
+        None => lines,
+    }
 }
 
 
@@ -2956,6 +3158,145 @@ mod tests {
         };
         rows::RowMap::for_source(&comparison, &[], 0, 2, None, None)
     }
+
+    /// Gives the mirror the fold ranges of `document`, as the host's answer to `FindFoldRanges` does.
+    fn give_fold_ranges(app: &mut KdiffApp, document: Document, ranges: Vec<std::ops::Range<usize>>) {
+        let mirror = app.mirror.as_mut().unwrap();
+        let revision = mirror.revision();
+        mirror.set_fold_ranges(kdiff4_protocol::FoldRanges {
+            cause: None,
+            revision,
+            documents: vec![(document, ranges)],
+        });
+    }
+
+
+    fn folded(app: &KdiffApp, document: Document) -> Vec<std::ops::Range<usize>> {
+        app.mirror.as_ref().unwrap().folds(document).folded().to_vec()
+    }
+
+
+    #[test]
+    fn fold_ranges_are_asked_for_every_document_then_for_d_after_it_changed() {
+        let (mut app, host, ctx) = app_with_session();
+        let language = app.language.current().name().to_string();
+        app.request_fold_ranges();
+        app.request_fold_ranges();
+        let found = kdiff4_protocol::FoldRanges {
+            cause: app.fold_request.clone(),
+            revision: app.mirror.as_ref().unwrap().revision(),
+            documents: vec![(Document::A, vec![0..2])],
+        };
+        app.handle_message(&ctx, HostMessage::Event(Event::FoldRanges(found)));
+        assert_eq!(app.mirror.as_ref().unwrap().folds(Document::A).range_at(0), Some(0..2));
+        app.request_fold_ranges();
+        app.output_folds_stale = true;
+        app.request_fold_ranges();
+        let all = Command::FindFoldRanges {
+            language: language.clone(),
+            documents: Document::ALL.to_vec(),
+        };
+        let output = Command::FindFoldRanges { language, documents: vec![Document::D] };
+        assert_eq!(sent(app, host), [all, output]);
+    }
+
+
+    #[test]
+    fn ctrl_minus_folds_around_the_caret_and_puts_it_before_the_ellipsis_and_ctrl_plus_unfolds() {
+        let (mut app, _host, ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        let at = |line, column| Position { line, column };
+        app.panes.set_caret(Document::A, Cursor::at(at(1, 1)), None);
+        press(&mut app, &ctx, Key::Minus, Modifiers::COMMAND);
+        assert_eq!(folded(&app, Document::A), [0..2]);
+        assert_eq!(app.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
+        press(&mut app, &ctx, Key::Plus, Modifiers::COMMAND);
+        assert!(folded(&app, Document::A).is_empty());
+    }
+
+
+    #[test]
+    fn ctrl_shift_minus_and_plus_fold_and_unfold_everything_in_the_pane_with_the_caret_only() {
+        let (mut app, _host, ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        give_fold_ranges(&mut app, Document::D, vec![0..2]);
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
+        press(&mut app, &ctx, Key::Minus, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!((folded(&app, Document::A), folded(&app, Document::D)), (vec![0..2], Vec::new()));
+        press(&mut app, &ctx, Key::Plus, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert!(folded(&app, Document::A).is_empty());
+    }
+
+
+    #[test]
+    fn the_fold_button_folds_and_moves_a_caret_the_fold_would_hide_onto_its_header() {
+        let (mut app, _host, ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        let at = |line, column| Position { line, column };
+        app.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
+        app.handle_pane_action(&ctx, PaneAction::ToggleFold(Document::A, 0));
+        assert_eq!(folded(&app, Document::A), [0..2]);
+        assert_eq!(app.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
+        app.handle_pane_action(&ctx, PaneAction::ToggleFold(Document::A, 0));
+        assert!(folded(&app, Document::A).is_empty());
+    }
+
+
+    #[test]
+    fn the_caret_entering_a_fold_unfolds_it_and_on_the_header_keeps_it() {
+        let (mut app, _host, _ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        app.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 1 }), None);
+        app.unfold_around_caret();
+        assert_eq!(folded(&app, Document::A), [0..2]);
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), None);
+        app.unfold_around_caret();
+        assert!(folded(&app, Document::A).is_empty());
+    }
+
+
+    #[test]
+    fn a_jump_unfolds_the_folds_that_hide_its_region_in_every_pane() {
+        let (mut app, _host, _ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        give_fold_ranges(&mut app, Document::D, vec![0..2]);
+        for document in [Document::A, Document::D] {
+            app.mirror.as_mut().unwrap().change_folds(document, |folds| folds.fold(0..2));
+        }
+        app.jump_to(0);
+        assert_eq!((folded(&app, Document::A), folded(&app, Document::D)), (vec![0..2], vec![0..2]));
+        app.jump_to(1);
+        assert_eq!((folded(&app, Document::A), folded(&app, Document::D)), (Vec::new(), Vec::new()));
+    }
+
+
+    #[test]
+    fn marking_a_folded_header_for_alignment_marks_every_line_of_the_fold() {
+        let (mut app, host, _ctx) = app_with_session();
+        give_fold_ranges(&mut app, Document::A, vec![0..2]);
+        app.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
+        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
+        app.mark_selected_lines();
+        assert_eq!(sent(app, host), [Command::MarkAlignment { document: Document::A, lines: 0..2 }]);
+    }
+
+
+    #[test]
+    fn a_selection_over_a_fold_takes_the_hidden_lines_so_copying_copies_them() {
+        let text = "l0\nl1\nl2\nl3\n";
+        let ranges = editing::editor_lines(text);
+        let lines = Lines { text, ranges: &ranges };
+        let map = rows::RowMap::from_rows((0..5).map(|line| rows::PaneRow { line: Some(line), ..Default::default() }).collect()).folded(&[0..3]);
+        let start = Caret {
+            cursor: Cursor::at(Position { line: 0, column: 0 }),
+            void_row: None,
+        };
+        let (cursor, _) = move_by_rows(lines, Rows::Mapped(&map), start, Motion::Down, true);
+        assert_eq!(cursor.head, Position { line: 3, column: 0 });
+        assert_eq!(editing::selected_text(lines, cursor), "l0\nl1\nl2\n");
+    }
+
 
     #[test]
     fn vertical_moves_stop_on_void_rows() {

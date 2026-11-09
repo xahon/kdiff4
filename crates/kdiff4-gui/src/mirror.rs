@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, RegionStatus};
 use kdiff4_protocol::{
-    Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, EolChoice, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot,
+    Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, EolChoice, FoldRanges, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot,
 };
 
 use crate::editing::{self, Edit, Lines};
+use crate::folding::Folds;
 use crate::rows::{self, RowMap, Rows};
 
 /// The client's copy of D.
@@ -28,8 +29,13 @@ impl OutputMirror {
         }
     }
 
+    fn fits(&self, range: &Range<usize>) -> bool {
+        range.start <= range.end && range.end <= self.text.len() && self.text.is_char_boundary(range.start) && self.text.is_char_boundary(range.end)
+    }
+
+
     fn replace(&mut self, range: Range<usize>, text: &str) -> bool {
-        let fits = range.start <= range.end && range.end <= self.text.len() && self.text.is_char_boundary(range.start) && self.text.is_char_boundary(range.end);
+        let fits = self.fits(&range);
         if fits {
             self.text.replace_range(range.clone(), text);
             editing::update_editor_lines(&mut self.lines, &self.text, range, text.len());
@@ -54,12 +60,18 @@ pub struct Mirror {
     documents: Vec<DocumentText>,
     output: Option<OutputMirror>,
     comparison: Comparison,
-    /// Per document, in `documents` order: its rows in the synchronized view.
+    /// Per document, in `documents` order: its rows in the synchronized view, without folds.
     row_maps: Vec<RowMap>,
+    /// `row_maps` with each document's folds folded: the rows its pane shows.
+    folded_row_maps: Vec<RowMap>,
     /// Per region, its merge state; empty without D.
     merge: Vec<RegionMerge>,
-    /// D's rows: its lines and the placeholders of unresolved conflicts.
+    /// D's rows: its lines and the placeholders of unresolved conflicts, without folds.
     output_rows: RowMap,
+    /// `output_rows` with D's folds folded.
+    folded_output_rows: RowMap,
+    /// Per document, in `Document::ALL` order: its fold ranges and folds.
+    folds: [Folds; 4],
     /// Every pane gives each region the same number of rows, padding with voids, so D lines up with the source panes.
     aligned: bool,
     options: ComparisonOptions,
@@ -93,8 +105,11 @@ impl Mirror {
             output,
             comparison: snapshot.comparison,
             row_maps: Vec::new(),
+            folded_row_maps: Vec::new(),
             merge: snapshot.merge,
             output_rows: RowMap::default(),
+            folded_output_rows: RowMap::default(),
+            folds: Default::default(),
             aligned,
             options: snapshot.options,
             current_region: snapshot.current_region,
@@ -169,8 +184,100 @@ impl Mirror {
             .and_then(|index| self.char_diffs.get(index))
     }
 
+    /// The rows `document`'s pane shows, with its folds folded.
     pub fn rows(&self, document: Document) -> Option<&RowMap> {
-        self.documents.iter().position(|text| text.document == document).and_then(|index| self.row_maps.get(index))
+        self.documents.iter().position(|text| text.document == document).and_then(|index| self.folded_row_maps.get(index))
+    }
+
+
+    /// The rows of `document` without folds, which line up with the other documents' rows.
+    pub fn unfolded_rows(&self, document: Document) -> Option<&RowMap> {
+        match document {
+            Document::D => self.output.as_ref().map(|_| &self.output_rows),
+            document => self.documents.iter().position(|text| text.document == document).and_then(|index| self.row_maps.get(index)),
+        }
+    }
+
+
+    pub fn folds(&self, document: Document) -> &Folds {
+        &self.folds[fold_index(document)]
+    }
+
+
+    /// Changes the folds of `document` with `change`, which returns whether it changed anything, and folds its rows again if it did.
+    pub fn change_folds(&mut self, document: Document, change: impl FnOnce(&mut Folds) -> bool) -> bool {
+        let changed = change(&mut self.folds[fold_index(document.clone())]);
+        if changed {
+            self.refold(document);
+        }
+        changed
+    }
+
+
+    /// Takes the fold ranges the engine found. Those of D are dropped when D changed since, or has local edits the host has not confirmed; returns true then, so they can be asked for again.
+    pub fn set_fold_ranges(&mut self, found: FoldRanges) -> bool {
+        let mut stale = false;
+        for (document, ranges) in found.documents {
+            if document == Document::D && (found.revision != self.revision || !self.pending_edits.is_empty()) {
+                stale = true;
+                continue;
+            }
+            self.folds[fold_index(document.clone())].set_ranges(ranges);
+            self.refold(document);
+        }
+        stale
+    }
+
+
+    /// Keeps the folds of `previous` for every document whose text is the same, as after a comparison that changed only the rows.
+    pub fn keep_folds_from(&mut self, previous: &Mirror) {
+        for document in Document::ALL {
+            let same = match document {
+                Document::D => self.output.as_ref().map(|output| &output.text) == previous.output.as_ref().map(|output| &output.text),
+                document => self.document(document.clone()).map(|text| &text.text) == previous.document(document.clone()).map(|text| &text.text),
+            };
+            if same {
+                self.folds[fold_index(document.clone())] = previous.folds[fold_index(document.clone())].clone();
+                self.refold(document);
+            }
+        }
+    }
+
+
+    /// Unfolds, in every pane, the folds that hide a line of region `region`, or the place of a void, so a jump there shows it.
+    pub fn reveal_region(&mut self, region: usize) {
+        for document in Document::ALL {
+            let Some(rows) = self.unfolded_rows(document.clone()).map(Rows::Mapped) else {
+                continue;
+            };
+            let Some(range) = rows.region_rows(region) else {
+                continue;
+            };
+            let lines: Vec<usize> = range.clone().filter_map(|row| rows.row(row).and_then(|pane_row| pane_row.line)).collect();
+            let reveal = match (lines.iter().min(), lines.iter().max()) {
+                (Some(first), Some(last)) => first.clone()..last + 1,
+                _ => match rows.line_at_or_after(range.start.clone()) {
+                    Some(line) => line..line,
+                    None => continue,
+                },
+            };
+            self.change_folds(document, |folds| folds.reveal(reveal));
+        }
+    }
+
+
+    fn refold(&mut self, document: Document) {
+        match document {
+            Document::D => self.folded_output_rows = self.output_rows.folded(self.folds[fold_index(Document::D)].folded()),
+            document => {
+                if let Some(index) = self.documents.iter().position(|text| text.document == document)
+                    && let Some(map) = self.row_maps.get(index)
+                {
+                    let folded = map.folded(self.folds[fold_index(document)].folded());
+                    self.folded_row_maps[index] = folded;
+                }
+            }
+        }
     }
 
     pub fn output(&self) -> Option<&OutputMirror> {
@@ -185,8 +292,9 @@ impl Mirror {
         &self.comparison
     }
 
+    /// The rows D's pane shows, with its folds folded.
     pub fn output_rows(&self) -> &RowMap {
-        &self.output_rows
+        &self.folded_output_rows
     }
 
     pub fn unresolved_count(&self) -> usize {
@@ -241,6 +349,12 @@ impl Mirror {
             .enumerate()
             .map(|(index, text)| RowMap::for_source(&self.comparison, &self.merge, index, text.line_count(), heights.as_deref(), whitespace_runs))
             .collect();
+        self.folded_row_maps = self
+            .documents
+            .iter()
+            .zip(self.row_maps.iter())
+            .map(|(text, map)| map.folded(self.folds[fold_index(text.document.clone())].folded()))
+            .collect();
         self.refresh_output_rows();
     }
 
@@ -248,6 +362,20 @@ impl Mirror {
         let line_count = self.output.as_ref().map_or(0, |output| output.lines.len());
         let heights = self.is_aligned().then(|| rows::aligned_heights(&self.comparison.regions, &self.merge));
         self.output_rows = RowMap::for_output(&self.merge, &self.comparison.regions, line_count, heights.as_deref());
+        self.folded_output_rows = self.output_rows.folded(self.folds[fold_index(Document::D)].folded());
+    }
+
+
+    /// Moves D's folds with an edit of `range` to `text` that has not been applied yet.
+    fn fold_output_edit(&mut self, range: &Range<usize>, text: &str) {
+        let Some(output) = self.output.as_ref() else {
+            return;
+        };
+        let lines = output.lines();
+        let first = editing::position_of(lines, range.start.clone()).line;
+        let old_last = editing::position_of(lines, range.end.clone()).line;
+        let new_last = first + editing::editor_lines(text).len().saturating_sub(1);
+        self.folds[fold_index(Document::D)].edited(first, old_last, new_last);
     }
 
     /// For the status bar, e.g. "3 differences, 1 conflict (whitespace only); 1 unresolved".
@@ -311,6 +439,10 @@ impl Mirror {
     /// Applies an edit to D at once. `region` is the region without lines the edit goes to, which then has the edit's lines and is hand-edited. Returns the command to send, based on the revision the host will be at when it gets there.
     pub fn apply_local_edit(&mut self, edit: &Edit, region: Option<usize>) -> Option<OutputEdit> {
         let base = Revision(self.revision.0 + self.pending_edits.len() as u64);
+        if !self.output.as_ref()?.fits(&edit.range) {
+            return None;
+        }
+        self.fold_output_edit(&edit.range, &edit.text);
         let output = self.output.as_mut()?;
         if !output.replace(edit.range.clone(), &edit.text) {
             return None;
@@ -369,6 +501,9 @@ impl Mirror {
         let has_pending = !self.pending_edits.is_empty();
         match delta.change {
             Change::OutputEdited { range, text, modified, merge } => {
+                if !has_pending && self.output.as_ref().is_some_and(|output| output.fits(&range)) {
+                    self.fold_output_edit(&range, &text);
+                }
                 let applied = !has_pending && self.output.as_mut().is_some_and(|output| output.replace(range, &text));
                 if !applied || !self.apply_merge(merge) {
                     return DeltaOutcome::NeedsResync;
@@ -398,6 +533,99 @@ impl Mirror {
         DeltaOutcome::Applied
     }
 }
+
+fn fold_index(document: Document) -> usize {
+    match document {
+        Document::A => 0,
+        Document::B => 1,
+        Document::C => 2,
+        Document::D => 3,
+    }
+}
+
+
+#[cfg(test)]
+mod fold_tests {
+    use kdiff4_protocol::engine::EngineCapabilities;
+    use kdiff4_protocol::{EolChoice, OutputDocument};
+
+    use super::*;
+
+    fn mirror_with_output(text: &str) -> Mirror {
+        Mirror::from_snapshot(
+            Snapshot {
+                revision: Revision(1),
+                documents: Vec::new(),
+                output: Some(OutputDocument {
+                    path: None,
+                    text: text.to_string(),
+                    modified: false,
+                    eol: EolChoice::default(),
+                }),
+                comparison: Comparison::default(),
+                engine: EngineCapabilities::default(),
+                merge: Vec::new(),
+                options: ComparisonOptions::default(),
+                current_region: None,
+                char_diffs: Vec::new(),
+                alignments: Alignments::default(),
+            },
+            false,
+        )
+    }
+
+
+    fn ranges_of_d(revision: Revision, ranges: Vec<Range<usize>>) -> FoldRanges {
+        FoldRanges {
+            cause: None,
+            revision,
+            documents: vec![(Document::D, ranges)],
+        }
+    }
+
+
+    #[test]
+    fn edits_of_d_move_its_folds_and_ranges_found_before_them_are_dropped() {
+        let mut mirror = mirror_with_output("a\nb\nc\nd\n");
+        assert!(!mirror.set_fold_ranges(ranges_of_d(Revision(1), vec![1..4])));
+        mirror.change_folds(Document::D, |folds| folds.fold(1..4));
+        assert_eq!(Rows::Mapped(mirror.output_rows()).len(), 3);
+        mirror.apply_local_edit(&Edit { range: 0..0, text: "x\n".to_string() }, None).unwrap();
+        mirror.edit_sent(RequestId(7));
+        assert_eq!(mirror.folds(Document::D).folded(), [2..5]);
+        assert!(Rows::Mapped(mirror.output_rows()).is_line_hidden(4));
+        assert!(mirror.set_fold_ranges(ranges_of_d(Revision(1), vec![0..2])));
+        assert_eq!(mirror.folds(Document::D).ranges(), [2..5]);
+    }
+
+
+    #[test]
+    fn removing_the_closing_token_shown_after_a_fold_ellipsis_unfolds_the_fold() {
+        let mut mirror = mirror_with_output("f {\n  a\n}\nz\n");
+        mirror.set_fold_ranges(ranges_of_d(Revision(1), vec![0..3]));
+        mirror.change_folds(Document::D, |folds| folds.fold(0..3));
+        mirror.apply_local_edit(&Edit { range: 8..9, text: String::new() }, None).unwrap();
+        assert!(mirror.folds(Document::D).folded().is_empty());
+        assert_eq!(mirror.output().unwrap().text, "f {\n  a\n\nz\n");
+        assert!(!Rows::Mapped(mirror.output_rows()).is_line_hidden(2));
+    }
+
+
+    #[test]
+    fn folds_carry_over_to_a_snapshot_with_the_same_text() {
+        let mut previous = mirror_with_output("a\nb\nc\n");
+        previous.set_fold_ranges(ranges_of_d(Revision(1), vec![0..3]));
+        previous.change_folds(Document::D, |folds| folds.fold(0..3));
+        let mut same = mirror_with_output("a\nb\nc\n");
+        same.keep_folds_from(&previous);
+        assert_eq!(same.folds(Document::D).folded(), [0..3]);
+        assert_eq!(Rows::Mapped(same.output_rows()).len(), 2);
+        let mut changed = mirror_with_output("a\nb\nz\n");
+        changed.keep_folds_from(&previous);
+        assert!(changed.folds(Document::D).folded().is_empty());
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

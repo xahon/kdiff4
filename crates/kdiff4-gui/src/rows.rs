@@ -21,7 +21,7 @@ pub struct Block {
     pub style: Option<CharStyle>,
 }
 
-/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block of that region, if any. `origin` is where a line of D in a block came from, `None` when unknown or elsewhere. `void_source` is the document whose choice left a void row of D empty. `conflict_marker` is D's placeholder of an unresolved conflict.
+/// One row of a pane: its line, or `None` for a void, the region it belongs to, whether that region is a difference, drawn as a bordered box, and the gutter block of that region, if any. `origin` is where a line of D in a block came from, `None` when unknown or elsewhere. `void_source` is the document whose choice left a void row of D empty. `conflict_marker` is D's placeholder of an unresolved conflict. `folded` marks the header row of a fold, which stands for the rows it hides and shows the Fold Ellipsis after its text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRow {
     pub line: Option<usize>,
@@ -31,6 +31,7 @@ pub struct PaneRow {
     pub origin: Option<Mark>,
     pub void_source: Option<Document>,
     pub conflict_marker: bool,
+    pub folded: bool,
 }
 
 /// The rows of one pane, built from the comparison and, for D, the merge.
@@ -40,6 +41,8 @@ pub struct RowMap {
     row_of_line: Vec<usize>,
     /// Per region: the row it starts at, or would start at if it has no rows.
     region_starts: Vec<usize>,
+    /// With folds: for each row, the row it is in the rows without folds, and how many rows those are.
+    unfolded: Option<(Vec<usize>, usize)>,
 }
 
 impl RowMap {
@@ -88,7 +91,12 @@ impl RowMap {
         if shown != line_count {
             return RowMap::fallback(line_count, "lines missing");
         }
-        RowMap { rows, row_of_line, region_starts }
+        RowMap {
+            rows,
+            row_of_line,
+            region_starts,
+            unfolded: None,
+        }
     }
 
     /// D's rows: its lines, region by region, each line with its origin, and one row for a region that differs or is hand-edited but has no lines: a placeholder for an unresolved conflict, a void otherwise. A region that differs or is hand-edited is one gutter block, like in the source panes. `heights` pads regions like `for_source`. Lines past the regions (the empty line after D's last line break) follow as plain rows.
@@ -140,7 +148,12 @@ impl RowMap {
                 ..PaneRow::default()
             });
         }
-        RowMap { rows, row_of_line, region_starts }
+        RowMap {
+            rows,
+            row_of_line,
+            region_starts,
+            unfolded: None,
+        }
     }
 
     #[cfg(test)]
@@ -159,8 +172,51 @@ impl RowMap {
             rows,
             row_of_line,
             region_starts: Vec::new(),
+            unfolded: None,
         }
     }
+
+    /// The rows left with `folds` folded, each the lines of a fold range: the row of its first line stays as its header and the rows after it up to the row of its last line are hidden, voids included. A hidden line maps to the header row that hides it. A fold whose last line is not below its first (an inset hunk) folds nothing. Must be called on rows without folds.
+    pub fn folded(&self, folds: &[Range<usize>]) -> RowMap {
+        let mut hidden = vec![false; self.rows.len()];
+        let mut headers = vec![false; self.rows.len()];
+        for fold in folds {
+            let (Some(header), Some(last)) = (self.row_of_line.get(fold.start).cloned(), fold.end.checked_sub(1).and_then(|last| self.row_of_line.get(last).cloned())) else {
+                continue;
+            };
+            if last <= header || last >= self.rows.len() {
+                continue;
+            }
+            headers[header] = true;
+            hidden[header + 1..=last].fill(true);
+        }
+        if !hidden.contains(&true) {
+            return self.clone();
+        }
+        let mut rows = Vec::with_capacity(self.rows.len());
+        let mut kept = Vec::with_capacity(self.rows.len());
+        let mut display_of = Vec::with_capacity(self.rows.len());
+        for (index, row) in self.rows.iter().enumerate() {
+            if !hidden[index] {
+                kept.push(index.clone());
+                rows.push(PaneRow {
+                    folded: headers[index].clone(),
+                    ..row.clone()
+                });
+            }
+            display_of.push(kept.len().saturating_sub(1));
+        }
+        let kept_before = |row: usize| kept.partition_point(|kept_row| *kept_row < row);
+        let row_of_line = self.row_of_line.iter().map(|row| display_of.get(*row).cloned().unwrap_or(0)).collect();
+        let region_starts = self.region_starts.iter().map(|start| kept_before(start.clone())).collect();
+        RowMap {
+            rows,
+            row_of_line,
+            region_starts,
+            unfolded: Some((kept, self.rows.len())),
+        }
+    }
+
 
     fn fallback(line_count: usize, reason: &str) -> RowMap {
         log::warn!("the comparison doesn't fit a document of {line_count} lines ({reason}); showing it without rows");
@@ -174,6 +230,7 @@ impl RowMap {
             rows,
             row_of_line: (0..line_count).collect(),
             region_starts: Vec::new(),
+            unfolded: None,
         }
     }
 }
@@ -276,6 +333,65 @@ impl Rows<'_> {
             Rows::Mapped(map) => map.row_of_line.get(line).or(map.row_of_line.last()).cloned().unwrap_or(0),
         }
     }
+
+    /// Whether `line` is hidden in a fold.
+    pub fn is_line_hidden(&self, line: usize) -> bool {
+        match self {
+            Rows::PerLine(_) => false,
+            Rows::Mapped(map) => map.unfolded.is_some() && map.row_of_line.get(line).is_some_and(|row| map.rows.get(*row).is_some_and(|pane_row| pane_row.line != Some(line))),
+        }
+    }
+
+
+    /// The row `row` is in the rows without folds.
+    pub fn unfolded_row(&self, row: usize) -> usize {
+        match self {
+            Rows::Mapped(RowMap { unfolded: Some((kept, total)), .. }) => kept.get(row).cloned().unwrap_or_else(|| total + (row - kept.len().min(row))),
+            _ => row,
+        }
+    }
+
+
+    /// The row that shows `unfolded`, a row of the rows without folds: the header row of the fold that hides it.
+    pub fn folded_row(&self, unfolded: usize) -> usize {
+        match self {
+            Rows::Mapped(RowMap { unfolded: Some((kept, total)), .. }) if unfolded >= *total => kept.len() + (unfolded - total),
+            Rows::Mapped(RowMap { unfolded: Some((kept, _)), .. }) => kept.partition_point(|row| *row <= unfolded).saturating_sub(1),
+            _ => unfolded,
+        }
+    }
+
+
+    /// The place, in rows from the top of the rows without folds, of `position` rows from the top of these rows. Inside a header row the place moves evenly through the rows its fold hides, so scrolling over a fold in one pane scrolls the others over its rows.
+    pub fn unfolded_position(&self, position: f32) -> f32 {
+        let Rows::Mapped(RowMap { unfolded: Some((kept, total)), .. }) = self else {
+            return position;
+        };
+        let position = position.max(0.0);
+        let row = position.floor() as usize;
+        let Some(start) = kept.get(row).cloned() else {
+            return *total as f32 + (position - kept.len() as f32);
+        };
+        let end = kept.get(row + 1).cloned().unwrap_or(*total);
+        start as f32 + (position - row as f32) * (end - start) as f32
+    }
+
+
+    /// The inverse of `unfolded_position`.
+    pub fn folded_position(&self, unfolded: f32) -> f32 {
+        let Rows::Mapped(RowMap { unfolded: Some((kept, total)), .. }) = self else {
+            return unfolded;
+        };
+        let unfolded = unfolded.max(0.0);
+        if unfolded >= *total as f32 {
+            return kept.len() as f32 + (unfolded - *total as f32);
+        }
+        let row = kept.partition_point(|row| *row as f32 <= unfolded).saturating_sub(1);
+        let start = kept.get(row).cloned().unwrap_or(0);
+        let end = kept.get(row + 1).cloned().unwrap_or(*total);
+        row as f32 + (unfolded - start as f32) / (end - start).max(1) as f32
+    }
+
 
     /// The first line at or below `row`, so a click on a void lands on the text after it.
     pub fn line_at_or_after(&self, row: usize) -> Option<usize> {
@@ -467,6 +583,43 @@ mod tests {
         assert_eq!(rows.region_rows(3), None);
         assert_eq!(Rows::PerLine(3).region_rows(0), None);
     }
+
+    #[test]
+    fn a_fold_keeps_its_header_row_and_hides_the_rows_up_to_its_last_line() {
+        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None, None).folded(&[0..3]);
+        let rows = Rows::Mapped(&map);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.row(0), Some(PaneRow { folded: true, ..line(0, 0) }));
+        assert_eq!(rows.row(1), Some(line(3, 2)));
+        assert_eq!((rows.row_of_line(1), rows.row_of_line(2), rows.row_of_line(3)), (0, 0, 1));
+        assert_eq!((rows.is_line_hidden(0), rows.is_line_hidden(2), rows.is_line_hidden(3)), (false, true, false));
+        assert_eq!((rows.region_rows(1), rows.region_rows(2)), (Some(1..1), Some(1..2)));
+        assert_eq!((rows.unfolded_row(1), rows.folded_row(2), rows.folded_row(3)), (3, 0, 1));
+    }
+
+
+    #[test]
+    fn a_fold_hides_the_voids_between_its_lines() {
+        let map = RowMap::for_source(&two_way_comparison(), &[], 0, 2, None, None).folded(&[0..2]);
+        let rows = Rows::Mapped(&map);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.row(0), Some(PaneRow { folded: true, ..line(0, 0) }));
+        assert!(rows.is_line_hidden(1));
+        assert_eq!(rows.unfolded_position(0.5), 2.0);
+        assert_eq!(rows.folded_position(2.0), 0.5);
+        assert_eq!(rows.folded_position(6.0), 3.0);
+        assert_eq!(rows.unfolded_position(3.0), 6.0);
+    }
+
+
+    #[test]
+    fn folds_out_of_order_or_without_rows_fold_nothing() {
+        let map = RowMap::for_source(&two_way_comparison(), &[], 1, 4, None, None);
+        assert_eq!(map.folded(&[2..2, 3..9]), map);
+        assert_eq!(Rows::Mapped(&map).unfolded_position(2.5), 2.5);
+        assert!(!Rows::PerLine(3).is_line_hidden(1));
+    }
+
 
     #[test]
     fn heights_pad_regions_with_voids() {
