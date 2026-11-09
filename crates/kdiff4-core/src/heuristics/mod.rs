@@ -78,6 +78,23 @@ pub fn entity_spans(language: &str, document: &DocumentLines<'_>) -> Option<Vec<
 }
 
 
+/// The lines of the innermost function or method of one document of `language` that holds `line`, from its leading comments to its closing line; `None` when no function holds it.
+pub fn function_at(language: &str, document: &DocumentLines<'_>, line: usize) -> Result<Option<Range<usize>>, CoreError> {
+    if !extract::supports(Extractor::TreeSitter, language) {
+        return Err(CoreError::UnsupportedLanguage { language: language.to_string() });
+    }
+    let kinds = [EntityKind::Function, EntityKind::Method];
+    let entities = extract::extract(Extractor::TreeSitter, language, document.text, document.lines, &kinds).unwrap_or_default();
+    Ok(innermost(&entities, line))
+}
+
+
+fn innermost(entities: &[extract::Entity], line: usize) -> Option<Range<usize>> {
+    let entity = entities.iter().find(|entity| entity.lines.contains(&line))?;
+    innermost(&entity.children, line).or_else(|| Some(entity.lines.clone()))
+}
+
+
 fn collect_spans(entities: &[extract::Entity], spans: &mut Vec<Range<usize>>) {
     for entity in entities {
         spans.push(entity.header.clone()..entity.lines.end.clone());
@@ -114,4 +131,64 @@ fn inside(entities: &[extract::Entity], part: &Range<usize>) -> Vec<extract::Ent
             }
         })
         .collect()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::split_lines;
+
+    const CODE: &str = "int top() { return 0; }
+
+// Does things.
+struct S {
+    int f(int a)
+    {
+        return a;
+    }
+};
+";
+
+    fn function(language: &str, text: &str, line: usize) -> Result<Option<Range<usize>>, CoreError> {
+        let lines = split_lines(text);
+        function_at(language, &DocumentLines { text, lines: &lines }, line)
+    }
+
+
+    #[test]
+    fn the_signature_body_and_closing_line_give_the_whole_method() {
+        for line in 4..8 {
+            assert_eq!(function("C++", CODE, line).unwrap(), Some(4..8), "line {line}");
+        }
+        assert_eq!(function("C++", CODE, 0).unwrap(), Some(0..1));
+    }
+
+
+    #[test]
+    fn lines_outside_every_function_give_none() {
+        for line in [1, 2, 3, 8, 9] {
+            assert_eq!(function("C++", CODE, line).unwrap(), None, "line {line}");
+        }
+    }
+
+
+    #[test]
+    fn the_leading_comments_belong_to_the_function() {
+        let text = "// Adds.
+// Really.
+int add(int a, int b) {
+    return a + b;
+}
+";
+        assert_eq!(function("C", text, 0).unwrap(), Some(0..5));
+        assert_eq!(function("C", text, 4).unwrap(), Some(0..5));
+    }
+
+
+    #[test]
+    fn a_language_the_extractor_cannot_parse_is_rejected() {
+        assert!(matches!(function("Plain Text", "x
+", 0), Err(CoreError::UnsupportedLanguage { .. })));
+    }
 }

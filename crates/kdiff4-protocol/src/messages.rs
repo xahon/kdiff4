@@ -95,6 +95,12 @@ pub enum Command {
         document: Document,
         lines: Range<usize>,
     },
+    /// Marks the innermost function or method of a source document of `language` (a name the language selector shows) that holds `line` (its leading comments, header, body or closing line), like `MarkAlignment` with its lines. Rejected for a language the extractor can't parse and for a line no function holds.
+    MarkFunctionAlignment {
+        document: Document,
+        line: usize,
+        language: String,
+    },
     /// Removes the mark `number` of a source document.
     RemoveAlignmentMark {
         document: Document,

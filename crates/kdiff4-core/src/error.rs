@@ -41,6 +41,8 @@ pub enum CoreError {
     InvalidMark { reason: String },
     #[error("Alignment {number} is not applied")]
     NotApplied { number: u32 },
+    #[error("line {} of {} is not inside a function", line + 1, document.letter())]
+    NoFunction { document: Document, line: usize },
     #[error("Heuristics Alignment can't parse {language} yet")]
     UnsupportedLanguage { language: String },
     #[error("applying the alignments compares everything again and discards the choices and edits in D")]
@@ -64,6 +66,7 @@ impl From<CoreError> for ProtocolError {
             | CoreError::NoSuchRegion { .. }
             | CoreError::InvalidChoice { .. }
             | CoreError::UnsupportedLanguage { .. }
+            | CoreError::NoFunction { .. }
             | CoreError::NotApplied { .. }
             | CoreError::InvalidEditTarget { .. }
             | CoreError::UnresolvedConflicts { .. }

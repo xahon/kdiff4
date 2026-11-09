@@ -464,6 +464,45 @@ fn a_mark_can_be_stretched_through_the_protocol() {
 
 
 #[test]
+fn the_function_around_a_line_is_marked_through_the_protocol() {
+    let dir = temp_dir("function-mark");
+    let a = write(&dir, "a.cpp", "int x;
+
+int f()
+{
+    return 0;
+}
+");
+    let b = write(&dir, "b.cpp", "int x;
+");
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(OpenFiles { a, b, ..OpenFiles::default() })).unwrap();
+    expect_snapshot(&client);
+    expect_ok(&client, id);
+
+    let id = client.send(Command::MarkFunctionAlignment { document: Document::A, line: 5, language: "C++".to_string() }).unwrap();
+    let delta = expect_delta(&client);
+    let Change::AlignmentsChanged(alignments) = delta.change else {
+        panic!("expected the marks")
+    };
+    assert_eq!(alignments.marks.iter().map(|mark| mark.lines.clone()).collect::<Vec<_>>(), [2..6]);
+    expect_ok(&client, id);
+
+    for (line, language) in [(0, "C++"), (2, "Plain Text")] {
+        let id = client.send(Command::MarkFunctionAlignment { document: Document::A, line, language: language.to_string() }).unwrap();
+        let HostMessage::Response(response) = next_message(&client) else {
+            panic!("expected a response")
+        };
+        assert_eq!(response.id, id);
+        assert_eq!(response.result.unwrap_err().kind, ErrorKind::InvalidRequest);
+    }
+
+    drop(client);
+    host.join().unwrap();
+}
+
+
+#[test]
 fn alignment_marks_arrive_as_deltas_and_apply_answers_with_a_snapshot() {
     let dir = temp_dir("alignment");
     let a = write(&dir, "a.txt", "Bar\nBaz\n");

@@ -294,6 +294,18 @@ impl Session {
         Ok(self.marks_changed(ask))
     }
 
+    /// Marks the lines of the innermost function or method of `document` that holds `line` (see `Command::MarkFunctionAlignment`).
+    pub fn mark_function_alignment(&mut self, document: Document, line: usize, language: &str) -> Result<Change, CoreError> {
+        let source = self
+            .sources
+            .iter()
+            .find(|source| source.document == document)
+            .ok_or_else(|| CoreError::NoSuchDocument { document: document.clone() })?;
+        let lines = heuristics::function_at(language, &DocumentLines { text: &source.text.text, lines: &source.text.lines }, line)?;
+        let lines = lines.ok_or_else(|| CoreError::NoFunction { document: document.clone(), line: line.clone() })?;
+        self.mark_alignment(document, lines)
+    }
+
     pub fn remove_alignment_mark(&mut self, document: Document, number: u32) -> Result<Change, CoreError> {
         self.alignments.remove(document, number)?;
         Ok(self.marks_changed(None))

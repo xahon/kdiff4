@@ -38,7 +38,7 @@ const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMM
 const UNDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
 const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
 const MARK_LINES_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Space);
-const MARK_ANCHOR_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
+const MARK_FUNCTION_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
 const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
 const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
 const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
@@ -1436,6 +1436,20 @@ impl KdiffApp {
         self.mark_anchor(document, cursor.head.line.min(count));
     }
 
+    /// The function or method around the caret's line in A, B or C, from its signature to its closing line.
+    fn mark_function_at_caret(&mut self) {
+        let Some((document, cursor)) = self.panes.caret.clone() else {
+            self.report_error("Put the caret in a function in A, B or C to mark it".to_string());
+            return;
+        };
+        if document == Document::D {
+            self.report_error("Put the caret in a function in A, B or C to mark it".to_string());
+            return;
+        }
+        let language = self.language.current().name().to_string();
+        self.send(Command::MarkFunctionAlignment { document, line: cursor.head.line.clone(), language }, Pending::AlignmentEdit);
+    }
+
     /// An anchor before line `position`: a position between two lines, which may be the end of the text.
     fn mark_anchor(&mut self, document: Document, position: usize) {
         self.send(
@@ -1566,8 +1580,8 @@ impl KdiffApp {
                 self.undo_redo(ctx, Command::Redo);
             }
             if self.mirror.is_some() {
-                if ctx.input_mut(|input| input.consume_shortcut(&MARK_ANCHOR_SHORTCUT)) {
-                    self.mark_anchor_at_caret();
+                if ctx.input_mut(|input| input.consume_shortcut(&MARK_FUNCTION_SHORTCUT)) {
+                    self.mark_function_at_caret();
                 }
                 if ctx.input_mut(|input| input.consume_shortcut(&MARK_LINES_SHORTCUT)) {
                     self.mark_selected_lines();
@@ -1809,8 +1823,11 @@ impl KdiffApp {
                     if ui.add_enabled(has_session, mark_lines).clicked() {
                         self.mark_selected_lines();
                     }
-                    let mark_anchor = egui::Button::new("Mark Alignment Anchor Before Line").shortcut_text(ui.ctx().format_shortcut(&MARK_ANCHOR_SHORTCUT));
-                    if ui.add_enabled(has_session, mark_anchor).clicked() {
+                    let mark_function = egui::Button::new("Mark Function for Alignment").shortcut_text(ui.ctx().format_shortcut(&MARK_FUNCTION_SHORTCUT));
+                    if ui.add_enabled(has_session, mark_function).clicked() {
+                        self.mark_function_at_caret();
+                    }
+                    if ui.add_enabled(has_session, egui::Button::new("Mark Alignment Anchor Before Line")).clicked() {
                         self.mark_anchor_at_caret();
                     }
                     let apply = egui::Button::new("Apply Alignments").shortcut_text(ui.ctx().format_shortcut(&APPLY_ALIGNMENTS_SHORTCUT));
@@ -2747,17 +2764,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_space_marks_an_anchor_before_the_caret_line() {
+    fn ctrl_shift_space_marks_the_function_around_the_caret_line() {
         let (mut app, host, ctx) = app_with_session();
+        let language = app.language.current().name().to_string();
         app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 1 }), None);
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND.plus(Modifiers::SHIFT));
-        assert_eq!(
-            sent(app, host),
-            [Command::MarkAlignment {
-                document: Document::A,
-                lines: 1..1
-            }]
-        );
+        assert_eq!(sent(app, host), [Command::MarkFunctionAlignment { document: Document::A, line: 1, language }]);
     }
 
     #[test]

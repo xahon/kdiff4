@@ -130,6 +130,7 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             active.alignment_marks_change()
         }
         Command::MarkAlignment { document, lines } => active(session)?.mark_alignment(document, lines)?,
+        Command::MarkFunctionAlignment { document, line, language } => active(session)?.mark_function_alignment(document, line, &language)?,
         Command::RemoveAlignmentMark { document, number } => active(session)?.remove_alignment_mark(document, number)?,
         Command::SetAlignmentMarkLines { document, number, lines } => active(session)?.set_alignment_mark_lines(document, number, lines)?,
         Command::RenumberAlignmentMark { document, number, to } => active(session)?.renumber_alignment_mark(document, number, to)?,
