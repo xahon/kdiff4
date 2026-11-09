@@ -79,6 +79,7 @@ const TOOLBAR_ICON_SIZE: f32 = 18.0;
 const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
 const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
+pub const WINDOW_TITLE: &str = "Kdiff4";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
 /// The startup window grows to this while the settings dialog is open, so the dialog fits.
 const SETTINGS_WINDOW_SIZE: [f32; 2] = [860.0, 660.0];
@@ -160,6 +161,8 @@ pub struct KdiffApp {
     frame_radius: Option<u8>,
     /// Whether the title bar theme was re-sent after the window first got focus.
     title_bar_refreshed: bool,
+    /// The title last sent to the native window.
+    window_title: String,
     current_version: Version,
     update_check: Option<UpdateCheck>,
     update_window: Option<UpdateWindow>,
@@ -224,6 +227,7 @@ impl KdiffApp {
             applied_view: None,
             frame_radius: None,
             title_bar_refreshed: false,
+            window_title: WINDOW_TITLE.to_string(),
             current_version: update_check::current_version(),
             update_check: None,
             update_window: None,
@@ -1820,6 +1824,14 @@ impl KdiffApp {
         self.title_bar_refreshed = true;
     }
 
+    fn update_window_title(&mut self, ctx: &egui::Context) {
+        let title = window_title(self.mirror.as_ref());
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
+    }
+
     /// Keeps the native frame's corners in step with the configured radius.
     fn update_window_frame(&mut self, frame: &eframe::Frame) {
         let radius = self.applied_view.as_ref().map(|view| view.corner_radius).unwrap_or(config::DEFAULT_CORNER_RADIUS);
@@ -1905,6 +1917,7 @@ impl eframe::App for KdiffApp {
         self.show_update_window(&ctx);
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
+        self.update_window_title(&ctx);
     }
 }
 
@@ -2160,6 +2173,20 @@ fn edit_key_for(key: Key, modifiers: Modifiers) -> Option<EditKey> {
     }
 }
 
+/// A's file name followed by the app name, or only the app name when no files are open.
+fn window_title(mirror: Option<&Mirror>) -> String {
+    let name = mirror
+        .and_then(|mirror| mirror.document(Document::A))
+        .and_then(|text| text.path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty());
+    match name {
+        Some(name) => format!("{name} - {WINDOW_TITLE}"),
+        None => WINDOW_TITLE.to_string(),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2221,6 +2248,18 @@ mod tests {
             false,
         )
     }
+
+    #[test]
+    fn window_title_is_app_name_without_files() {
+        assert_eq!(window_title(None), "Kdiff4");
+    }
+
+
+    #[test]
+    fn window_title_shows_a_file_name() {
+        assert_eq!(window_title(Some(&resolved_mirror())), "A.txt - Kdiff4");
+    }
+
 
     /// An app showing `resolved_mirror()` over an in-process transport, with the host end of it. The user's saved settings are not used.
     fn app_with_session() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
