@@ -48,6 +48,8 @@ pub enum PaneAction {
     SelectLineText(Document, usize),
     /// A click on a gutter block of a region.
     SelectRegion(Document, usize),
+    /// Copy the selection of the caret to the clipboard.
+    Copy,
     /// Mark the selection in a source pane for alignment.
     MarkSelection(Document),
     /// Mark an anchor in a source pane before this line, which may be one past the last.
@@ -541,6 +543,7 @@ fn pane(
                         None => {}
                     }
                     match response.menu {
+                        Some(MenuAction::Copy) => actions.push(PaneAction::Copy),
                         Some(MenuAction::MarkSelection) => actions.push(PaneAction::MarkSelection(document.clone())),
                         Some(MenuAction::MarkAnchor(position)) => actions.push(PaneAction::MarkAnchor(document.clone(), position)),
                         Some(MenuAction::RemoveMark(number)) => actions.push(PaneAction::RemoveAlignmentMark(document.clone(), number)),

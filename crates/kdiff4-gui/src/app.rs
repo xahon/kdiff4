@@ -989,6 +989,7 @@ impl KdiffApp {
                     self.send(Command::SetCurrentRegion { base, region: Some(region) }, Pending::SelectRegion);
                 }
             }
+            PaneAction::Copy => self.copy_selection(ctx),
             PaneAction::MarkSelection(_) => self.mark_selected_lines(),
             PaneAction::MarkAnchor(document, position) => self.mark_anchor(document, position),
             PaneAction::RemoveAlignmentMark(document, number) => {

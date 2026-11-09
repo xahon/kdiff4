@@ -150,6 +150,8 @@ struct MarkDrag {
 /// What the user picked from the context menu of a source pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
+    /// Copy the selection of the caret to the clipboard.
+    Copy,
     /// Mark the selection of the caret for alignment.
     MarkSelection,
     /// Mark an anchor before this line, one past the last for the end of the text.
@@ -404,7 +406,7 @@ pub fn show(
 
     // One target for the whole visible pane, so empty space, the margin and the space right of a line take the mouse too.
     let response = ui.interact(output.inner_rect, ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
-    let held = response.is_pointer_button_down_on();
+    let held = response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_down());
     let scroll = output.state.clamped_offset();
     let gutter_at = |pointer: Pos2| {
         gutter_region(
@@ -442,8 +444,8 @@ pub fn show(
         response.clone().on_hover_text(text);
     }
     let mut menu = None;
+    let target_id = ui.make_persistent_id((id_salt, "menu_target"));
     if style.alignment_color.is_some() {
-        let target_id = ui.make_persistent_id((id_salt, "menu_target"));
         if response.secondary_clicked()
             && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
         {
@@ -469,13 +471,19 @@ pub fn show(
                 )
             });
         }
-        let can_mark_selection = caret.is_some_and(|caret| caret.void_row.is_none());
-        response.context_menu(|ui| {
-            if let Some(target) = ui.data(|data| data.get_temp::<MenuTarget>(target_id)) {
-                menu = show_menu(ui, &target, marks, can_mark_selection);
-            }
-        });
     }
+    let can_copy = caret.is_some_and(|caret| caret.cursor.has_selection());
+    let can_mark_selection = caret.is_some_and(|caret| caret.void_row.is_none());
+    response.context_menu(|ui| {
+        if ui.add_enabled(can_copy, egui::Button::new("Copy")).clicked() {
+            menu = Some(MenuAction::Copy);
+        }
+        let target = ui.data(|data| data.get_temp::<MenuTarget>(target_id)).filter(|_| style.alignment_color.is_some());
+        if let Some(target) = target {
+            ui.separator();
+            menu = show_menu(ui, &target, marks, can_mark_selection).or(menu);
+        }
+    });
     let drag_id = ui.make_persistent_id((id_salt, "mark_drag"));
     if response.hovered() && ui.input(|input| input.pointer.primary_pressed()) {
         let grabbed = hover_position.and_then(grab_at).and_then(|(index, grip)| marks.marks.get(index).map(|mark| MarkDrag { number: mark.number, grip }));
@@ -567,7 +575,7 @@ pub fn show(
     }
 }
 
-/// The context menu of a source pane: for each mark under the pointer its number and removal, then marking the selection and anchors.
+/// The alignment part of the context menu of a source pane: for each mark under the pointer its number and removal, then marking the selection and anchors.
 fn show_menu(ui: &mut Ui, target: &MenuTarget, marks: PaneMarks<'_>, can_mark_selection: bool) -> Option<MenuAction> {
     let mut action = None;
     for mark in target.marks.iter().filter_map(|index| marks.marks.get(*index)) {
@@ -1420,6 +1428,64 @@ mod tests {
             void_row: None,
         })
     }
+
+    fn selection(from: usize, to: usize) -> Option<Caret> {
+        Some(Caret {
+            cursor: Cursor {
+                anchor: Position { line: from, column: 0 },
+                head: Position { line: to, column: 0 },
+            },
+            void_row: None,
+        })
+    }
+
+
+    #[test]
+    fn holding_the_secondary_button_does_not_drag_the_selection() {
+        let mut harness = menu_harness(Some(Color32::BLUE), selection(0, 3));
+        let pos = on_text(harness.state(), 1);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        harness.hover_at(pos);
+        harness.run_steps(2);
+        harness.event(button(true));
+        harness.run_steps(4);
+        harness.event(button(false));
+        harness.run_steps(4);
+        assert_eq!(harness.state().resized, None);
+    }
+
+
+    #[test]
+    fn the_menu_copies_a_selection_in_every_pane() {
+        for alignment_color in [Some(Color32::BLUE), None] {
+            let mut harness = menu_harness(alignment_color, selection(0, 2));
+            let pos = on_text(harness.state(), 1);
+            right_click(&mut harness, pos);
+            assert_eq!(harness.query_by_label("Mark Selected Lines for Alignment").is_some(), alignment_color.is_some());
+            harness.get_by_label("Copy").click();
+            harness.run_steps(4);
+            assert_eq!(harness.state().menu, Some(MenuAction::Copy));
+        }
+    }
+
+
+    #[test]
+    fn copy_needs_a_selection_in_the_pane() {
+        for caret in [None, caret_on(1)] {
+            let mut harness = menu_harness(None, caret);
+            let pos = on_text(harness.state(), 1);
+            right_click(&mut harness, pos);
+            harness.get_by_label("Copy").click();
+            harness.run_steps(4);
+            assert_eq!(harness.state().menu, None);
+        }
+    }
+
 
     #[test]
     fn the_text_menu_marks_the_selection_and_anchors_around_the_line() {
