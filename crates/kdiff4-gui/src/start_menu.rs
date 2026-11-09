@@ -129,6 +129,7 @@ mod tests {
         assert!(dir.ends_with(Path::new("Microsoft").join("Windows").join("Start Menu").join("Programs")));
     }
 
+    #[cfg(windows)]
     #[test]
     fn paths_reach_powershell_through_the_environment() {
         let command = powershell_command(Path::new("C:\\menu\\Kdiff4.lnk"), Path::new("C:\\app's dir\\kdiff4.exe"));
