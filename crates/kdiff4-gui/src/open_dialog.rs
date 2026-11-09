@@ -143,6 +143,19 @@ pub fn confirm_apply_alignments() -> bool {
     proceeded(&answer)
 }
 
+/// Asks with a native message box before reloading discards the choices and edits in D; anything but Proceed means no.
+pub fn confirm_reload() -> bool {
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Reload files?")
+        .set_description("Reloading reads all input files again and compares them anew.
+
+The conflicts you resolved and the changes you made to the output will be lost, and this cannot be undone.")
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(PROCEED_LABEL.to_string(), "Cancel".to_string()))
+        .show();
+    proceeded(&answer)
+}
+
 fn proceeded(answer: &rfd::MessageDialogResult) -> bool {
     *answer == rfd::MessageDialogResult::Ok || *answer == rfd::MessageDialogResult::Custom(PROCEED_LABEL.to_string())
 }

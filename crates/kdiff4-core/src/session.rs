@@ -187,6 +187,39 @@ impl Session {
         Ok(())
     }
 
+    /// Reads every source document again from its path and recomputes the regions and rows, like `load_source` for all of them at once (see `Command::Reload`). Without `confirmed`, a D that holds choices or edits is refused. On failure the session is unchanged.
+    pub fn reload(&mut self, confirmed: bool, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
+        if !confirmed && self.output.is_some() && self.merge.has_user_work() {
+            return Err(CoreError::NeedsConfirmation);
+        }
+        let mut texts = Vec::with_capacity(self.sources.len());
+        for source in &self.sources {
+            texts.push(SourceText::load(&source.path)?);
+        }
+        let old_texts: Vec<SourceText> = self
+            .sources
+            .iter_mut()
+            .zip(texts)
+            .map(|(source, text)| std::mem::replace(&mut source.text, text))
+            .collect();
+        let comparison = match compare(&self.sources, engine, &self.options, &[]) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                for (source, text) in self.sources.iter_mut().zip(old_texts) {
+                    source.text = text;
+                }
+                return Err(error);
+            }
+        };
+        self.alignments.reset();
+        self.rebuild(comparison, engine);
+        let eol = auto_eol(&self.sources);
+        if let Some(output) = self.output.as_mut() {
+            output.eol = eol;
+        }
+        Ok(())
+    }
+
     /// Recomputes the regions and rows with `options` and the applied alignments, and rebuilds D from them, like a reload. On failure the session is unchanged.
     pub fn set_comparison_options(&mut self, options: ComparisonOptions, engine: &dyn ComparisonEngine) -> Result<(), CoreError> {
         let comparison = compare(&self.sources, engine, &options, self.alignments.applied())?;
@@ -1894,6 +1927,55 @@ cc
         mark_foo_and_qux(&mut session);
         assert!(session.load_source(Document::B, &dir.join("missing.txt"), &BuiltinEngine).is_err());
         assert_eq!(alignment_of(&session).marks.len(), 6);
+    }
+
+    #[test]
+    fn reload_rereads_every_source_and_drops_the_marks() {
+        let dir = temp_dir("reload-all");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 0..1).unwrap();
+        }
+        write(&dir, "b.txt", "s\na\n");
+        write(&dir, "c.txt", "s\nc\nd\n");
+        session.reload(false, &BuiltinEngine).unwrap();
+        let texts: Vec<String> = session
+            .snapshot()
+            .documents
+            .into_iter()
+            .map(|document| document.text)
+            .collect();
+        assert_eq!(texts, ["s\na\n", "s\na\n", "s\nc\nd\n"]);
+        assert_eq!(output_text(&session), "s\nc\nd\n");
+        assert_eq!(alignment_of(&session), Alignments::default());
+    }
+
+    #[test]
+    fn reload_asks_before_discarding_work() {
+        let dir = temp_dir("reload-confirm");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        let before = session.snapshot();
+        let error = session.reload(false, &BuiltinEngine).unwrap_err();
+        assert_eq!(ProtocolError::from(error).kind, ErrorKind::NeedsConfirmation);
+        assert_eq!(session.snapshot(), before);
+        session.reload(true, &BuiltinEngine).unwrap();
+        assert_eq!(choices(&session)[1], Choice::Unresolved);
+        assert_eq!(session.undo().unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_reload_leaves_the_session_unchanged() {
+        let dir = temp_dir("reload-all-fails");
+        let mut session = merge_of(&dir, &["s", "a"], &["s", "b"], &["s", "c"]);
+        for document in [Document::A, Document::B, Document::C] {
+            session.mark_alignment(document, 0..1).unwrap();
+        }
+        let before = session.snapshot();
+        write(&dir, "a.txt", "changed\n");
+        fs::remove_file(dir.join("c.txt")).unwrap();
+        assert!(session.reload(true, &BuiltinEngine).is_err());
+        assert_eq!(session.snapshot(), before);
     }
 
     #[test]

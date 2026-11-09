@@ -63,6 +63,13 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
             return Ok(());
         }
+        Command::Reload { confirmed } => {
+            let active = active(session)?;
+            active.reload(confirmed, registry.default_engine())?;
+            log::info!("host: reloaded all source documents");
+            let _ = endpoint.send(HostMessage::Event(Event::Snapshot(active.snapshot())));
+            return Ok(());
+        }
         Command::SetComparisonOptions(options) => {
             let active = active(session)?;
             active.set_comparison_options(options.clone(), registry.default_engine())?;

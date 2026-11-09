@@ -31,6 +31,7 @@ use crate::update_dialog::{self, AvailableAction, InstallOffer};
 use crate::window_frame;
 
 const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const RELOAD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
 const UNDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
@@ -95,6 +96,7 @@ enum Pending {
     Open,
     Edit,
     LoadSource(Document),
+    Reload,
     SetOutputPath,
     SetOutputEol,
     Save,
@@ -699,6 +701,10 @@ impl KdiffApp {
                         text: ALIGNMENTS_CHANGED_HINT.to_string(),
                         is_error: false,
                     }),
+                    Pending::Reload => self.mirror.as_ref().map(|mirror| Status {
+                        text: format!("Reloaded. {}", mirror.difference_summary()),
+                        is_error: false,
+                    }),
                     Pending::ApplyAlignments | Pending::HeuristicApply(..) => self.mirror.as_ref().map(|mirror| Status {
                         text: format!("Alignments applied. {}", mirror.difference_summary()),
                         is_error: false,
@@ -719,6 +725,12 @@ impl KdiffApp {
                 }
             }
             Pending::LoadSource(document) => self.report_error(format!("Cannot load {}: {}", document.letter(), error.message)),
+            Pending::Reload if error.kind == ErrorKind::NeedsConfirmation => {
+                if open_dialog::confirm_reload() {
+                    self.send(Command::Reload { confirmed: true }, Pending::Reload);
+                }
+            }
+            Pending::Reload => self.report_error(format!("Cannot reload: {}", error.message)),
             Pending::SetOutputPath => self.report_error(format!("Cannot change the output path: {}", error.message)),
             Pending::SetOutputEol => self.report_error(format!("Cannot change the line ending style: {}", error.message)),
             Pending::Save => self.report_error(format!("Cannot save: {}", error.message)),
@@ -995,6 +1007,10 @@ impl KdiffApp {
                 }
             }
         }
+    }
+
+    fn reload(&mut self) {
+        self.send(Command::Reload { confirmed: false }, Pending::Reload);
     }
 
     /// A/B/C reload from `path`; D only changes where it will be saved, and `None` makes it unnamed.
@@ -1430,6 +1446,9 @@ impl KdiffApp {
             if ctx.input_mut(|input| input.consume_shortcut(&FIND_SHORTCUT)) {
                 self.open_find();
             }
+            if ctx.input_mut(|input| input.consume_shortcut(&RELOAD_SHORTCUT)) {
+                self.reload();
+            }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN_SHORTCUT)) {
             self.form_open = true;
@@ -1528,6 +1547,10 @@ impl KdiffApp {
                     let open = egui::Button::new("Open...").shortcut_text(ui.ctx().format_shortcut(&OPEN_SHORTCUT));
                     if ui.add(open).clicked() {
                         self.form_open = true;
+                    }
+                    let reload = egui::Button::new("Reload").shortcut_text(ui.ctx().format_shortcut(&RELOAD_SHORTCUT));
+                    if ui.add_enabled(has_session, reload).clicked() {
+                        self.reload();
                     }
                     let save = egui::Button::new("Save").shortcut_text(ui.ctx().format_shortcut(&SAVE_SHORTCUT));
                     if ui.add_enabled(savable, save).on_disabled_hover_text(UNSAVABLE_HINT).clicked() {
@@ -2389,6 +2412,29 @@ mod tests {
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
         press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::ApplyAlignments { confirmed: false }, Command::Redo]);
+    }
+
+    #[test]
+    fn f5_reloads_the_files() {
+        let (mut app, host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::F5, Modifiers::NONE);
+        assert_eq!(sent(app, host), [Command::Reload { confirmed: false }]);
+    }
+
+    #[test]
+    fn f5_does_nothing_without_a_session() {
+        let (mut app, host, ctx) = app_with_session();
+        app.mirror = None;
+        press(&mut app, &ctx, Key::F5, Modifiers::NONE);
+        assert_eq!(sent(app, host), []);
+    }
+
+    #[test]
+    fn the_status_says_the_files_were_reloaded() {
+        let (mut app, _host, _ctx) = app_with_session();
+        let id = app.send(Command::Reload { confirmed: false }, Pending::Reload).unwrap();
+        app.handle_response(id, Ok(()));
+        assert!(app.status.as_ref().is_some_and(|status| !status.is_error && status.text.starts_with("Reloaded.")));
     }
 
     #[test]

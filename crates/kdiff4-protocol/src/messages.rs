@@ -47,6 +47,10 @@ pub enum Command {
         document: Document,
         path: PathBuf,
     },
+    /// Reads every source document again from its path and recomputes the comparison, like `LoadSource` for all of them at once: the alignment marks and applied alignments are dropped, D is rebuilt and its undo history starts over; the host answers with a new snapshot. Fails with `ErrorKind::NeedsConfirmation` when D holds choices or edits and `confirmed` is not set. On failure the session is unchanged.
+    Reload {
+        confirmed: bool,
+    },
     EditOutput(OutputEdit),
     /// Sets the choice of region `region`, dropping its hand edits. `base` is the revision the region index refers to.
     SetChoice {

@@ -137,6 +137,52 @@ fn commands_before_open_are_rejected() {
 }
 
 #[test]
+fn reload_asks_before_dropping_work_then_sends_a_snapshot() {
+    let dir = temp_dir("reload-all");
+    let a = write(&dir, "a.txt", "a\n");
+    let b = write(&dir, "b.txt", "b\n");
+    let c = write(&dir, "c.txt", "c\n");
+    let (mut client, host) = start();
+
+    let id = client
+        .send(Command::Open(OpenFiles {
+            a,
+            b,
+            c: Some(c),
+            ..OpenFiles::default()
+        }))
+        .unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+    let id = client
+        .send(Command::SetChoice {
+            base: snapshot.revision.clone(),
+            region: 0,
+            choice: Choice::Hunks(vec![Document::B]),
+        })
+        .unwrap();
+    expect_delta(&client);
+    expect_ok(&client, id);
+
+    write(&dir, "c.txt", "a\n");
+    let id = client.send(Command::Reload { confirmed: false }).unwrap();
+    let HostMessage::Response(response) = next_message(&client) else {
+        panic!("expected a response");
+    };
+    assert_eq!(response.id, id);
+    assert_eq!(response.result.unwrap_err().kind, ErrorKind::NeedsConfirmation);
+
+    let id = client.send(Command::Reload { confirmed: true }).unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+    assert_eq!(snapshot.documents[2].line(0), "a");
+    assert_eq!(snapshot.output.unwrap().text, "b\n", "C now equals A, so B is taken without a choice");
+
+    drop(client);
+    host.join().unwrap();
+}
+
+#[test]
 fn edit_save_and_reload_go_through_deltas() {
     let dir = temp_dir("round-trip");
     let a = write(&dir, "a.txt", "a\r\n");
