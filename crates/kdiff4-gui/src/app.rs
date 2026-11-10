@@ -8,6 +8,7 @@ use semver::Version;
 use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, RequestId, Response};
 
 use crate::Startup;
+use crate::about_dialog;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
 use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
@@ -146,8 +147,9 @@ struct Status {
     is_error: bool,
 }
 
-/// The update window in front of everything: the offer, the download with its progress, or a notice.
+/// The About or update window in front of everything: build information, the offer, the download with its progress, or a notice.
 enum UpdateWindow {
+    About,
     Available(ReleaseInfo),
     Installing { release: ReleaseInfo, install: UpdateInstall },
     Message { title: String, text: String },
@@ -443,6 +445,17 @@ Shortcut: {}", link.display()),
         let mut dismissed = false;
         match self.update_window.as_ref() {
             None => return,
+            Some(UpdateWindow::About) => {
+                let spec = DialogSpec { id: "about_dialog", title: "About Kdiff4", width: about_dialog::DIALOG_WIDTH, closable: true };
+                let mut check_for_updates = false;
+                let closed = self.dialogs.show(ctx, &spec, |ui| check_for_updates |= about_dialog::show(ui, self.update_check.is_some()));
+                if check_for_updates {
+                    self.update_window = None;
+                    self.begin_update_check(ctx, true);
+                } else {
+                    dismissed = closed;
+                }
+            }
             Some(UpdateWindow::Available(release)) => {
                 let offer = InstallOffer {
                     can_install: release.asset_for_this_platform().is_some(),
@@ -1965,6 +1978,11 @@ Shortcut: {}", link.display()),
                     }
                 });
                 ui.menu_button("Help", |ui| {
+                    if ui.button("About Kdiff4...").clicked() {
+                        self.update_window = Some(UpdateWindow::About);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui.button("Check for Updates...").clicked() {
                         let ctx = ui.ctx().clone();
                         self.begin_update_check(&ctx, true);
@@ -3753,5 +3771,132 @@ mod tests {
         app.handle_pane_keys(&ctx);
         assert_eq!(app.status, before);
         assert!(app.mirror.as_ref().and_then(|mirror| mirror.output()).is_none_or(|output| !output.modified));
+    }
+
+
+    #[test]
+    fn help_opens_about_and_escape_dismisses_it() {
+        use egui_kittest::kittest::Queryable;
+
+        let (app, _ctx) = app_without_config_file();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(700.0, 700.0)).build_ui_state(
+            |ui, app: &mut KdiffApp| {
+                app.show_menu(ui);
+                app.show_update_window(ui.ctx());
+            },
+            app,
+        );
+        harness.run_steps(3);
+        harness.get_by_label("Help").click();
+        harness.run_steps(2);
+        harness.get_by_label("About Kdiff4...").click();
+        harness.run_steps(3);
+        assert!(matches!(harness.state().update_window, Some(UpdateWindow::About)));
+        harness.get_by_label(env!("KDIFF4_BUILD_COMMIT"));
+        harness.get_by_label(about_dialog::REPOSITORY_URL);
+        assert!(harness.query_by_label("Close").is_none());
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert!(harness.state().update_window.is_none());
+    }
+
+
+    #[test]
+    fn escape_closes_about_without_sending_engine_commands() {
+        let (mut app, host, ctx) = app_with_session();
+        app.update_window = Some(UpdateWindow::About);
+        ctx.run_pass(egui::RawInput::default(), |ctx| app.show_update_window(ctx)).drop_without_applying_deltas();
+        let events = vec![egui::Event::Key {
+            key: Key::Escape,
+            physical_key: Some(Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }];
+        ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| app.show_update_window(ctx)).drop_without_applying_deltas();
+        assert!(app.update_window.is_none());
+        assert_eq!(sent(app, host), []);
+    }
+
+
+    #[test]
+    fn native_about_link_opens_from_mouse_and_keyboard_and_native_close_dismisses_it() {
+        use std::sync::{Arc, Mutex};
+
+        let (mut app, ctx) = app_without_config_file();
+        app.update_window = Some(UpdateWindow::About);
+        ctx.set_embed_viewports(false);
+        ctx.enable_accesskit();
+        let pending = Arc::new(Mutex::new((Vec::<egui::Event>::new(), Vec::<egui::ViewportEvent>::new())));
+        let outputs = Arc::new(Mutex::new(Vec::<egui::PlatformOutput>::new()));
+        let renderer_pending = pending.clone();
+        let renderer_outputs = outputs.clone();
+        egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
+            assert_eq!(viewport.ids.this, egui::ViewportId::from_hash_of("about_dialog"));
+            assert_eq!(viewport.builder.close_button, Some(true));
+            let (events, viewport_events) = std::mem::take(&mut *renderer_pending.lock().unwrap());
+            let mut input = egui::RawInput {
+                viewport_id: viewport.ids.this,
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, viewport.builder.inner_size.expect("About test: missing native size"))),
+                events,
+                ..Default::default()
+            };
+            let info = input.viewports.entry(viewport.ids.this).or_default();
+            info.focused = Some(true);
+            info.events = viewport_events;
+            let output = ctx.run_ui(input, |ui| (viewport.viewport_ui_cb)(ui));
+            renderer_outputs.lock().unwrap().push(output.platform_output.clone());
+            output.drop_without_applying_deltas();
+        });
+        let mut frame = || {
+            ctx.run_pass(egui::RawInput::default(), |ctx| {
+                app.show_update_window(ctx);
+                app.dialogs.end_frame(None);
+            }).drop_without_applying_deltas();
+            matches!(app.update_window, Some(UpdateWindow::About))
+        };
+        for _ in 0..4 {
+            assert!(frame());
+        }
+        let opened_urls = || outputs.lock().unwrap()
+            .iter()
+            .flat_map(|output| {
+                output.commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        egui::OutputCommand::OpenUrl(url) => Some(url.url.clone()),
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert!(opened_urls().is_empty());
+        for key in [Key::Tab, Key::Enter] {
+            for pressed in [true, false] {
+                pending.lock().unwrap().0.push(egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: Modifiers::NONE });
+                assert!(frame());
+            }
+            assert!(frame());
+        }
+        assert_eq!(opened_urls(), [about_dialog::REPOSITORY_URL]);
+        let bounds = outputs.lock().unwrap().iter().rev().find_map(|output| {
+            output.accesskit_update.as_ref()?.nodes.iter().find_map(|(_, node)| {
+                (node.label().as_deref() == Some(about_dialog::REPOSITORY_URL)).then(|| node.bounds()).flatten()
+            })
+        }).expect("About test: missing repository link in native window");
+        let pos = egui::pos2((bounds.x0 + bounds.x1) as f32 / 2.0, (bounds.y0 + bounds.y1) as f32 / 2.0);
+        pending.lock().unwrap().0.push(egui::Event::PointerMoved(pos));
+        assert!(frame());
+        assert_eq!(outputs.lock().unwrap().last().unwrap().cursor_icon, egui::CursorIcon::PointingHand);
+        for pressed in [true, false] {
+            pending.lock().unwrap().0.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            assert!(frame());
+            if pressed {
+                assert_eq!(opened_urls(), [about_dialog::REPOSITORY_URL]);
+            }
+        }
+        assert_eq!(opened_urls(), [about_dialog::REPOSITORY_URL, about_dialog::REPOSITORY_URL]);
+        pending.lock().unwrap().1.push(egui::ViewportEvent::Close);
+        assert!(!frame());
+        assert_eq!(opened_urls().len(), 2);
     }
 }

@@ -1,3 +1,4 @@
+mod about_dialog;
 mod alignment_gutter;
 mod app;
 mod autoscroll;

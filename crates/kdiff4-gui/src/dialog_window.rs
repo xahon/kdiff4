@@ -28,6 +28,7 @@ struct Placement {
     size: Vec2,
     position: Option<Pos2>,
     fitted: bool,
+    refreshed_theme: Option<egui::SystemTheme>,
 }
 
 
@@ -38,6 +39,7 @@ impl Placement {
             size: size.clone(),
             position: centered(parent, size),
             fitted: false,
+            refreshed_theme: None,
         }
     }
 
@@ -58,6 +60,17 @@ impl Placement {
             }
         }
         resized
+    }
+
+
+    /// Like the main window, resend the theme after focus arrives so Windows repaints the title bar. A theme change needs the same refresh again.
+    fn refresh_title_bar(&mut self, ctx: &Context) {
+        let theme = title_bar_theme(ctx.options(|options| options.theme_preference));
+        if self.refreshed_theme == Some(theme) || !ctx.input(|input| input.viewport().focused.unwrap_or(false)) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
+        self.refreshed_theme = Some(theme);
     }
 }
 
@@ -117,6 +130,7 @@ impl DialogWindows {
             if placement.fit(content_size, parent.clone()) {
                 ui.ctx().request_repaint_of(ViewportId::ROOT);
             }
+            placement.refresh_title_bar(ui.ctx());
             let ctx = ui.ctx();
             let escape = closable && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
             let closed = closable && ctx.input(|input| input.viewport().close_requested());
@@ -328,6 +342,54 @@ mod tests {
         assert_eq!(title_bar_theme(egui::ThemePreference::Dark), egui::SystemTheme::Dark);
         assert_eq!(title_bar_theme(egui::ThemePreference::System), egui::SystemTheme::SystemDefault);
     }
+
+
+    fn refresh_frame(ctx: &Context, placement: &mut Placement, focused: bool) -> Vec<egui::ViewportCommand> {
+        ctx.options_mut(|options| options.sync_window_theme = false);
+        let mut input = egui::RawInput::default();
+        input.viewports.get_mut(&ViewportId::ROOT).expect("Dialog test: missing root viewport").focused = Some(focused);
+        let output = ctx.run_pass(input, |ctx| placement.refresh_title_bar(ctx));
+        let commands = output.viewport_output[&ViewportId::ROOT].commands.clone();
+        output.drop_without_applying_deltas();
+        commands
+    }
+
+
+    #[test]
+    fn each_dialog_refreshes_its_title_bar_after_focus_arrives() {
+        let ctx = Context::default();
+        ctx.set_theme(egui::ThemePreference::Light);
+        let mut first = Placement::new(400.0, None);
+        let mut second = Placement::new(400.0, None);
+        for placement in [&mut first, &mut second] {
+            assert!(refresh_frame(&ctx, placement, false).is_empty());
+            assert_eq!(placement.refreshed_theme, None);
+            let commands = refresh_frame(&ctx, placement, true);
+            assert!(matches!(commands.as_slice(), [egui::ViewportCommand::SetTheme(egui::SystemTheme::Light)]));
+            assert!(refresh_frame(&ctx, placement, true).is_empty());
+            assert!(refresh_frame(&ctx, placement, false).is_empty());
+            assert!(refresh_frame(&ctx, placement, true).is_empty());
+        }
+    }
+
+
+    #[test]
+    fn a_theme_change_refreshes_an_open_dialog_again_when_focused() {
+        let ctx = Context::default();
+        let mut placement = Placement::new(400.0, None);
+        for (preference, expected) in [
+            (egui::ThemePreference::Light, egui::SystemTheme::Light),
+            (egui::ThemePreference::Dark, egui::SystemTheme::Dark),
+            (egui::ThemePreference::System, egui::SystemTheme::SystemDefault),
+        ] {
+            ctx.set_theme(preference);
+            assert!(refresh_frame(&ctx, &mut placement, false).is_empty());
+            let commands = refresh_frame(&ctx, &mut placement, true);
+            assert!(matches!(commands.as_slice(), [egui::ViewportCommand::SetTheme(theme)] if *theme == expected));
+            assert!(refresh_frame(&ctx, &mut placement, true).is_empty());
+        }
+    }
+
 
     #[test]
     fn dialogs_not_shown_in_a_frame_are_forgotten() {
