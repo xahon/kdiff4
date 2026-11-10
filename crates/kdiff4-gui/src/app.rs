@@ -619,7 +619,9 @@ Shortcut: {}", link.display()),
         self.panes.find.stale = true;
         match message {
             HostMessage::Event(Event::Snapshot(snapshot)) => {
-                if self.is_opening() {
+                let opening = self.is_opening();
+                let initial_region = snapshot.current_region.clone();
+                if opening {
                     self.panes = PaneState {
                         merge_fraction: self.panes.merge_fraction.clone(),
                         ..PaneState::default()
@@ -637,6 +639,9 @@ Shortcut: {}", link.display()),
                 self.mirror = Some(mirror);
                 self.folds_language = None;
                 self.panes.void_row = None;
+                if opening && let Some(region) = initial_region {
+                    self.jump_to(region);
+                }
                 self.form_open = false;
                 self.error = None;
                 if !self.window_enlarged {
@@ -2572,7 +2577,7 @@ mod tests {
     use super::*;
 
     /// A 2-way merge of two lines: a modified region resolved to B, then an unchanged one; D is "b\nx\n".
-    fn resolved_mirror() -> Mirror {
+    fn resolved_snapshot() -> kdiff4_protocol::Snapshot {
         use kdiff4_protocol::engine::{Comparison, ComparisonOptions, EngineCapabilities, HunkChange, Region, RegionStatus, Row};
         use kdiff4_protocol::{Choice, DocumentText, EolStyle, OutputDocument, RegionMerge, Revision, Snapshot};
         use std::path::PathBuf;
@@ -2612,22 +2617,25 @@ mod tests {
             modified: false,
             eol: EolChoice::default(),
         };
-        Mirror::from_snapshot(
-            Snapshot {
-                revision: Revision(1),
-                documents: vec![source(Document::A, "a\nx\n"), source(Document::B, "b\nx\n")],
-                output: Some(output),
-                comparison,
-                engine: EngineCapabilities::default(),
-                merge,
-                options: ComparisonOptions::default(),
-                current_region: None,
-                char_diffs: Vec::new(),
-                alignments: kdiff4_protocol::Alignments::default(),
-            },
-            false,
-        )
+        Snapshot {
+            revision: Revision(1),
+            documents: vec![source(Document::A, "a\nx\n"), source(Document::B, "b\nx\n")],
+            output: Some(output),
+            comparison,
+            engine: EngineCapabilities::default(),
+            merge,
+            options: ComparisonOptions::default(),
+            current_region: None,
+            char_diffs: Vec::new(),
+            alignments: kdiff4_protocol::Alignments::default(),
+        }
     }
+
+
+    fn resolved_mirror() -> Mirror {
+        Mirror::from_snapshot(resolved_snapshot(), false)
+    }
+
 
     #[test]
     fn window_title_is_app_name_without_files() {
@@ -2650,6 +2658,58 @@ mod tests {
         app.mirror = Some(resolved_mirror());
         (app, host, ctx)
     }
+
+
+    #[test]
+    fn opening_jumps_to_the_snapshot_region_or_stays_at_the_top() {
+        for current in [Some(0), Some(1), None] {
+            let (mut app, _host, ctx) = app_with_session();
+            app.panes.source_scroll.set(400.0);
+            app.panes.output_scroll.set(200.0);
+            for scroll in app.panes.pane_scrolls.iter_mut() {
+                scroll.set(300.0);
+            }
+            app.panes.jump = Some(0);
+            app.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
+            app.send(Command::Open(kdiff4_protocol::OpenFiles::default()), Pending::Open);
+            let mut snapshot = resolved_snapshot();
+            snapshot.current_region = current.clone();
+            if current == Some(1) {
+                snapshot.documents[0].text.truncate(2);
+                snapshot.documents[0].lines.truncate(1);
+                snapshot.comparison.regions[1].hunks[0] = 1..1;
+                snapshot.comparison.regions[1].rows[0].lines[0] = None;
+                snapshot.comparison.regions[1].status = kdiff4_protocol::engine::RegionStatus::Diff(kdiff4_protocol::engine::HunkChange::Added);
+            }
+            app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(snapshot)));
+            assert_eq!(app.panes.jump, current);
+            assert_eq!(app.panes.source_scroll.offset, 0.0);
+            assert_eq!(app.panes.output_scroll.offset, 0.0);
+            assert!(app.panes.pane_scrolls.iter().all(|scroll| scroll.offset == 0.0));
+            match current {
+                Some(region) => {
+                    assert_eq!(app.caret_region(), Some(region));
+                    assert_eq!(app.panes.caret.unwrap().0, Document::A);
+                    assert!(app.panes.caret_hidden);
+                    assert_eq!(app.panes.void_row, (region == 1).then_some(1));
+                }
+                None => assert!(app.panes.caret.is_none()),
+            }
+        }
+    }
+
+
+    #[test]
+    fn resync_snapshot_does_not_jump_to_the_current_region() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.panes.source_scroll.set(400.0);
+        let mut snapshot = resolved_snapshot();
+        snapshot.current_region = Some(1);
+        app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(snapshot)));
+        assert_eq!(app.panes.jump, None);
+        assert_eq!(app.panes.source_scroll.offset, 400.0);
+    }
+
 
     fn press(app: &mut KdiffApp, ctx: &egui::Context, key: Key, modifiers: Modifiers) {
         let events = vec![

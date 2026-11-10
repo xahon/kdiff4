@@ -1,0 +1,7 @@
+header
+automatic left
+between
+first left
+middle
+second left
+footer

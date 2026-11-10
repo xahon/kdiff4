@@ -1,0 +1,7 @@
+header
+automatic
+between
+first conflict
+middle
+second conflict
+footer

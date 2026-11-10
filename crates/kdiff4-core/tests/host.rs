@@ -91,11 +91,47 @@ fn open_sends_snapshot_then_ok_response() {
     assert_eq!(snapshot.engine.id, kdiff4_core::BUILTIN_ENGINE_ID);
     let statuses: Vec<RegionStatus> = snapshot.comparison.regions.iter().map(|region| region.status.clone()).collect();
     assert_eq!(statuses, [RegionStatus::Merge(MergeStatus::Conflict)]);
+    assert_eq!(snapshot.current_region, Some(0));
     expect_ok(&client, id);
 
     drop(client);
     host.join().unwrap();
 }
+
+
+#[test]
+fn open_selects_the_first_conflict_or_difference_directly_and_through_the_protocol() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/navigation");
+    let cases = [
+        ("conflicts", "base.txt", "left.txt", Some("right.txt"), Some(3)),
+        ("automatic", "base.txt", "left.txt", Some("base.txt"), Some(1)),
+        ("two-way", "base.txt", "left.txt", None, Some(1)),
+        ("identical", "base.txt", "base.txt", Some("base.txt"), None),
+        ("identical-two-way", "base.txt", "base.txt", None, None),
+        ("empty", "empty.txt", "empty.txt", Some("empty.txt"), None),
+        ("empty-two-way", "empty.txt", "empty.txt", None, None),
+    ];
+    let (mut client, host) = start();
+    for (name, a, b, c, expected) in cases {
+        let files = OpenFiles {
+            a: fixtures.join(a),
+            b: fixtures.join(b),
+            c: c.map(|path| fixtures.join(path)),
+            ..OpenFiles::default()
+        };
+        let session = kdiff4_core::Session::open(&files, &kdiff4_core::BuiltinEngine).unwrap();
+        assert_eq!(session.current_region(), expected, "{name}: direct session");
+        let id = client.send(Command::Open(files)).unwrap();
+        let snapshot = expect_snapshot(&client);
+        assert_eq!(snapshot.current_region, expected, "{name}: protocol snapshot");
+        assert_eq!(snapshot.revision, Revision(1), "{name}: opening does not advance the revision");
+        assert!(!snapshot.output.as_ref().is_some_and(|output| output.modified), "{name}: opening does not modify D");
+        expect_ok(&client, id);
+    }
+    drop(client);
+    host.join().unwrap();
+}
+
 
 #[test]
 fn open_missing_file_sends_error_response_only() {
@@ -366,12 +402,13 @@ fn navigation_broadcasts_the_current_region_without_a_new_revision() {
         }))
         .unwrap();
     let snapshot = expect_snapshot(&client);
+    assert_eq!(snapshot.current_region, Some(1));
     expect_ok(&client, id);
 
     let id = client
         .send(Command::Navigate {
             base: snapshot.revision.clone(),
-            from: None,
+            from: Some(0),
             to: Navigation::NextConflict,
             include_alignments: false,
         })

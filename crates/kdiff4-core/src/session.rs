@@ -74,7 +74,7 @@ pub struct Session {
 }
 
 impl Session {
-    /// For a merge, every region is auto-resolved and D is built from the result.
+    /// For a merge, every region is auto-resolved and D is built from the result. The first conflict is current, or the first difference when there are no conflicts.
     pub fn open(files: &OpenFiles, engine: &dyn ComparisonEngine) -> Result<Session, CoreError> {
         if let Some(output) = files.output.as_deref()
             && output.is_dir()
@@ -113,6 +113,11 @@ impl Session {
         } else {
             (Merge::without_output(comparison.regions), None)
         };
+        let regions = merge.regions();
+        let current = regions
+            .iter()
+            .position(|region| merge::is_conflict(&region.status))
+            .or_else(|| regions.iter().position(|region| merge::is_difference(&region.status)));
         Ok(Session {
             revision: 1,
             sources,
@@ -120,7 +125,7 @@ impl Session {
             options,
             merge,
             engine: engine.capabilities(),
-            current: None,
+            current,
             char_diffs,
             alignments: AlignmentMarks::default(),
         })
@@ -1660,8 +1665,8 @@ mod tests {
             &["same", "base", "x", "keep", "c"],
         );
         let base = session.revision();
-        assert_eq!(session.current_region(), None);
-        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(1));
+        assert_eq!(session.current_region(), Some(3));
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference, false).unwrap(), Some(1));
         assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(3));
         assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), None);
         assert_eq!(session.current_region(), Some(3));
@@ -1683,7 +1688,8 @@ z
 ");
         let mut session = Session::open(&files(a, b, None, None), &BuiltinEngine).unwrap();
         let base = session.revision();
-        assert_eq!(session.navigate(&base, None, Navigation::NextDifference, false).unwrap(), Some(1));
+        assert_eq!(session.current_region(), Some(1));
+        assert_eq!(session.navigate(&base, Some(0), Navigation::NextDifference, false).unwrap(), Some(1));
         assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), None);
     }
 
@@ -1715,6 +1721,7 @@ cc
             &["same", "base", "x", "keep", "c"],
         );
         let base = session.revision();
+        session.set_current_region(&base, None).unwrap();
         assert_eq!(session.navigate(&base, None, Navigation::PreviousDifference, false).unwrap(), Some(3));
         session.set_current_region(&base, None).unwrap();
         assert_eq!(session.navigate(&base, None, Navigation::PreviousConflict, false).unwrap(), Some(3));
