@@ -260,6 +260,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Settings dialog**: the window where GUI config is edited, with a live preview.
 - **Dialog window**: a modal dialog shown as a separate native window (an egui viewport) over the main window; see Dialogs.
 - **About window**: Help → About Kdiff4, showing the package version, build commit, target, profile, and Cargo features, with clipboard copy, a GitHub link, and a manual update check button.
+- **Command-line installers**: scripts for installing the latest published executable for the current user and making it available on PATH. On Windows the installer also creates the Start menu shortcut.
 - **Update check**: asking GitHub for the latest published release, at most once a day on start, or at once from Help → Check for Updates... Runs on its own thread; a failure is logged, and shown only when the user asked.
 - **Updater**: GUI state shared by the standalone Open window and comparison window that runs checks, shows update dialogs, and requests a restart after installation.
 - **Update window**: the dialog window that follows a check: Update Available with the release notes and the choices Update and Restart, Remind Me Later and Skip This Version; the download progress; or a notice. While one is open the rest of the window takes no input.
@@ -713,7 +714,9 @@ The binary routes each override by its section to the engine (in the open comman
 
 ### Releasing
 
-The owner changes the version in `Cargo.toml` by hand. A `post-commit` hook in `.githooks` then creates the annotated tag `vX.Y.Z` on `master` for the commit that changed the workspace version (it never edits the version and never moves an existing tag). Enable it once per clone with `git config core.hooksPath .githooks`, and `sh .githooks/test-post-commit.sh` tests it. Push the commit and its tag together with `git push --follow-tags`. The tag must equal the version in `Cargo.toml`. `.github/workflows/release.yml` tests and builds on Windows, Linux and macOS (Apple silicon and Intel), names the executables as above and opens a draft release with generated notes. Edit the notes and publish the draft; the update check sees it from then on.
+The owner changes the version in `Cargo.toml` by hand. A `post-commit` hook in `.githooks` then creates the annotated tag `vX.Y.Z` on `master` for the commit that changed the workspace version (it never edits the version and never moves an existing tag). Enable it once per clone with `git config core.hooksPath .githooks`, and `sh .githooks/test-post-commit.sh` tests it. Push the commit and its tag together with `git push --follow-tags`. The tag must equal the version in `Cargo.toml`. `.github/workflows/release.yml` tests, builds and publishes executables for Windows x64, Linux x86-64 and Apple silicon macOS with generated release notes.
+
+The one-line commands in `README.md` run `scripts/install.sh` or `scripts/install.ps1` from `master`. Each downloads the matching executable from the GitHub latest-release asset URL. The Bash installer puts it in `~/.local/bin` and updates Bash or Zsh startup files. The PowerShell installer puts it in `%LOCALAPPDATA%\Programs\Kdiff4`, updates the user's PATH, and writes `Kdiff4.lnk` in the user's Start menu Programs folder.
 
 ## Binary and CLI
 

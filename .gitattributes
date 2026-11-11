@@ -3,3 +3,5 @@ test_data/** -text
 
 # Git hooks run under sh: keep their line ends as LF.
 .githooks/* text eol=lf
+scripts/*.sh text eol=lf
+tests/*.sh text eol=lf

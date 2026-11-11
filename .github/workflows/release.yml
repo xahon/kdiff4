@@ -53,6 +53,16 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Test Bash installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tests/install.sh
+
+      - name: Test PowerShell installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/install.ps1
+
       - name: Build
         run: cargo build --release --locked
 
