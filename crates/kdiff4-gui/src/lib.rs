@@ -32,8 +32,9 @@ mod update_dialog;
 mod window_frame;
 
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender};
 
-use kdiff4_protocol::{Client, Document, Labels, RequestId};
+use kdiff4_protocol::{Client, Document, Labels, OpenFiles};
 use thiserror::Error;
 
 pub use paths::{clean_path, clean_path_text};
@@ -44,25 +45,56 @@ pub enum GuiError {
     Eframe(String),
 }
 
-/// What the binary already knows when the window opens.
-#[derive(Debug, Clone, Default)]
-pub struct Startup {
-    /// Paths to pre-fill the Open window with.
-    pub paths: Vec<(Document, PathBuf)>,
-    pub labels: Labels,
-    /// An open request the binary already sent; the window waits for its result instead of asking for files.
-    pub pending_open: Option<RequestId>,
+/// Files to open in a tab, or paths to prefill when the invocation supplied fewer than two inputs.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenDocument {
+    Open(OpenFiles),
+    Prefill(Vec<(Document, PathBuf)>, Labels),
 }
 
+
+pub struct OpenRequest {
+    pub document: OpenDocument,
+    pub completion: OpenCompletion,
+}
+
+
+pub enum OpenCompletion {
+    TabClosed(Sender<bool>),
+    Dispatched { result: Sender<bool>, last_dir: Option<PathBuf> },
+}
+
+
 /// Runs the window on the calling thread until the user closes it.
-pub fn run(client: Client, startup: Startup) -> Result<(), GuiError> {
+pub fn run(
+    client: Client,
+    new_client: impl Fn() -> std::io::Result<Client> + 'static,
+    incoming: Receiver<OpenRequest>,
+    set_waker: impl FnOnce(Box<dyn Fn() + Send + Sync>),
+    open_window: impl Fn() -> std::io::Result<()> + 'static,
+) -> Result<Option<PathBuf>, GuiError> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(app::WINDOW_TITLE).with_inner_size(app::INITIAL_WINDOW_SIZE).with_icon(icons::application()),
         ..Default::default()
     };
-    eframe::run_native(app::WINDOW_TITLE, options, Box::new(|cc| {
-            let mut app = app::KdiffApp::new(&cc.egui_ctx, client, startup);
+    let (restart, restarted) = std::sync::mpsc::channel();
+    eframe::run_native(app::WINDOW_TITLE, options, Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            set_waker(Box::new(move || ctx.request_repaint()));
+            let mut app = app::KdiffApp::new(&cc.egui_ctx, client, new_client);
+            app.connect_launches(incoming, restart);
+            app.set_open_window(open_window);
+            app.receive_launches(&cc.egui_ctx);
             app.begin_startup_update_tasks(&cc.egui_ctx);
             Ok(Box::new(app))
-        })).map_err(|error| GuiError::Eframe(error.to_string()))
+        })).map_err(|error| GuiError::Eframe(error.to_string()))?;
+    Ok(restarted.try_recv().ok())
+}
+
+
+/// Runs an independent Open window and submits the chosen files to the comparison window.
+pub fn run_open_window(
+    submit: impl Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
+) -> Result<(), GuiError> {
+    open_dialog::run_window(submit)
 }

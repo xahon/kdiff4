@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod console;
+mod instance;
 mod logging;
 
 use std::path::PathBuf;
@@ -8,8 +9,8 @@ use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::Parser;
-use kdiff4_gui::clean_path;
-use kdiff4_protocol::{Command, Document, Labels, OpenFiles};
+use kdiff4_gui::{OpenDocument, clean_path};
+use kdiff4_protocol::{Client, Document, Labels, OpenFiles};
 
 /// Compares and merges two or three text files.
 #[derive(Debug, Parser)]
@@ -38,14 +39,13 @@ struct Cli {
     fname: Vec<String>,
 }
 
-/// What the window starts with.
+
 #[derive(Debug, PartialEq, Eq)]
 enum Launch {
-    /// A valid set of files: open it at once.
-    Open(OpenFiles),
-    /// Too few files: show the Open window with these filled in.
-    Prefill(Vec<(Document, PathBuf)>, Labels),
+    OpenWindow,
+    Request(OpenDocument),
 }
+
 
 /// Maps the arguments the way kdiff3 does: three inputs are A B C, two are A B, and `--base` comes first. Paths are cleaned of stray line breaks and quotes; one that is blank after that is dropped.
 fn plan_launch(cli: Cli) -> Result<Launch, String> {
@@ -57,13 +57,14 @@ fn plan_launch(cli: Cli) -> Result<Launch, String> {
     let labels = assign_labels([cli.label_a, cli.label_b, cli.label_c], cli.fname);
     let mut inputs = inputs.into_iter();
     match (inputs.next(), inputs.next(), inputs.next()) {
-        (Some(a), Some(b), c) => Ok(Launch::Open(OpenFiles { a, b, c, output, labels })),
+        (Some(a), Some(b), c) => Ok(Launch::Request(OpenDocument::Open(OpenFiles { a, b, c, output, labels }))),
+        (None, _, _) if output.is_none() && labels == Labels::default() => Ok(Launch::OpenWindow),
         (a, _, _) => {
             let paths = [(Document::A, a), (Document::D, output)]
                 .into_iter()
                 .filter_map(|(document, path)| path.map(|path| (document, path)))
                 .collect();
-            Ok(Launch::Prefill(paths, labels))
+            Ok(Launch::Request(OpenDocument::Prefill(paths, labels)))
         }
     }
 }
@@ -75,48 +76,75 @@ fn assign_labels(explicit: [Option<String>; 3], mut next: Vec<String>) -> Labels
     Labels { a, b, c }
 }
 
-fn form_paths(files: &OpenFiles) -> Vec<(Document, PathBuf)> {
-    [
-        (Document::A, Some(files.a.clone())),
-        (Document::B, Some(files.b.clone())),
-        (Document::C, files.c.clone()),
-        (Document::D, files.output.clone()),
-    ]
-    .into_iter()
-    .filter_map(|(document, path)| path.map(|path| (document, path)))
-    .collect()
+fn start_client() -> std::io::Result<Client> {
+    let (client, endpoint) = kdiff4_protocol::in_process();
+    kdiff4_core::spawn_host(endpoint)?;
+    Ok(client)
 }
 
-/// Starts the engine host, sends the open command for a valid set of files, and runs the window until it closes.
-fn run(launch: Launch) -> anyhow::Result<()> {
-    let (mut client, endpoint) = kdiff4_protocol::in_process();
-    let host = kdiff4_core::spawn_host(endpoint).context("cannot start the engine host")?;
-    let startup = match launch {
-        Launch::Open(files) => {
-            let paths = form_paths(&files);
-            let labels = files.labels.clone();
-            let id = client.send(Command::Open(files)).context("cannot reach the engine host")?;
-            kdiff4_gui::Startup {
-                paths,
-                labels,
-                pending_open: Some(id),
-            }
+fn run_window(directory: PathBuf) -> anyhow::Result<bool> {
+    let logger = logging::init();
+    let result = (|| {
+        let client = start_client().context("cannot start the engine host")?;
+        let (server, incoming, waker) = instance::Server::start(directory).context("cannot receive launch requests")?;
+        let restart = kdiff4_gui::run(client, start_client, incoming, move |wake| {
+            let _ = waker.set(wake);
+        }, spawn_open_window).context("GUI failed");
+        drop(server);
+        if let Some(exe) = restart? {
+            std::process::Command::new(&exe).env_remove(instance::SERVER_ENV).spawn()
+                .with_context(|| format!("cannot restart {}", exe.display()))?;
         }
-        Launch::Prefill(paths, labels) => kdiff4_gui::Startup {
-            paths,
-            labels,
-            pending_open: None,
-        },
-    };
-    let gui_result = kdiff4_gui::run(client, startup).context("GUI failed");
-    if host.join().is_err() {
-        log::error!("engine host thread panicked");
+        Ok(true)
+    })();
+    if let Err(error) = &result {
+        log::error!("{error:#}");
     }
-    gui_result
+    log::info!("kdiff4 exits");
+    drop(logger);
+    result
+}
+
+
+fn spawn_open_window() -> std::io::Result<()> {
+    std::process::Command::new(std::env::current_exe()?)
+        .env_remove(instance::SERVER_ENV)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+
+fn run_open_window() -> anyhow::Result<bool> {
+    kdiff4_gui::run_open_window(|files, last_dir| {
+        match instance::open_from_form(files, last_dir) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Kdiff4 could not accept the files.".into()),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    }).context("cannot show the Open window")?;
+    Ok(true)
+}
+
+
+fn exit_code(result: anyhow::Result<bool>) -> ExitCode {
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("kdiff4: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Usage errors exit with 1, like kdiff3, not clap's 2.
 fn main() -> ExitCode {
+    if let Some(directory) = std::env::var_os(instance::SERVER_ENV) {
+        return exit_code(run_window(PathBuf::from(directory)));
+    }
     console::attach_to_parent();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -132,19 +160,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let logger = logging::init();
-    log::info!("launch: {launch:?}");
-    let result = run(launch);
-    if let Err(error) = &result {
-        if logger.is_some() {
-            log::error!("{error:#}");
-        } else {
-            eprintln!("kdiff4: {error:#}");
-        }
+    match launch {
+        Launch::OpenWindow => exit_code(run_open_window()),
+        Launch::Request(document) => exit_code(instance::launch(document)),
     }
-    log::info!("kdiff4 exits");
-    drop(logger);
-    if result.is_ok() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 #[cfg(test)]
@@ -157,13 +176,13 @@ mod tests {
     }
 
     fn open(a: &str, b: &str, c: Option<&str>, output: Option<&str>, labels: Labels) -> Launch {
-        Launch::Open(OpenFiles {
+        Launch::Request(OpenDocument::Open(OpenFiles {
             a: PathBuf::from(a),
             b: PathBuf::from(b),
             c: c.map(PathBuf::from),
             output: output.map(PathBuf::from),
             labels,
-        })
+        }))
     }
 
     fn label(text: &str) -> Option<String> {
@@ -236,16 +255,20 @@ mod tests {
     }
 
     #[test]
-    fn too_few_files_prefill_the_open_window() {
-        assert_eq!(launch(&[]), Ok(Launch::Prefill(Vec::new(), Labels::default())));
+    fn no_arguments_start_a_standalone_open_window() {
+        assert_eq!(launch(&[]), Ok(Launch::OpenWindow));
+    }
+
+    #[test]
+    fn too_few_files_prefill_the_form_in_the_main_window() {
         assert_eq!(
             launch(&["a", "-o", "out"]),
-            Ok(Launch::Prefill(
+            Ok(Launch::Request(OpenDocument::Prefill(
                 vec![(Document::A, PathBuf::from("a")), (Document::D, PathBuf::from("out"))],
                 Labels::default()
-            ))
+            )))
         );
-        assert_eq!(launch(&["-b", "base"]), Ok(Launch::Prefill(vec![(Document::A, PathBuf::from("base"))], Labels::default())));
+        assert_eq!(launch(&["-b", "base"]), Ok(Launch::Request(OpenDocument::Prefill(vec![(Document::A, PathBuf::from("base"))], Labels::default()))));
     }
 
     #[test]
@@ -259,18 +282,4 @@ mod tests {
         assert!(launch(&["--frobnicate", "a", "b"]).is_err());
     }
 
-    #[test]
-    fn form_paths_cover_every_given_file() {
-        let files = OpenFiles {
-            a: PathBuf::from("a"),
-            b: PathBuf::from("b"),
-            c: None,
-            output: Some(PathBuf::from("d")),
-            labels: Labels::default(),
-        };
-        assert_eq!(
-            form_paths(&files),
-            [(Document::A, PathBuf::from("a")), (Document::B, PathBuf::from("b")), (Document::D, PathBuf::from("d"))]
-        );
-    }
 }

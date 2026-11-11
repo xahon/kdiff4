@@ -1,13 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 
-use egui::{Align, Color32, Id, Label, Layout, RichText, TextEdit, TextStyle, TextWrapMode, Ui, WidgetText, vec2};
+use egui::{Align, Color32, Id, Label, Layout, Margin, Rect, RichText, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetText, pos2, vec2};
 use kdiff4_protocol::{Document, Labels, OpenFiles};
 
+use crate::{GuiError, config, theme};
 use crate::paths::clean_path_text;
 
 /// The form fills the window or dialog up to this width; path fields take whatever the labels and buttons leave.
-pub(crate) const FORM_MAX_WIDTH: f32 = 720.0;
+const FORM_MAX_WIDTH: f32 = 720.0;
 const MIN_FIELD_WIDTH: f32 = 80.0;
+const WINDOW_MIN_WIDTH: f32 = 460.0;
+const WINDOW_MARGIN: Margin = Margin::same(12);
 
 /// Paths typed or picked in the Open dialog, in `Document::ALL` order, plus labels from the command line, which the dialog keeps but doesn't show.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +41,18 @@ impl OpenForm {
         self.labels = labels;
     }
 
+    pub fn set_files(&mut self, files: &OpenFiles) {
+        *self = Self::default();
+        for (document, path) in [(Document::A, Some(files.a.as_path())), (Document::B, Some(files.b.as_path())),
+            (Document::C, files.c.as_deref()), (Document::D, files.output.as_deref())]
+        {
+            if let Some(path) = path {
+                self.set_path(document, path);
+            }
+        }
+        self.set_labels(files.labels.clone());
+    }
+
     /// The files to open. A and B are required, which is what enables Run; C makes a 3-way merge, and D names the output now (a merge without D keeps it in memory until it is saved).
     pub fn files(&self) -> Option<OpenFiles> {
         let a = self.path(Document::A)?;
@@ -50,8 +66,16 @@ impl OpenForm {
         })
     }
 
-    /// Draws the dialog contents. `busy` disables Run while an open is in flight; `cancelable` adds a Cancel button.
-    pub fn show(&mut self, ui: &mut Ui, error: Option<&str>, busy: bool, cancelable: bool) -> Option<FormAction> {
+    pub fn confirmed_files(&self) -> Option<OpenFiles> {
+        let files = self.files()?;
+        if let Some(output) = output_to_confirm(&files) && !confirm_overwrite(output) {
+            return None;
+        }
+        Some(files)
+    }
+
+    /// Draws the form. `cancelable` adds a Cancel button.
+    pub fn show(&mut self, ui: &mut Ui, tab: Option<usize>, error: Option<&str>, cancelable: bool) -> Option<FormAction> {
         let mut action = None;
         ui.set_width(ui.available_width().min(FORM_MAX_WIDTH));
         let height = ui.spacing().interact_size.y;
@@ -66,16 +90,16 @@ impl OpenForm {
             .fold(0.0, f32::max);
         for document in Document::ALL {
             ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(vec2(label_width, height), Layout::left_to_right(Align::Center), |ui| {
+                let label = ui.allocate_ui_with_layout(vec2(label_width, height), Layout::left_to_right(Align::Center), |ui| {
                     ui.set_min_width(label_width);
                     ui.label(label(document))
-                });
+                }).inner;
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Browse...").clicked() {
                         action = Some(FormAction::Browse(document));
                     }
                     let width = ui.available_width().max(MIN_FIELD_WIDTH);
-                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).id(field_id(document)).desired_width(width));
+                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).id(field_id(tab, document)).desired_width(width)).labelled_by(label.id);
                 });
             });
         }
@@ -84,7 +108,7 @@ impl OpenForm {
             ui.add(Label::new(RichText::new(error).color(Color32::RED)).wrap());
         }
         ui.horizontal_wrapped(|ui| {
-            let can_run = !busy && self.files().is_some();
+            let can_run = self.files().is_some();
             let run = ui.add_enabled(can_run, egui::Button::new("Run"));
             let enter = can_run && ui.input(|input| input.key_pressed(egui::Key::Enter));
             if run.clicked() || enter {
@@ -93,13 +117,154 @@ impl OpenForm {
             if cancelable && ui.button("Cancel").clicked() {
                 action = Some(FormAction::Cancel);
             }
-            if busy {
-                ui.spinner();
-            }
         });
         action
     }
 }
+
+
+pub fn run_window(
+    submit: impl Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
+) -> Result<(), GuiError> {
+    let options = eframe::NativeOptions {
+        centered: true,
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Open")
+            .with_inner_size(vec2(FORM_MAX_WIDTH, 200.0) + WINDOW_MARGIN.sum())
+            .with_min_inner_size(vec2(WINDOW_MIN_WIDTH, 0.0)),
+        ..Default::default()
+    };
+    eframe::run_native("Open", options, Box::new(move |cc| {
+        let settings = config::default_config_path()
+            .and_then(|path| config::load(&path).ok())
+            .unwrap_or_default();
+        cc.egui_ctx.set_theme(theme::preference(settings.view.theme.clone()));
+        theme::apply_style(&cc.egui_ctx, &settings.view);
+        Ok(Box::new(OpenWindow {
+            form: OpenForm::default(),
+            last_dir: settings.recent.last_dir,
+            picked_dir: None,
+            submit: Arc::new(submit),
+            pending: None,
+            error: None,
+            form_height: None,
+        }))
+    })).map_err(|error| GuiError::Eframe(error.to_string()))
+}
+
+
+struct OpenWindow<F> {
+    form: OpenForm,
+    last_dir: Option<PathBuf>,
+    picked_dir: Option<PathBuf>,
+    submit: Arc<F>,
+    pending: Option<mpsc::Receiver<Result<(), String>>>,
+    error: Option<String>,
+    form_height: Option<f32>,
+}
+
+
+impl<F> OpenWindow<F>
+where
+    F: Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
+{
+    fn show_panel(&mut self, ui: &mut Ui) {
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(WINDOW_MARGIN);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| self.show(ui));
+    }
+
+
+    fn show(&mut self, ui: &mut Ui) {
+        if let Some(pending) = &self.pending {
+            match pending.try_recv() {
+                Ok(Ok(())) => {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                Ok(Err(error)) => self.error = Some(error),
+                Err(mpsc::TryRecvError::Disconnected) => self.error = Some("The request to open files was interrupted.".into()),
+                Err(mpsc::TryRecvError::Empty) => {
+                    if ui.input(|input| input.viewport().close_requested()) {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    }
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Sending files to Kdiff4…");
+                    });
+                    return;
+                }
+            }
+            self.pending = None;
+        }
+        let room = ui.available_rect_before_wrap();
+        let width = room.width().min(FORM_MAX_WIDTH);
+        let height = self.form_height.unwrap_or(room.height());
+        let top = room.top() + ((room.height() - height) / 2.0).max(0.0);
+        let rect = Rect::from_min_size(pos2(room.left(), top), vec2(width, room.bottom() - top));
+        let form = ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| self.form.show(ui, None, self.error.as_deref(), true));
+        self.fit_height(ui.ctx(), form.response.rect.height().ceil());
+        let action = form.inner;
+        let action = if ui.input(|input| input.key_pressed(egui::Key::Escape)) { Some(FormAction::Cancel) } else { action };
+        match action {
+            Some(FormAction::Browse(document)) => {
+                if let Some(path) = pick_file(document, self.picked_dir.as_deref().or(self.last_dir.as_deref())) {
+                    self.picked_dir = remembered_dir(&path);
+                    self.form.set_path(document, &path);
+                }
+            }
+            Some(FormAction::Run) => {
+                if let Some(files) = self.form.confirmed_files() {
+                    self.send(ui.ctx(), files);
+                }
+            }
+            Some(FormAction::Cancel) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            None => {}
+        }
+    }
+
+
+    fn fit_height(&mut self, ctx: &egui::Context, height: f32) {
+        if self.form_height == Some(height) {
+            return;
+        }
+        self.form_height = Some(height);
+        let viewport = ctx.viewport_rect().size();
+        let fitted = height + WINDOW_MARGIN.sum().y;
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(WINDOW_MIN_WIDTH, fitted)));
+        if (viewport.y - fitted).abs() > 1.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(viewport.x, fitted)));
+        }
+        ctx.request_repaint();
+    }
+
+
+    fn send(&mut self, ctx: &egui::Context, files: OpenFiles) {
+        let (complete, pending) = mpsc::channel();
+        let submit = self.submit.clone();
+        let dir = self.picked_dir.clone();
+        let ctx = ctx.clone();
+        match std::thread::Builder::new().name("kdiff4-open".into()).spawn(move || {
+            let _ = complete.send(submit(files, dir));
+            ctx.request_repaint();
+        }) {
+            Ok(_) => {
+                self.pending = Some(pending);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(format!("Cannot send files to Kdiff4: {error}")),
+        }
+    }
+}
+
+
+impl<F> eframe::App for OpenWindow<F>
+where
+    F: Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
+{
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.show_panel(ui);
+    }
+}
+
 
 /// D is an output that may not exist yet, so it gets a Save dialog; A, B and C get an Open dialog.
 pub fn pick_file(document: Document, start_dir: Option<&Path>) -> Option<PathBuf> {
@@ -118,12 +283,13 @@ pub fn remembered_dir(picked: &Path) -> Option<PathBuf> {
     picked.parent().filter(|dir| !dir.as_os_str().is_empty()).map(Path::to_path_buf)
 }
 
-pub fn needs_overwrite_confirmation(files: &OpenFiles) -> bool {
-    files.output.as_deref().is_some_and(Path::is_file)
+fn output_to_confirm(files: &OpenFiles) -> Option<&Path> {
+    files.output.as_deref().filter(|path| path.is_file())
 }
 
+
 /// Asks with a native message box; anything but Yes means no.
-pub fn confirm_overwrite(output: &Path) -> bool {
+fn confirm_overwrite(output: &Path) -> bool {
     let answer = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Warning)
         .set_title("Overwrite file?")
@@ -172,8 +338,8 @@ fn index(document: Document) -> usize {
     }
 }
 
-fn field_id(document: Document) -> Id {
-    Id::unique(("open_form_path", index(document)))
+fn field_id(tab: Option<usize>, document: Document) -> Id {
+    Id::unique(("open_form_path", tab, index(document)))
 }
 
 
@@ -198,6 +364,114 @@ mod tests {
             form.set_path(document, Path::new(path));
         }
         form
+    }
+
+    #[test]
+    fn each_open_window_submits_only_its_own_form_on_run() {
+        use egui_kittest::kittest::Queryable;
+        use std::time::Duration;
+
+        let (sent, requests) = mpsc::channel();
+        let submit = Arc::new(move |files, last_dir| {
+            sent.send((files, last_dir)).unwrap();
+            Ok(())
+        });
+        let make_window = || OpenWindow {
+            form: OpenForm::default(),
+            last_dir: None,
+            picked_dir: None,
+            submit: submit.clone(),
+            pending: None,
+            error: None,
+            form_height: None,
+        };
+        let mut first = make_window();
+        first.form = form(["a.txt", "b.txt", "", ""]);
+        let expected = first.form.files().unwrap();
+        let mut second = make_window();
+        second.form = form(["c.txt", "d.txt", "", ""]);
+        let mut cancel = egui_kittest::Harness::builder().build_ui_state(|ui, window| window.show_panel(ui), second);
+        cancel.get_by_label("Cancel").click();
+        cancel.run();
+        assert!(requests.try_recv().is_err());
+
+        let mut run = egui_kittest::Harness::builder().build_ui_state(|ui, window| window.show_panel(ui), first);
+        run.get_by_label("Run").click();
+        run.run_steps(4);
+        assert_eq!(requests.recv_timeout(Duration::from_secs(5)).unwrap(), (expected, None));
+    }
+
+
+    fn layout_test_window() -> OpenWindow<impl Fn(OpenFiles, Option<PathBuf>) -> Result<(), String>> {
+        OpenWindow {
+            form: form(["a.txt", "b.txt", "", ""]),
+            last_dir: None,
+            picked_dir: None,
+            submit: Arc::new(|_, _| Ok(())),
+            pending: None,
+            error: None,
+            form_height: None,
+        }
+    }
+
+
+    #[test]
+    fn the_open_window_fits_the_form_height_and_grows_for_errors() {
+        let mut window = layout_test_window();
+        let ctx = egui::Context::default();
+        let width = 520.0;
+        let fitted_height = |window: &mut OpenWindow<_>, height| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, height))), ..Default::default() };
+            let output = ctx.run_ui(input, |ui| window.show_panel(ui));
+            let size = output.viewport_output[&egui::ViewportId::ROOT].commands.iter().find_map(|command| {
+                if let egui::ViewportCommand::InnerSize(size) = command { Some(size.clone()) } else { None }
+            });
+            output.drop_without_applying_deltas();
+            size
+        };
+        let normal = fitted_height(&mut window, 224.0).unwrap();
+        assert_eq!(normal.x, width);
+        assert!(normal.y < 180.0, "{normal:?}");
+        assert_eq!(normal.y, window.form_height.unwrap() + WINDOW_MARGIN.sum().y);
+        assert_eq!(fitted_height(&mut window, normal.y), None);
+
+        window.error = Some("Could not send the files to Kdiff4. ".repeat(8));
+        let with_error = fitted_height(&mut window, normal.y).unwrap();
+        assert!(with_error.y > normal.y);
+        assert_eq!(fitted_height(&mut window, with_error.y), None);
+        window.error = None;
+        assert_eq!(fitted_height(&mut window, with_error.y), Some(normal));
+    }
+
+
+    #[test]
+    fn the_open_window_centers_its_form_vertically_without_a_heading() {
+        for width in [WINDOW_MIN_WIDTH, 900.0] {
+            let height = 250.0;
+            let mut window = layout_test_window();
+            let ctx = egui::Context::default();
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, height))), ..Default::default() };
+            ctx.run_ui(input.clone(), |ui| window.show_panel(ui)).drop_without_applying_deltas();
+            ctx.enable_accesskit();
+            let output = ctx.run_ui(input, |ui| window.show_panel(ui));
+            let nodes = &output.platform_output.accesskit_update.as_ref().unwrap().nodes;
+            let bounds = |label: &str| nodes.iter()
+                .filter(|(_, node)| node.label().as_deref() == Some(label) || node.value().as_deref() == Some(label))
+                .filter_map(|(_, node)| node.bounds())
+                .min_by(|a, b| a.y0.total_cmp(&b.y0))
+                .unwrap();
+            let run = bounds("Run");
+            let cancel = bounds("Cancel");
+            let browse = bounds("Browse...");
+            assert!(!nodes.iter().any(|(_, node)| node.label().as_deref() == Some("Open") || node.value().as_deref() == Some("Open")));
+            let form_width = (width - WINDOW_MARGIN.sum().x).min(FORM_MAX_WIDTH);
+            assert_eq!(run.x0, f64::from(WINDOW_MARGIN.left));
+            assert!(cancel.x0 > run.x1);
+            assert!(run.x1 - run.x0 < cancel.x1 - cancel.x0);
+            assert!((browse.x1 - f64::from(form_width + f32::from(WINDOW_MARGIN.left))).abs() <= 2.0, "{browse:?}");
+            assert!((browse.y0 + cancel.y1 - f64::from(height)).abs() <= 4.0, "{browse:?} {cancel:?}");
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -278,13 +552,13 @@ mod tests {
         let mut form = OpenForm::default();
         for _ in 0..2 {
             let mut output = context.run_ui(egui::RawInput::default(), |ui| {
-                form.show(ui, None, false, true);
+                form.show(ui, Some(0), None, true);
             });
             output.textures_delta.clear();
         }
         let rects: Vec<_> = Document::ALL
             .into_iter()
-            .map(|document| context.read_response(field_id(document)).unwrap().rect)
+            .map(|document| context.read_response(field_id(Some(0), document)).unwrap().rect)
             .collect();
         for rect in &rects[1..] {
             assert_eq!(rect.left(), rects[0].left(), "{rects:?}");
@@ -323,9 +597,9 @@ mod tests {
             output,
             labels: Labels::default(),
         };
-        assert!(needs_overwrite_confirmation(&files(Some(existing))));
-        assert!(!needs_overwrite_confirmation(&files(Some(dir.join("new.txt")))));
-        assert!(!needs_overwrite_confirmation(&files(Some(dir.clone()))));
-        assert!(!needs_overwrite_confirmation(&files(None)));
+        assert!(output_to_confirm(&files(Some(existing))).is_some());
+        assert!(output_to_confirm(&files(Some(dir.join("new.txt")))).is_none());
+        assert!(output_to_confirm(&files(Some(dir.clone()))).is_none());
+        assert!(output_to_confirm(&files(None)).is_none());
     }
 }

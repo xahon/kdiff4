@@ -1,13 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use semver::Version;
-use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, RequestId, Response};
+use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, OpenFiles, RequestId, Response};
 
-use crate::Startup;
+use crate::{OpenCompletion, OpenDocument, OpenRequest};
 use crate::about_dialog;
 use crate::config::{self, GuiConfig, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
@@ -50,6 +51,9 @@ const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::C
 const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::H);
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const NEXT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
+const PREVIOUS_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
@@ -157,15 +161,22 @@ enum UpdateWindow {
 }
 
 
-pub struct KdiffApp {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseConfirmation {
+    Tab(usize),
+    Window,
+}
+
+
+struct DocumentTab {
+    id: usize,
+    completion: Option<Sender<bool>>,
+    required_output: Option<PathBuf>,
+    saved_output: Option<PathBuf>,
+    deferred_responses: Vec<Response>,
     client: Client,
-    config_path: Option<PathBuf>,
-    config: GuiConfig,
-    /// False when the config file failed to load, so the broken file is not overwritten.
-    config_writable: bool,
     form: OpenForm,
-    form_open: bool,
-    /// The Open window's error.
+    /// An error while opening the files for this tab.
     error: Option<String>,
     status: Option<Status>,
     engine_stopped: bool,
@@ -173,6 +184,39 @@ pub struct KdiffApp {
     language: LanguageState,
     panes: PaneState,
     pending: HashMap<RequestId, Pending>,
+    /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
+    inset_prompt: Option<InsetChoice>,
+    /// The save waiting for the user to choose the output's line ending style.
+    eol_prompt: Option<PendingSave>,
+    /// The Heuristics Alignment window, while it is open.
+    heuristics: Option<HeuristicsDialog>,
+    /// The request for fold ranges in flight; one at a time.
+    fold_request: Option<RequestId>,
+    /// The language the fold ranges of the session were asked for; `None` asks again for every document.
+    folds_language: Option<String>,
+    /// D changed since its fold ranges were asked for.
+    output_folds_stale: bool,
+}
+
+
+pub struct KdiffApp {
+    tab: DocumentTab,
+    background: Vec<DocumentTab>,
+    next_tab_id: usize,
+    new_client: Box<dyn Fn() -> std::io::Result<Client>>,
+    incoming: Option<Receiver<OpenRequest>>,
+    waiting_launches: VecDeque<OpenRequest>,
+    open_window: Option<Box<dyn Fn() -> std::io::Result<()>>>,
+    restart_sender: Option<Sender<PathBuf>>,
+    restart: Option<PathBuf>,
+    close_tab_requested: bool,
+    close_confirmation: Option<CloseConfirmation>,
+    reveal_tab: bool,
+    exiting: bool,
+    config_path: Option<PathBuf>,
+    config: GuiConfig,
+    /// False when the config file failed to load, so the broken file is not overwritten.
+    config_writable: bool,
     window_enlarged: bool,
     settings: Option<SettingsDialog>,
     font_scan: FontScan,
@@ -191,24 +235,73 @@ pub struct KdiffApp {
     update_window: Option<UpdateWindow>,
     update_cache: CommonMarkCache,
     dialogs: DialogWindows,
-    /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
-    inset_prompt: Option<InsetChoice>,
-    /// The save waiting for the user to choose the output's line ending style.
-    eol_prompt: Option<PendingSave>,
-    /// The Heuristics Alignment window, while it is open.
-    heuristics: Option<HeuristicsDialog>,
-    /// The request for fold ranges in flight; one at a time.
-    fold_request: Option<RequestId>,
-    /// The language the fold ranges of the session were asked for; `None` asks again for every document.
-    folds_language: Option<String>,
-    /// D changed since its fold ranges were asked for.
-    output_folds_stale: bool,
 }
 
-impl KdiffApp {
-    pub fn new(ctx: &egui::Context, client: Client, startup: Startup) -> KdiffApp {
+impl DocumentTab {
+    fn new(ctx: &egui::Context, id: usize, client: Client) -> Self {
         let repaint_ctx = ctx.clone();
         client.set_waker(Box::new(move || repaint_ctx.request_repaint()));
+        Self {
+            id,
+            completion: None,
+            required_output: None,
+            saved_output: None,
+            deferred_responses: Vec::new(),
+            client,
+            form: OpenForm::default(),
+            error: None,
+            status: None,
+            engine_stopped: false,
+            mirror: None,
+            language: LanguageState::default(),
+            panes: PaneState::default(),
+            pending: HashMap::new(),
+            inset_prompt: None,
+            eol_prompt: None,
+            heuristics: None,
+            fold_request: None,
+            folds_language: None,
+            output_folds_stale: false,
+        }
+    }
+
+    fn is_blank(&self) -> bool {
+        self.mirror.is_none() && self.pending.is_empty() && self.completion.is_none() && self.form == OpenForm::default()
+    }
+
+    fn is_modified(&self) -> bool {
+        self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.modified)
+    }
+
+    fn is_saving(&self) -> bool {
+        self.pending.values().any(|kind| *kind == Pending::Save)
+    }
+
+    fn may_discard_work(&self) -> bool {
+        self.is_modified() || self.pending.values().any(|kind| matches!(kind, Pending::Choose(_) | Pending::Edit | Pending::UndoRedo))
+    }
+
+    fn finish(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let merge = self.mirror.as_ref().is_some_and(|mirror| mirror.output().is_some());
+            let saved = self.saved_output.as_ref().is_some_and(|path| self.required_output.as_ref().is_none_or(|required| required == path));
+            let success = !self.engine_stopped && self.mirror.is_some()
+                && (!(self.required_output.is_some() || merge) || (saved && !self.may_discard_work()));
+            let _ = completion.send(success);
+        }
+    }
+
+    fn title_path(&self) -> Option<PathBuf> {
+        self.mirror.as_ref().and_then(|mirror| {
+            mirror.output().and_then(|output| output.path.clone())
+                .or_else(|| mirror.document(Document::A).map(|text| text.path.clone()))
+        }).or_else(|| self.form.path(Document::D).or_else(|| self.form.path(Document::A)))
+    }
+}
+
+
+impl KdiffApp {
+    pub fn new(ctx: &egui::Context, client: Client, new_client: impl Fn() -> std::io::Result<Client> + 'static) -> KdiffApp {
         egui_extras::install_image_loaders(ctx);
         let config_path = config::default_config_path();
         let (config, config_writable) = match config_path.as_deref() {
@@ -224,30 +317,24 @@ impl KdiffApp {
                 (GuiConfig::default(), false)
             }
         };
-        let mut form = OpenForm::default();
-        for (document, path) in &startup.paths {
-            form.set_path(document.clone(), path);
-        }
-        form.set_labels(startup.labels.clone());
-        let mut pending = HashMap::new();
-        if let Some(id) = startup.pending_open {
-            pending.insert(id, Pending::Open);
-        }
         let view = config.view.clone();
         let mut app = KdiffApp {
-            client,
+            tab: DocumentTab::new(ctx, 0, client),
+            background: Vec::new(),
+            next_tab_id: 1,
+            new_client: Box::new(new_client),
+            incoming: None,
+            waiting_launches: VecDeque::new(),
+            open_window: None,
+            restart_sender: None,
+            restart: None,
+            close_tab_requested: false,
+            close_confirmation: None,
+            reveal_tab: true,
+            exiting: false,
             config_path,
             config,
             config_writable,
-            form,
-            form_open: true,
-            error: None,
-            status: None,
-            engine_stopped: false,
-            mirror: None,
-            language: LanguageState::default(),
-            panes: PaneState::default(),
-            pending,
             window_enlarged: false,
             settings: None,
             font_scan: FontScan::default(),
@@ -261,16 +348,215 @@ impl KdiffApp {
             update_window: None,
             update_cache: CommonMarkCache::default(),
             dialogs: DialogWindows::default(),
-            inset_prompt: None,
-            eol_prompt: None,
-            heuristics: None,
-            fold_request: None,
-            folds_language: None,
-            output_folds_stale: false,
         };
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         app.apply_view(ctx, &view);
         app
+    }
+
+    pub fn connect_launches(&mut self, incoming: Receiver<OpenRequest>, restart: Sender<PathBuf>) {
+        self.incoming = Some(incoming);
+        self.restart_sender = Some(restart);
+    }
+
+    pub fn set_open_window(&mut self, open_window: impl Fn() -> std::io::Result<()> + 'static) {
+        self.open_window = Some(Box::new(open_window));
+    }
+
+    fn new_tab(&mut self, ctx: &egui::Context) -> std::io::Result<DocumentTab> {
+        let client = (self.new_client)()?;
+        let tab = DocumentTab::new(ctx, self.next_tab_id, client);
+        self.next_tab_id += 1;
+        Ok(tab)
+    }
+
+    fn activate_new_tab(&mut self, ctx: &egui::Context) -> bool {
+        match self.new_tab(ctx) {
+            Ok(tab) => {
+                self.background.push(std::mem::replace(&mut self.tab, tab));
+                self.tab_activated(ctx);
+                true
+            }
+            Err(error) => {
+                self.report_error(format!("Cannot start a new tab: {error}"));
+                false
+            }
+        }
+    }
+
+    fn tab_activated(&mut self, ctx: &egui::Context) {
+        self.reveal_tab = true;
+        ctx.memory_mut(|memory| {
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+        ctx.request_repaint();
+    }
+
+    fn activate_tab(&mut self, ctx: &egui::Context, id: usize) {
+        if let Some(tab) = self.background.iter_mut().find(|tab| tab.id == id) {
+            std::mem::swap(&mut self.tab, tab);
+            self.tab_activated(ctx);
+        }
+    }
+
+    fn tab_ids(&self) -> Vec<usize> {
+        let mut ids: Vec<_> = self.background.iter().map(|tab| tab.id).collect();
+        ids.push(self.tab.id);
+        ids.sort_unstable();
+        ids
+    }
+
+    fn cycle_tab(&mut self, ctx: &egui::Context, forward: bool) {
+        let ids = self.tab_ids();
+        let current = ids.binary_search(&self.tab.id).expect("Tabs: active tab is missing");
+        let next = if forward { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
+        self.activate_tab(ctx, ids[next]);
+    }
+
+    fn close_tab(&mut self, ctx: &egui::Context, id: usize, discard: bool) {
+        if self.background.is_empty() {
+            return;
+        }
+        let index = self.background.iter().position(|tab| tab.id == id);
+        if index.is_none() && id != self.tab.id {
+            return;
+        }
+        let tab = index.map_or(&self.tab, |index| &self.background[index]);
+        if tab.is_saving() {
+            return;
+        }
+        if tab.may_discard_work() && !discard {
+            self.close_confirmation = Some(CloseConfirmation::Tab(id));
+            ctx.request_repaint();
+            return;
+        }
+        if let Some(index) = index {
+            self.background.swap_remove(index).finish();
+        } else {
+            let index = self.background.iter().enumerate()
+                .min_by_key(|(_, tab)| (tab.id < id, tab.id.abs_diff(id)))
+                .map(|(index, _)| index)
+                .expect("Tabs: no replacement tab");
+            let replacement = self.background.swap_remove(index);
+            std::mem::replace(&mut self.tab, replacement).finish();
+            self.tab_activated(ctx);
+        }
+    }
+
+    fn exit(&mut self, ctx: &egui::Context, discard: bool) {
+        if self.exiting {
+            return;
+        }
+        let tabs = || std::iter::once(&self.tab).chain(&self.background);
+        if tabs().any(DocumentTab::is_saving) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
+        if tabs().any(DocumentTab::may_discard_work) && !discard {
+            self.close_confirmation = Some(CloseConfirmation::Window);
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.request_repaint();
+            return;
+        }
+        self.exiting = true;
+        self.tab.finish();
+        for tab in &mut self.background {
+            tab.finish();
+        }
+        if let Some(exe) = self.restart.take() && let Some(sender) = &self.restart_sender {
+            let _ = sender.send(exe);
+        }
+        if discard || !ctx.input(|input| input.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    fn tab_switch_blocked(&self) -> bool {
+        self.close_confirmation.is_some() || self.settings.is_some() || self.update_window.is_some() || self.tab.inset_prompt.is_some() || self.tab.eol_prompt.is_some()
+            || self.tab.heuristics.is_some()
+    }
+
+    fn show_close_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(confirmation) = self.close_confirmation else { return };
+        let (title, message) = match confirmation {
+            CloseConfirmation::Tab(_) => ("Close tab?", "This tab has unsaved merge changes."),
+            CloseConfirmation::Window => ("Quit Kdiff4?", "There are unsaved merge changes in the open tabs."),
+        };
+        let spec = DialogSpec { id: "close_confirmation", title, width: 340.0, closable: true };
+        let mut discard = false;
+        let mut cancel = false;
+        let closed = self.dialogs.show(ctx, &spec, |ui| {
+            ui.label(message);
+            ui.horizontal(|ui| {
+                discard = ui.button("Discard Changes").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if discard || cancel || closed {
+            self.close_confirmation = None;
+            ctx.request_repaint();
+        }
+        if discard {
+            match confirmation {
+                CloseConfirmation::Tab(id) => self.close_tab(ctx, id, true),
+                CloseConfirmation::Window => self.exit(ctx, true),
+            }
+        }
+    }
+
+    pub fn receive_launches(&mut self, ctx: &egui::Context) {
+        let mut raise_window = false;
+        if let Some(incoming) = &self.incoming {
+            for request in incoming.try_iter() {
+                raise_window = true;
+                self.waiting_launches.push_back(request);
+            }
+        }
+        if raise_window {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        while !self.tab_switch_blocked() {
+            let Some(request) = self.waiting_launches.pop_front() else {
+                break;
+            };
+            let (on_close, on_dispatch, last_dir) = match request.completion {
+                OpenCompletion::TabClosed(result) => (Some(result), None, None),
+                OpenCompletion::Dispatched { result, last_dir } => (None, Some(result), last_dir),
+            };
+            if !self.tab.is_blank() && !self.activate_new_tab(ctx) {
+                if let Some(completion) = on_close.or(on_dispatch) {
+                    let _ = completion.send(false);
+                }
+                continue;
+            }
+            self.set_last_dir(last_dir);
+            self.tab.completion = on_close;
+            let dispatched = match request.document {
+                OpenDocument::Open(files) => {
+                    self.tab.required_output = files.output.clone();
+                    self.tab.form.set_files(&files);
+                    self.open_files(files)
+                }
+                OpenDocument::Prefill(paths, labels) => {
+                    for (document, path) in paths {
+                        if document == Document::D {
+                            self.tab.required_output = Some(path.clone());
+                        }
+                        self.tab.form.set_path(document, &path);
+                    }
+                    self.tab.form.set_labels(labels);
+                    true
+                }
+            };
+            if let Some(completion) = on_dispatch {
+                let _ = completion.send(dispatched);
+            }
+            self.reveal_tab = true;
+        }
     }
 
     /// Applies the theme, fonts and styles; reloads the font only when the family changed.
@@ -423,15 +709,10 @@ Shortcut: {}", link.display()),
 
     fn finish_install(&mut self, ctx: &egui::Context, exe: &Path, result: Result<(), UpdateError>) {
         match result {
-            Ok(()) => match self_update::relaunch(exe, std::env::args_os().skip(1).collect()) {
-                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                Err(error) => {
-                    self.update_window = Some(UpdateWindow::Message {
-                        title: "Update Installed".to_string(),
-                        text: format!("The new version is installed, but it did not start: {error}. Start Kdiff4 again by hand."),
-                    });
-                }
-            },
+            Ok(()) => {
+                self.restart = Some(exe.to_path_buf());
+                self.exit(ctx, false);
+            }
             Err(UpdateError::Canceled) => {}
             Err(error) => self.update_message("Update Failed", &error),
         }
@@ -440,7 +721,7 @@ Shortcut: {}", link.display()),
     fn show_update_window(&mut self, ctx: &egui::Context) {
         self.poll_update_check();
         self.poll_shortcut_install();
-        let has_unsaved_changes = self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.modified);
+        let has_unsaved_changes = self.tab.may_discard_work() || self.background.iter().any(DocumentTab::may_discard_work);
         let mut choice = None;
         let mut finished = None;
         let mut dismissed = false;
@@ -520,7 +801,7 @@ Shortcut: {}", link.display()),
     fn open_settings(&mut self, ctx: &egui::Context) {
         if self.settings.is_none() {
             self.font_scan.start(ctx);
-            let options = self.mirror.as_ref().map(Mirror::options);
+            let options = self.tab.mirror.as_ref().map(Mirror::options);
             self.settings = Some(SettingsDialog::new(&self.config.view, options));
         }
     }
@@ -583,9 +864,9 @@ Shortcut: {}", link.display()),
 
     /// Sends a command and remembers what it was for. Returns `None` if the engine is gone.
     fn send(&mut self, command: Command, kind: Pending) -> Option<RequestId> {
-        match self.client.send(command) {
+        match self.tab.client.send(command) {
             Ok(id) => {
-                self.pending.insert(id.clone(), kind);
+                self.tab.pending.insert(id.clone(), kind);
                 Some(id)
             }
             Err(error) => {
@@ -597,32 +878,42 @@ Shortcut: {}", link.display()),
 
     fn report_error(&mut self, text: String) {
         log::error!("{text}");
-        if self.mirror.is_some() {
-            self.status = Some(Status { text, is_error: true });
+        if self.tab.mirror.is_some() {
+            self.tab.status = Some(Status { text, is_error: true });
         } else {
-            self.error = Some(text);
+            self.tab.error = Some(text);
         }
     }
 
     fn is_opening(&self) -> bool {
-        self.pending.values().any(|kind| *kind == Pending::Open)
+        self.tab.pending.values().any(|kind| *kind == Pending::Open)
     }
 
     fn request_resync(&mut self) {
-        if let Some(mirror) = self.mirror.as_mut() {
+        if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.resync_requested();
         }
         self.send(Command::Resync, Pending::Resync);
     }
 
-    fn drain_messages(&mut self, ctx: &egui::Context) {
-        while !self.engine_stopped {
-            match self.client.try_recv() {
+    fn drain_messages(&mut self, ctx: &egui::Context, foreground: bool) {
+        if foreground {
+            for response in std::mem::take(&mut self.tab.deferred_responses) {
+                self.handle_response(response.id, response.result);
+            }
+        }
+        while !self.tab.engine_stopped {
+            match self.tab.client.try_recv() {
+                Ok(Some(HostMessage::Response(response)))
+                    if !foreground && response.result.as_ref().is_err_and(|error| error.kind == ErrorKind::NeedsConfirmation) =>
+                {
+                    self.tab.deferred_responses.push(response);
+                }
                 Ok(Some(message)) => self.handle_message(ctx, message),
                 Ok(None) => break,
                 Err(error) => {
-                    self.engine_stopped = true;
-                    self.pending.clear();
+                    self.tab.engine_stopped = true;
+                    self.tab.pending.clear();
                     self.report_error(format!("The engine stopped: {error}"));
                 }
             }
@@ -630,42 +921,41 @@ Shortcut: {}", link.display()),
     }
 
     fn handle_message(&mut self, ctx: &egui::Context, message: HostMessage) {
-        self.panes.find.stale = true;
+        self.tab.panes.find.stale = true;
         match message {
             HostMessage::Event(Event::Snapshot(snapshot)) => {
                 let opening = self.is_opening();
                 let initial_region = snapshot.current_region.clone();
                 if opening {
-                    self.panes = PaneState {
-                        merge_fraction: self.panes.merge_fraction.clone(),
+                    self.tab.panes = PaneState {
+                        merge_fraction: self.tab.panes.merge_fraction.clone(),
                         ..PaneState::default()
                     };
-                    self.status = None;
+                    self.tab.status = None;
                 }
-                if let Some(dialog) = self.heuristics.as_mut() {
+                if let Some(dialog) = self.tab.heuristics.as_mut() {
                     dialog.forget_proposal();
                 }
                 let mut mirror = Mirror::from_snapshot(snapshot, self.view().align_output);
-                if let Some(previous) = self.mirror.as_ref() {
+                if let Some(previous) = self.tab.mirror.as_ref() {
                     mirror.keep_folds_from(previous);
                 }
-                self.language.follow(&mirror);
-                self.mirror = Some(mirror);
-                self.folds_language = None;
-                self.panes.void_row = None;
+                self.tab.language.follow(&mirror);
+                self.tab.mirror = Some(mirror);
+                self.tab.folds_language = None;
+                self.tab.panes.void_row = None;
                 if opening && let Some(region) = initial_region {
                     self.jump_to(region);
                 }
-                self.form_open = false;
-                self.error = None;
+                self.tab.error = None;
                 if !self.window_enlarged {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
                     self.window_enlarged = true;
                 }
             }
             HostMessage::Event(Event::Delta(delta)) => {
-                let from_undo = delta.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::UndoRedo));
-                let chosen_region = match delta.cause.as_ref().and_then(|cause| self.pending.get(cause)) {
+                let from_undo = delta.cause.as_ref().is_some_and(|cause| self.tab.pending.get(cause) == Some(&Pending::UndoRedo));
+                let chosen_region = match delta.cause.as_ref().and_then(|cause| self.tab.pending.get(cause)) {
                     Some(Pending::Choose(region)) => region.clone(),
                     _ => None,
                 };
@@ -678,7 +968,7 @@ Shortcut: {}", link.display()),
                     _ => None,
                 };
                 let edits_output = matches!(delta.change, Change::OutputEdited { .. });
-                let outcome = match self.mirror.as_mut() {
+                let outcome = match self.tab.mirror.as_mut() {
                     Some(mirror) => mirror.apply_delta(delta),
                     None => DeltaOutcome::Ignored,
                 };
@@ -688,52 +978,52 @@ Shortcut: {}", link.display()),
                         self.request_resync();
                     }
                     DeltaOutcome::Applied => {
-                        self.output_folds_stale |= edits_output;
+                        self.tab.output_folds_stale |= edits_output;
                         if let Some(offset) = changed_end
-                            && let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, Document::D))
+                            && let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, Document::D))
                         {
-                            self.panes.set_caret(Document::D, Cursor::at(editing::position_of(lines, offset)), None);
-                            self.panes.reveal_caret = true;
+                            self.tab.panes.set_caret(Document::D, Cursor::at(editing::position_of(lines, offset)), None);
+                            self.tab.panes.reveal_caret = true;
                         }
                         if let Some(region) = chosen_region {
                             self.keep_caret_in_region(region);
                         }
                         if let Some(number) = asked {
-                            self.inset_prompt = self.mirror.as_ref().and_then(|mirror| mirror.alignments().insets.iter().find(|choice| choice.number == number).cloned());
+                            self.tab.inset_prompt = self.tab.mirror.as_ref().and_then(|mirror| mirror.alignments().insets.iter().find(|choice| choice.number == number).cloned());
                         }
                     }
                     DeltaOutcome::Ignored => {}
                 }
             }
             HostMessage::Event(Event::CurrentRegion(current)) => {
-                let applied = self.mirror.as_mut().is_some_and(|mirror| mirror.apply_current_region(&current));
-                let selected = current.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::SelectRegion));
+                let applied = self.tab.mirror.as_mut().is_some_and(|mirror| mirror.apply_current_region(&current));
+                let selected = current.cause.as_ref().is_some_and(|cause| self.tab.pending.get(cause) == Some(&Pending::SelectRegion));
                 if !selected
                     && let Some(cause) = current.cause.as_ref()
-                    && let Some(kind) = self.pending.get_mut(cause)
+                    && let Some(kind) = self.tab.pending.get_mut(cause)
                 {
                     *kind = Pending::Navigated;
                 }
                 if applied && let Some(region) = current.region {
                     if selected {
-                        self.panes.jump = Some(region);
+                        self.tab.panes.jump = Some(region);
                     } else {
                         self.jump_to(region);
                     }
                 }
             }
             HostMessage::Event(Event::HeuristicProposal(proposal)) => {
-                let asked = proposal.cause.as_ref().is_some_and(|cause| self.pending.get(cause) == Some(&Pending::HeuristicPropose));
-                if asked && let Some(dialog) = self.heuristics.as_mut() {
+                let asked = proposal.cause.as_ref().is_some_and(|cause| self.tab.pending.get(cause) == Some(&Pending::HeuristicPropose));
+                if asked && let Some(dialog) = self.tab.heuristics.as_mut() {
                     dialog.set_proposal(proposal);
                 }
             }
             HostMessage::Event(Event::FoldRanges(found)) => {
-                if found.cause.is_some() && found.cause == self.fold_request {
-                    self.fold_request = None;
+                if found.cause.is_some() && found.cause == self.tab.fold_request {
+                    self.tab.fold_request = None;
                 }
-                if let Some(mirror) = self.mirror.as_mut() {
-                    self.output_folds_stale |= mirror.set_fold_ranges(found);
+                if let Some(mirror) = self.tab.mirror.as_mut() {
+                    self.tab.output_folds_stale |= mirror.set_fold_ranges(found);
                 }
             }
             HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
@@ -743,28 +1033,28 @@ Shortcut: {}", link.display()),
 
     /// Asks for the fold ranges of every document when the session or its language is new, and for those of D after it changed. One request is in flight at a time.
     fn request_fold_ranges(&mut self) {
-        if self.mirror.is_none() || self.fold_request.is_some() || self.engine_stopped {
+        if self.tab.mirror.is_none() || self.tab.fold_request.is_some() || self.tab.engine_stopped {
             return;
         }
-        let language = self.language.current().name().to_string();
-        let documents = if self.folds_language.as_deref() != Some(language.as_str()) {
+        let language = self.tab.language.current().name().to_string();
+        let documents = if self.tab.folds_language.as_deref() != Some(language.as_str()) {
             Document::ALL.to_vec()
-        } else if self.output_folds_stale {
+        } else if self.tab.output_folds_stale {
             vec![Document::D]
         } else {
             return;
         };
-        self.folds_language = Some(language.clone());
-        self.output_folds_stale = false;
-        self.fold_request = self.send(Command::FindFoldRanges { language, documents }, Pending::FoldRanges);
+        self.tab.folds_language = Some(language.clone());
+        self.tab.output_folds_stale = false;
+        self.tab.fold_request = self.send(Command::FindFoldRanges { language, documents }, Pending::FoldRanges);
     }
 
 
     /// The pane folding acts on: the one with the caret, or else the scroll leader.
     fn fold_pane(&self) -> Document {
-        match self.panes.caret {
+        match self.tab.panes.caret {
             Some((document, _)) => document,
-            None => self.panes.scroll_leader(self.mirror.as_ref().is_some_and(|mirror| mirror.is_aligned())),
+            None => self.tab.panes.scroll_leader(self.tab.mirror.as_ref().is_some_and(|mirror| mirror.is_aligned())),
         }
     }
 
@@ -772,12 +1062,12 @@ Shortcut: {}", link.display()),
     /// Folds the innermost range around the caret that is not folded yet, and puts the caret at the end of its header line, before the Fold Ellipsis.
     fn fold_at_caret(&mut self) {
         let document = self.fold_pane();
-        let Some(mirror) = self.mirror.as_mut() else { return };
-        let line = self.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
+        let Some(mirror) = self.tab.mirror.as_mut() else { return };
+        let line = self.tab.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
         let Some(range) = mirror.folds(document.clone()).innermost_unfolded(line) else {
             return;
         };
-        if mirror.change_folds(document.clone(), |folds| folds.fold(range.clone())) && self.panes.caret_in(document.clone()).is_some() {
+        if mirror.change_folds(document.clone(), |folds| folds.fold(range.clone())) && self.tab.panes.caret_in(document.clone()).is_some() {
             self.caret_to_line_end(document, range.start);
         }
     }
@@ -786,8 +1076,8 @@ Shortcut: {}", link.display()),
     /// Unfolds the fold whose header has the caret, or else the innermost fold around it.
     fn unfold_at_caret(&mut self) {
         let document = self.fold_pane();
-        let line = self.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
-        if let Some(mirror) = self.mirror.as_mut() {
+        let line = self.tab.panes.caret_in(document.clone()).map_or(0, |cursor| cursor.head.line);
+        if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.change_folds(document, |folds| folds.unfold_at(line));
         }
     }
@@ -795,7 +1085,7 @@ Shortcut: {}", link.display()),
 
     fn fold_all(&mut self, fold: bool) {
         let document = self.fold_pane();
-        if let Some(mirror) = self.mirror.as_mut() {
+        if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.change_folds(document.clone(), |folds| if fold { folds.fold_all() } else { folds.unfold_all() });
         }
         self.park_caret_out_of_folds(document);
@@ -804,7 +1094,7 @@ Shortcut: {}", link.display()),
 
     /// Folds or unfolds the range whose header is `line`, as its button in the fold column does.
     fn toggle_fold(&mut self, document: Document, line: usize) {
-        let Some(mirror) = self.mirror.as_mut() else { return };
+        let Some(mirror) = self.tab.mirror.as_mut() else { return };
         let folds = mirror.folds(document.clone());
         if folds.is_folded(line) {
             mirror.change_folds(document, |folds| folds.unfold_at(line));
@@ -819,8 +1109,8 @@ Shortcut: {}", link.display()),
 
     /// A fold that now hides the caret in `document` would unfold again at once, so the caret goes to the end of the header of the outermost fold that hides it.
     fn park_caret_out_of_folds(&mut self, document: Document) {
-        let Some(cursor) = self.panes.caret_in(document.clone()) else { return };
-        let header = self.mirror.as_ref().and_then(|mirror| mirror.folds(document.clone()).outermost_hiding(cursor.head.line));
+        let Some(cursor) = self.tab.panes.caret_in(document.clone()) else { return };
+        let header = self.tab.mirror.as_ref().and_then(|mirror| mirror.folds(document.clone()).outermost_hiding(cursor.head.line));
         if let Some(header) = header {
             self.caret_to_line_end(document, header);
         }
@@ -828,111 +1118,112 @@ Shortcut: {}", link.display()),
 
 
     fn caret_to_line_end(&mut self, document: Document, line: usize) {
-        let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) else { return };
+        let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) else { return };
         let position = editing::Position {
             line: line.clone(),
             column: lines.line_chars(line),
         };
-        self.panes.set_caret(document, Cursor::at(position), None);
-        self.panes.reveal_caret = true;
+        self.tab.panes.set_caret(document, Cursor::at(position), None);
+        self.tab.panes.reveal_caret = true;
     }
 
 
     /// The caret entered a fold, by keys, a find or a jump: the folds that hide it unfold. On the closing token shown after a Fold Ellipsis it stays folded.
     fn unfold_around_caret(&mut self) {
-        let Some((document, cursor)) = self.panes.caret else { return };
-        let Some(mirror) = self.mirror.as_mut() else { return };
+        let Some((document, cursor)) = self.tab.panes.caret else { return };
+        let Some(mirror) = self.tab.mirror.as_mut() else { return };
         let line = cursor.head.line;
         let text = lines_of(mirror, document.clone()).map_or("", |lines| lines.line(line));
         if folding::on_shown_closing(mirror.folds(document.clone()), line, text, cursor.head.column) {
             return;
         }
         if mirror.change_folds(document, |folds| folds.reveal(line..line)) {
-            self.panes.void_row = None;
+            self.tab.panes.void_row = None;
         }
     }
 
     /// Scrolls every pane to `region`, with context rows above it, unless every pane already shows all of it, and puts the caret, hidden, at its start in the pane that has it (A when none does).
     fn jump_to(&mut self, region: usize) {
-        if let Some(mirror) = self.mirror.as_mut() {
+        if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.reveal_region(region);
         }
-        self.panes.jump = Some(region);
-        let document = self.panes.caret.map_or(Document::A, |(document, _)| document);
+        self.tab.panes.jump = Some(region);
+        let document = self.tab.panes.caret.map_or(Document::A, |(document, _)| document);
         self.caret_to_region(document, region, true);
     }
 
     /// Puts the caret at the start of `region` in `document`; `hidden` keeps it from being drawn until it moves again.
     fn caret_to_region(&mut self, document: Document, region: usize, hidden: bool) {
-        let target = self.mirror.as_ref().and_then(|mirror| region_start_caret(mirror, document.clone(), region));
+        let target = self.tab.mirror.as_ref().and_then(|mirror| region_start_caret(mirror, document.clone(), region));
         if let Some((cursor, void_row)) = target {
             if hidden {
-                self.panes.set_hidden_caret(document, cursor, void_row);
+                self.tab.panes.set_hidden_caret(document, cursor, void_row);
             } else {
-                self.panes.set_caret(document, cursor, void_row);
+                self.tab.panes.set_caret(document, cursor, void_row);
             }
         }
     }
 
     /// A choice adds or removes the region's output lines, so the caret's line may now belong to a neighbor: puts it back at the region's start, keeping it hidden if it was.
     fn keep_caret_in_region(&mut self, region: usize) {
-        let Some((document, _)) = self.panes.caret.clone() else { return };
-        let hidden = self.panes.caret_hidden;
+        let Some((document, _)) = self.tab.panes.caret.clone() else { return };
+        let hidden = self.tab.panes.caret_hidden;
         self.caret_to_region(document, region, hidden);
     }
 
     fn handle_response(&mut self, id: RequestId, result: Result<(), kdiff4_protocol::ProtocolError>) {
-        let kind = match self.pending.remove(&id) {
+        let kind = match self.tab.pending.remove(&id) {
             Some(kind) => kind,
             None => return,
         };
         let error = match result {
             Ok(()) => {
-                self.status = match kind {
-                    Pending::Save => self.mirror.as_ref().and_then(Mirror::output).and_then(|output| output.path.as_ref()).map(|path| {
+                self.tab.status = match kind {
+                    Pending::Save => self.tab.mirror.as_ref().and_then(Mirror::output).and_then(|output| output.path.clone()).map(|path| {
                         log::info!("saved {}", path.display());
+                        self.tab.saved_output = Some(path.clone());
                         Status {
                             text: format!("Saved {}", path.display()),
                             is_error: false,
                         }
                     }),
-                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion | Pending::SetOutputEol => self.status.take(),
+                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion | Pending::SetOutputEol => self.tab.status.take(),
                     Pending::Navigate(to) => Some(Status {
                         text: format!("No {}", navigation_noun(to)),
                         is_error: false,
                     }),
-                    Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ComparisonOptions => self.mirror.as_ref().map(|mirror| Status {
+                    Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ComparisonOptions => self.tab.mirror.as_ref().map(|mirror| Status {
                         text: mirror.difference_summary(),
                         is_error: false,
                     }),
                     Pending::SetOutputPath => None,
-                    Pending::AlignmentEdit => self.mirror.as_ref().filter(|mirror| mirror.alignments().changed).map(|_| Status {
+                    Pending::AlignmentEdit => self.tab.mirror.as_ref().filter(|mirror| mirror.alignments().changed).map(|_| Status {
                         text: ALIGNMENTS_CHANGED_HINT.to_string(),
                         is_error: false,
                     }),
-                    Pending::Reload => self.mirror.as_ref().map(|mirror| Status {
+                    Pending::Reload => self.tab.mirror.as_ref().map(|mirror| Status {
                         text: format!("Reloaded. {}", mirror.difference_summary()),
                         is_error: false,
                     }),
-                    Pending::ApplyAlignments | Pending::HeuristicApply(..) => self.mirror.as_ref().map(|mirror| Status {
+                    Pending::ApplyAlignments | Pending::HeuristicApply(..) => self.tab.mirror.as_ref().map(|mirror| Status {
                         text: format!("Alignments applied. {}", mirror.difference_summary()),
                         is_error: false,
                     }),
-                    Pending::HeuristicPropose => self.status.take(),
-                    Pending::FoldRanges => self.status.take(),
+                    Pending::HeuristicPropose => self.tab.status.take(),
+                    Pending::FoldRanges => self.tab.status.take(),
                 };
                 return;
             }
             Err(error) => error,
         };
         match kind {
-            Pending::Open => self.error = Some(error.message),
+            Pending::Open => self.tab.error = Some(error.message),
             Pending::FoldRanges => {
-                self.fold_request = None;
+                self.tab.fold_request = None;
                 log::warn!("cannot find the fold ranges: {}", error.message);
             }
             Pending::Edit => {
-                let rejected = self.mirror.as_ref().is_some_and(|mirror| mirror.edit_rejected(&id));
+                let rejected = self.tab.mirror.as_ref().is_some_and(|mirror| mirror.edit_rejected(&id));
                 self.report_error(format!("The engine rejected an edit: {}", error.message));
                 if rejected {
                     self.request_resync();
@@ -961,7 +1252,7 @@ Shortcut: {}", link.display()),
                 }
             }
             Pending::ApplyAlignments => self.report_error(format!("Cannot apply the alignments: {}", error.message)),
-            Pending::HeuristicPropose => match self.heuristics.as_mut() {
+            Pending::HeuristicPropose => match self.tab.heuristics.as_mut() {
                 Some(dialog) => dialog.set_error(error.message),
                 None => self.report_error(format!("Cannot find heuristic alignments: {}", error.message)),
             },
@@ -977,34 +1268,41 @@ Shortcut: {}", link.display()),
     fn handle_form_action(&mut self, action: FormAction) {
         match action {
             FormAction::Browse(document) => {
-                let picked = open_dialog::pick_file(document, self.config.recent.last_dir.as_deref());
-                if let Some(path) = picked {
-                    self.form.set_path(document, &path);
-                    self.remember_dir(&path);
+                if let Some(path) = self.pick_open_path(document) {
+                    self.tab.form.set_path(document, &path);
                 }
             }
-            FormAction::Run => self.run(),
-            FormAction::Cancel => self.form_open = false,
+            FormAction::Run => {
+                if let Some(files) = self.tab.form.confirmed_files() {
+                    self.open_files(files);
+                }
+            }
+            FormAction::Cancel => {}
         }
     }
 
-    fn run(&mut self) {
-        let files = match self.form.files() {
-            Some(files) => files,
-            None => return,
-        };
-        if open_dialog::needs_overwrite_confirmation(&files)
-            && let Some(output) = files.output.as_deref()
-            && !open_dialog::confirm_overwrite(output)
-        {
-            return;
+    fn open_form(&mut self) {
+        if let Some(open_window) = &self.open_window && let Err(error) = open_window() {
+            self.report_error(format!("Cannot start the Open window: {error}"));
         }
-        self.error = None;
-        self.send(Command::Open(files), Pending::Open);
+    }
+
+    fn pick_open_path(&mut self, document: Document) -> Option<PathBuf> {
+        let path = open_dialog::pick_file(document, self.config.recent.last_dir.as_deref())?;
+        self.remember_dir(&path);
+        Some(path)
+    }
+
+    fn open_files(&mut self, files: OpenFiles) -> bool {
+        self.tab.error = None;
+        self.send(Command::Open(files), Pending::Open).is_some()
     }
 
     fn remember_dir(&mut self, picked: &Path) {
-        let dir = open_dialog::remembered_dir(picked);
+        self.set_last_dir(open_dialog::remembered_dir(picked));
+    }
+
+    fn set_last_dir(&mut self, dir: Option<PathBuf>) {
         if dir.is_none() || dir == self.config.recent.last_dir {
             return;
         }
@@ -1014,59 +1312,59 @@ Shortcut: {}", link.display()),
 
     /// The pane the find bar searches: the one with the caret, else the first document.
     fn find_target(&self) -> Option<Document> {
-        self.panes
+        self.tab.panes
             .caret
             .map(|(document, _)| document)
-            .or_else(|| self.mirror.as_ref().and_then(|mirror| mirror.documents().first()).map(|text| text.document))
+            .or_else(|| self.tab.mirror.as_ref().and_then(|mirror| mirror.documents().first()).map(|text| text.document))
     }
 
     /// Shows the find bar with the keyboard, searching for the selected text if it is on one line.
     fn open_find(&mut self) {
-        let selected = self.panes.caret.and_then(|(document, cursor)| {
+        let selected = self.tab.panes.caret.and_then(|(document, cursor)| {
             let (start, end) = cursor.range();
-            let lines = lines_of(self.mirror.as_ref()?, document)?;
+            let lines = lines_of(self.tab.mirror.as_ref()?, document)?;
             let text: String = lines.line(start.line).chars().skip(start.column).take(end.column.saturating_sub(start.column)).collect();
             (start.line == end.line && !text.is_empty()).then_some(text)
         });
         if let Some(text) = selected {
-            self.panes.find.query = text;
+            self.tab.panes.find.query = text;
         }
-        self.panes.find.open = true;
-        self.panes.find.focus = true;
+        self.tab.panes.find.open = true;
+        self.tab.panes.find.focus = true;
     }
 
     /// Finds the matches in the searched pane again if needed, and follows the selection.
     fn refresh_find(&mut self) {
-        if !self.panes.find.open {
+        if !self.tab.panes.find.open {
             return;
         }
         let Some(document) = self.find_target() else { return };
-        let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) else { return };
-        self.panes.find.refresh(document, lines);
-        let selection = self.panes.caret_in(document);
-        self.panes.find.follow(selection);
+        let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) else { return };
+        self.tab.panes.find.refresh(document, lines);
+        let selection = self.tab.panes.caret_in(document);
+        self.tab.panes.find.follow(selection);
     }
 
     fn select_match(&mut self, ctx: &egui::Context, document: Document, index: usize) {
-        let Some(found) = self.panes.find.matches.get(index).copied() else { return };
-        self.panes.set_caret(document, found.cursor(), None);
-        self.panes.strip_focused = false;
-        self.panes.reveal_caret = true;
-        self.panes.find.current = Some(index);
+        let Some(found) = self.tab.panes.find.matches.get(index).copied() else { return };
+        self.tab.panes.set_caret(document, found.cursor(), None);
+        self.tab.panes.strip_focused = false;
+        self.tab.panes.reveal_caret = true;
+        self.tab.panes.find.current = Some(index);
         ctx.request_repaint();
     }
 
     /// Goes to the next or previous match in the pane with the caret. With nothing to search for, opens the find bar.
     fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
-        if self.panes.find.query.is_empty() {
+        if self.tab.panes.find.query.is_empty() {
             self.open_find();
             return;
         }
-        self.panes.find.open = true;
+        self.tab.panes.find.open = true;
         self.refresh_find();
-        let Some(document) = self.panes.find.document else { return };
-        let cursor = self.panes.caret_in(document).unwrap_or_default();
-        let matches = &self.panes.find.matches;
+        let Some(document) = self.tab.panes.find.document else { return };
+        let cursor = self.tab.panes.caret_in(document).unwrap_or_default();
+        let matches = &self.tab.panes.find.matches;
         let index = if forward { find::next_after(matches, cursor) } else { find::previous_before(matches, cursor) };
         if let Some(index) = index {
             self.select_match(ctx, document, index);
@@ -1077,37 +1375,37 @@ Shortcut: {}", link.display()),
         match event {
             FindEvent::Changed => {
                 self.refresh_find();
-                let Some(document) = self.panes.find.document else { return };
-                let from = self.panes.caret_in(document).map_or_else(Position::default, |cursor| cursor.range().0);
-                if let Some(index) = find::first_from(&self.panes.find.matches, from) {
+                let Some(document) = self.tab.panes.find.document else { return };
+                let from = self.tab.panes.caret_in(document).map_or_else(Position::default, |cursor| cursor.range().0);
+                if let Some(index) = find::first_from(&self.tab.panes.find.matches, from) {
                     self.select_match(ctx, document, index);
                 }
             }
             FindEvent::Next => self.find_step(ctx, true),
             FindEvent::Previous => self.find_step(ctx, false),
             FindEvent::Close => {
-                self.panes.find.open = false;
-                self.panes.find.clear();
+                self.tab.panes.find.open = false;
+                self.tab.panes.find.clear();
             }
         }
     }
 
     fn is_merge(&self) -> bool {
-        self.mirror.as_ref().is_some_and(Mirror::is_merge)
+        self.tab.mirror.as_ref().is_some_and(Mirror::is_merge)
     }
 
     /// The sources disagree on the line ending style and nobody has chosen one for the output.
     fn eol_conflicts(&self) -> bool {
-        self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.eol == EolChoice::Conflict)
+        self.tab.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.eol == EolChoice::Conflict)
     }
 
     /// Without an output path, Save asks for one like Save As.
     fn save(&mut self) {
-        let has_path = self.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.path.is_some());
+        let has_path = self.tab.mirror.as_ref().and_then(Mirror::output).is_some_and(|output| output.path.is_some());
         if !has_path {
             self.save_as();
         } else if self.eol_conflicts() {
-            self.eol_prompt = Some(PendingSave::Save);
+            self.tab.eol_prompt = Some(PendingSave::Save);
         } else {
             self.send(Command::Save, Pending::Save);
         }
@@ -1121,7 +1419,7 @@ Shortcut: {}", link.display()),
         if let Some(path) = open_dialog::pick_file(Document::D, self.config.recent.last_dir.as_deref()) {
             self.remember_dir(&path);
             if self.eol_conflicts() {
-                self.eol_prompt = Some(PendingSave::SaveAs(path));
+                self.tab.eol_prompt = Some(PendingSave::SaveAs(path));
             } else {
                 self.send(Command::SaveAs(path), Pending::Save);
             }
@@ -1130,51 +1428,51 @@ Shortcut: {}", link.display()),
 
     fn handle_pane_action(&mut self, ctx: &egui::Context, action: PaneAction) {
         match action {
-            PaneAction::FocusStrip => self.panes.strip_focused = true,
+            PaneAction::FocusStrip => self.tab.panes.strip_focused = true,
             PaneAction::Press {
                 document,
                 position,
                 void_row,
                 extend,
             } => {
-                self.panes.strip_focused = false;
-                let cursor = match self.panes.caret {
+                self.tab.panes.strip_focused = false;
+                let cursor = match self.tab.panes.caret {
                     Some((current, cursor)) if extend && current == document => Cursor {
                         anchor: cursor.anchor,
                         head: position,
                     },
                     _ => Cursor::at(position),
                 };
-                self.panes.set_caret(document, cursor, void_row);
-                self.panes.reveal_caret = false;
+                self.tab.panes.set_caret(document, cursor, void_row);
+                self.tab.panes.reveal_caret = false;
                 if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
             }
             PaneAction::SelectWord(document, position) => {
-                self.panes.strip_focused = false;
-                if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-                    self.panes.set_caret(document, editing::word_at(lines, position), None);
+                self.tab.panes.strip_focused = false;
+                if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
+                    self.tab.panes.set_caret(document, editing::word_at(lines, position), None);
                 }
             }
             PaneAction::SelectLineText(document, line) => {
-                self.panes.strip_focused = false;
-                if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-                    self.panes.set_caret(document, editing::line_text_at(lines, line), None);
+                self.tab.panes.strip_focused = false;
+                if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
+                    self.tab.panes.set_caret(document, editing::line_text_at(lines, line), None);
                 }
             }
             PaneAction::SelectLine(document, line) => {
-                self.panes.strip_focused = false;
-                if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-                    self.panes.set_caret(document, editing::line_at(lines, line), None);
+                self.tab.panes.strip_focused = false;
+                if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
+                    self.tab.panes.set_caret(document, editing::line_at(lines, line), None);
                 }
             }
             PaneAction::Drag { document, position, void_row } => {
-                if let Some((current, cursor)) = self.panes.caret
+                if let Some((current, cursor)) = self.tab.panes.caret
                     && current == document
-                    && (cursor.head != position || self.panes.void_row != void_row)
+                    && (cursor.head != position || self.tab.panes.void_row != void_row)
                 {
-                    self.panes.set_caret(
+                    self.tab.panes.set_caret(
                         document,
                         Cursor {
                             anchor: cursor.anchor,
@@ -1182,17 +1480,17 @@ Shortcut: {}", link.display()),
                         },
                         void_row,
                     );
-                    self.panes.reveal_caret = true;
+                    self.tab.panes.reveal_caret = true;
                 }
             }
             PaneAction::SelectRegion(document, region) => {
-                self.panes.strip_focused = false;
+                self.tab.panes.strip_focused = false;
                 self.caret_to_region(document, region, false);
-                self.panes.reveal_caret = false;
+                self.tab.panes.reveal_caret = false;
                 if let Some(focused) = ctx.memory(|memory| memory.focused()) {
                     ctx.memory_mut(|memory| memory.surrender_focus(focused));
                 }
-                if let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) {
+                if let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::navigation_base) {
                     self.send(Command::SetCurrentRegion { base, region: Some(region) }, Pending::SelectRegion);
                 }
             }
@@ -1244,11 +1542,11 @@ Shortcut: {}", link.display()),
 
     /// Keys go to the pane with the caret, unless a text field or dialog has the keyboard.
     fn handle_pane_keys(&mut self, ctx: &egui::Context) {
-        let document = match self.panes.caret {
+        let document = match self.tab.panes.caret {
             Some((document, _)) => document,
             None => return,
         };
-        if self.mirror.is_none() || self.settings.is_some() || self.update_window.is_some() || self.eol_prompt.is_some() || self.form_open || ctx.text_edit_focused() {
+        if self.tab.mirror.is_none() || self.close_confirmation.is_some() || self.settings.is_some() || self.update_window.is_some() || self.tab.eol_prompt.is_some() || ctx.text_edit_focused() {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
@@ -1263,9 +1561,9 @@ Shortcut: {}", link.display()),
                 egui::Event::Key {
                     key, pressed: true, modifiers, ..
                 } => {
-                    if self.panes.strip_focused && modifiers.is_none() && matches!(key, Key::ArrowUp | Key::ArrowDown) {
+                    if self.tab.panes.strip_focused && modifiers.is_none() && matches!(key, Key::ArrowUp | Key::ArrowDown) {
                         self.move_strip_line(if key == Key::ArrowUp { -1 } else { 1 });
-                    } else if let Some(motion) = motion_for(key, modifiers, self.panes.page_rows) {
+                    } else if let Some(motion) = motion_for(key, modifiers, self.tab.panes.page_rows) {
                         self.move_caret(motion, modifiers.shift);
                     } else if document == Document::D
                         && let Some(edit_key) = edit_key_for(key, modifiers)
@@ -1278,7 +1576,7 @@ Shortcut: {}", link.display()),
                 egui::Event::Copy => self.copy_selection(ctx),
                 egui::Event::Cut => {
                     self.copy_selection(ctx);
-                    if document == Document::D && self.panes.caret.is_some_and(|(_, cursor)| cursor.has_selection()) {
+                    if document == Document::D && self.tab.panes.caret.is_some_and(|(_, cursor)| cursor.has_selection()) {
                         self.edit_output(EditKey::Delete);
                     }
                 }
@@ -1289,23 +1587,23 @@ Shortcut: {}", link.display()),
 
     /// Moves the caret to the next line of the overview strip above (`direction` -1) or below (1), keeping its column.
     fn move_strip_line(&mut self, direction: isize) {
-        let Some(mirror) = self.mirror.as_ref() else { return };
-        let Some((document, position, void_row)) = overview::neighbor_press(mirror, &self.panes, direction) else {
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
+        let Some((document, position, void_row)) = overview::neighbor_press(mirror, &self.tab.panes, direction) else {
             return;
         };
         let Some(lines) = lines_of(mirror, document.clone()) else { return };
         let position = editing::clamp(lines, position);
-        self.panes.set_caret(document, Cursor::at(position), void_row);
-        self.panes.reveal_caret = true;
+        self.tab.panes.set_caret(document, Cursor::at(position), void_row);
+        self.tab.panes.reveal_caret = true;
     }
 
     /// Moves the caret; `extend` (Shift) grows or shrinks the selection instead of dropping it.
     fn move_caret(&mut self, motion: Motion, extend: bool) {
-        let (document, cursor) = match self.panes.caret {
+        let (document, cursor) = match self.tab.panes.caret {
             Some(caret) => caret,
             None => return,
         };
-        let mirror = match self.mirror.as_ref() {
+        let mirror = match self.tab.mirror.as_ref() {
             Some(mirror) => mirror,
             None => return,
         };
@@ -1315,67 +1613,67 @@ Shortcut: {}", link.display()),
         };
         let caret = Caret {
             cursor,
-            void_row: self.panes.void_row.clone(),
+            void_row: self.tab.panes.void_row.clone(),
         };
         let mut moved = move_by_rows(lines, rows, caret.clone(), motion.clone(), extend);
-        if self.panes.strip_focused && !overview::stays_on_rows(mirror, &self.panes, document.clone(), moved.0, moved.1.clone()) {
+        if self.tab.panes.strip_focused && !overview::stays_on_rows(mirror, &self.tab.panes, document.clone(), moved.0, moved.1.clone()) {
             let fallback = match motion {
                 Motion::Right | Motion::WordRight => Motion::LineEnd,
                 Motion::Left | Motion::WordLeft => Motion::LineStart,
                 _ => return,
             };
             moved = move_by_rows(lines, rows, caret, fallback, extend);
-            if !overview::stays_on_rows(mirror, &self.panes, document.clone(), moved.0, moved.1.clone()) {
+            if !overview::stays_on_rows(mirror, &self.tab.panes, document.clone(), moved.0, moved.1.clone()) {
                 return;
             }
         }
-        self.panes.set_caret(document, moved.0, moved.1);
-        self.panes.reveal_caret = true;
+        self.tab.panes.set_caret(document, moved.0, moved.1);
+        self.tab.panes.reveal_caret = true;
     }
 
     fn select_all(&mut self) {
-        let document = match self.panes.caret {
+        let document = match self.tab.panes.caret {
             Some((document, _)) => document,
             None => return,
         };
-        if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
-            let selection = match self.panes.caret {
-                Some((_, cursor)) if self.panes.strip_focused => editing::line_text_at(lines, cursor.head.line),
+        if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())) {
+            let selection = match self.tab.panes.caret {
+                Some((_, cursor)) if self.tab.panes.strip_focused => editing::line_text_at(lines, cursor.head.line),
                 _ => editing::select_all(lines),
             };
-            self.panes.set_caret(document, selection, None);
+            self.tab.panes.set_caret(document, selection, None);
         }
     }
 
     fn copy_selection(&self, ctx: &egui::Context) {
-        let (document, cursor) = match self.panes.caret {
+        let (document, cursor) = match self.tab.panes.caret {
             Some(caret) => caret,
             None => return,
         };
         if !cursor.has_selection() {
             return;
         }
-        if let Some(lines) = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) {
+        if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) {
             ctx.copy_text(editing::selected_text(lines, cursor));
         }
     }
 
     /// Applies a key to D locally at once and sends the edit to the engine.
     fn edit_output(&mut self, key: EditKey) {
-        self.panes.find.stale = true;
-        let cursor = match self.panes.caret {
+        self.tab.panes.find.stale = true;
+        let cursor = match self.tab.panes.caret {
             Some((Document::D, cursor)) => cursor,
             _ => return,
         };
-        let mirror = match self.mirror.as_mut() {
+        let mirror = match self.tab.mirror.as_mut() {
             Some(mirror) => mirror,
             None => return,
         };
         let Some(output) = mirror.output() else { return };
-        if self.panes.strip_focused && changes_line_structure(output.lines(), cursor, self.panes.void_row.is_some(), &key) {
+        if self.tab.panes.strip_focused && changes_line_structure(output.lines(), cursor, self.tab.panes.void_row.is_some(), &key) {
             return;
         }
-        let target = match self.panes.void_row {
+        let target = match self.tab.panes.void_row {
             Some(row) if !cursor.has_selection() && cursor.head.column == 0 => mirror.empty_region_at_row(row),
             _ => None,
         };
@@ -1391,10 +1689,10 @@ Shortcut: {}", link.display()),
             Some(command) => command,
             None => return,
         };
-        self.panes.set_caret(Document::D, Cursor::at(caret), None);
-        self.panes.reveal_caret = true;
+        self.tab.panes.set_caret(Document::D, Cursor::at(caret), None);
+        self.tab.panes.reveal_caret = true;
         if let Some(id) = self.send(Command::EditOutput(command), Pending::Edit)
-            && let Some(mirror) = self.mirror.as_mut()
+            && let Some(mirror) = self.tab.mirror.as_mut()
         {
             mirror.edit_sent(id);
         }
@@ -1402,20 +1700,20 @@ Shortcut: {}", link.display()),
 
     /// The region of the row the caret is on, in any pane.
     fn caret_region(&self) -> Option<usize> {
-        let (document, cursor) = self.panes.caret?;
-        let rows = rows_of(self.mirror.as_ref()?, document)?;
+        let (document, cursor) = self.tab.panes.caret?;
+        let rows = rows_of(self.tab.mirror.as_ref()?, document)?;
         rows.region_of_row(text_view::caret_row(
             rows,
             Caret {
                 cursor,
-                void_row: self.panes.void_row.clone(),
+                void_row: self.tab.panes.void_row.clone(),
             },
         ))
     }
 
     /// Asks the engine to move the current region from the caret's region.
     fn navigate(&mut self, to: Navigation) {
-        let Some(base) = self.mirror.as_ref().and_then(Mirror::navigation_base) else { return };
+        let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::navigation_base) else { return };
         let from = self.caret_region();
         let include_alignments = self.view().alignment_stops;
         self.send(
@@ -1431,38 +1729,38 @@ Shortcut: {}", link.display()),
 
     /// Toggles `document` in the region of the row with the caret, in any pane.
     fn choose_current(&mut self, document: Document) {
-        if self.panes.caret.is_none() {
+        if self.tab.panes.caret.is_none() {
             self.report_error("Put the caret in a region to choose for it".to_string());
             return;
         }
-        let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
+        let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::choice_base) else { return };
         let Some(region) = self.caret_region() else {
             self.report_error("The caret is not in a region".to_string());
             return;
         };
-        let Some(mirror) = self.mirror.as_ref() else { return };
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
         let Some(choice) = mirror.toggled_choice(region, document) else { return };
         self.send(Command::SetChoice { base, region, choice }, Pending::Choose(Some(region)));
     }
 
     fn choose_for_unresolved(&mut self, document: Document) {
-        let Some(base) = self.mirror.as_ref().and_then(Mirror::choice_base) else { return };
+        let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::choice_base) else { return };
         self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose(None));
     }
 
     /// Marks the lines the selection touches in A, B or C.
     fn mark_selected_lines(&mut self) {
-        let Some((document, cursor)) = self.panes.caret else {
+        let Some((document, cursor)) = self.tab.panes.caret else {
             self.report_error("Select lines in A, B or C to mark them for alignment".to_string());
             return;
         };
-        let count = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())).map_or(0, |lines| lines.count());
-        let lines = if document == Document::D || self.panes.void_row.is_some() {
+        let count = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())).map_or(0, |lines| lines.count());
+        let lines = if document == Document::D || self.tab.panes.void_row.is_some() {
             None
         } else {
             editing::selected_lines(cursor, count)
         };
-        let lines = match (lines, self.mirror.as_ref()) {
+        let lines = match (lines, self.tab.mirror.as_ref()) {
             (Some(lines), Some(mirror)) => Some(through_folds(mirror.folds(document.clone()), lines)),
             (lines, _) => lines,
         };
@@ -1476,7 +1774,7 @@ Shortcut: {}", link.display()),
 
     /// An anchor before the line with the caret in A, B or C; with the caret past the last line, at the end of the text.
     fn mark_anchor_at_caret(&mut self) {
-        let Some((document, cursor)) = self.panes.caret else {
+        let Some((document, cursor)) = self.tab.panes.caret else {
             self.report_error("Put the caret in A, B or C to mark an anchor".to_string());
             return;
         };
@@ -1484,13 +1782,13 @@ Shortcut: {}", link.display()),
             self.report_error("Put the caret in A, B or C to mark an anchor".to_string());
             return;
         }
-        let count = self.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())).map_or(0, |lines| lines.count());
+        let count = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone())).map_or(0, |lines| lines.count());
         self.mark_anchor(document, cursor.head.line.min(count));
     }
 
     /// The function or method around the caret's line in A, B or C, from its signature to its closing line.
     fn mark_function_at_caret(&mut self) {
-        let Some((document, cursor)) = self.panes.caret.clone() else {
+        let Some((document, cursor)) = self.tab.panes.caret.clone() else {
             self.report_error("Put the caret in a function in A, B or C to mark it".to_string());
             return;
         };
@@ -1498,7 +1796,7 @@ Shortcut: {}", link.display()),
             self.report_error("Put the caret in a function in A, B or C to mark it".to_string());
             return;
         }
-        let language = self.language.current().name().to_string();
+        let language = self.tab.language.current().name().to_string();
         self.send(Command::MarkFunctionAlignment { document, line: cursor.head.line.clone(), language }, Pending::AlignmentEdit);
     }
 
@@ -1514,10 +1812,10 @@ Shortcut: {}", link.display()),
     }
 
     fn apply_alignments(&mut self) {
-        if self.mirror.as_ref().is_some_and(|mirror| mirror.alignments().changed) {
+        if self.tab.mirror.as_ref().is_some_and(|mirror| mirror.alignments().changed) {
             self.send(Command::ApplyAlignments { confirmed: false }, Pending::ApplyAlignments);
         } else {
-            self.status = Some(Status {
+            self.tab.status = Some(Status {
                 text: "The marks give the alignments already applied".to_string(),
                 is_error: false,
             });
@@ -1532,8 +1830,8 @@ Shortcut: {}", link.display()),
 
     /// Opens the Heuristics Alignment window for what lies inside the innermost applied alignment around the caret.
     fn open_heuristics_inside(&mut self) {
-        let number = match (self.panes.caret, self.mirror.as_ref()) {
-            (Some((document, cursor)), Some(mirror)) if document != Document::D && self.panes.void_row.is_none() => {
+        let number = match (self.tab.panes.caret, self.tab.mirror.as_ref()) {
+            (Some((document, cursor)), Some(mirror)) if document != Document::D && self.tab.panes.void_row.is_none() => {
                 innermost_applied_alignment(mirror.alignments(), document, cursor.head.line, mirror.documents().len().min(3))
             }
             _ => None,
@@ -1546,14 +1844,14 @@ Shortcut: {}", link.display()),
 
 
     fn open_heuristics_window(&mut self, within: Option<u32>) {
-        let Some(mirror) = self.mirror.as_ref() else { return };
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
         let options = HeuristicOptions {
             extractor: self.view().heuristic_extractor.clone(),
             ..self.config.heuristics.clone()
         };
         let documents = mirror.documents().len().min(3);
-        let dialog = HeuristicsDialog::new(options, self.language.current().name(), documents);
-        self.heuristics = Some(match within {
+        let dialog = HeuristicsDialog::new(options, self.tab.language.current().name(), documents);
+        self.tab.heuristics = Some(match within {
             Some(number) => dialog.inside(number),
             None => dialog,
         });
@@ -1562,7 +1860,7 @@ Shortcut: {}", link.display()),
 
 
     fn find_heuristic_matches(&mut self) {
-        let Some(dialog) = self.heuristics.as_mut() else { return };
+        let Some(dialog) = self.tab.heuristics.as_mut() else { return };
         dialog.start_search();
         let command = Command::ProposeHeuristicAlignments {
             language: dialog.language().to_string(),
@@ -1574,7 +1872,7 @@ Shortcut: {}", link.display()),
 
 
     fn show_heuristics(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = self.heuristics.as_mut() else { return };
+        let Some(dialog) = self.tab.heuristics.as_mut() else { return };
         let mut action = None;
         let spec = DialogSpec { id: "heuristics_dialog", title: "Heuristics Alignment", width: heuristics_dialog::DIALOG_WIDTH, closable: true };
         let closed = self.dialogs.show(ctx, &spec, |ui| action = dialog.show(ui));
@@ -1588,10 +1886,10 @@ Shortcut: {}", link.display()),
         match action {
             HeuristicsAction::Find => self.find_heuristic_matches(),
             HeuristicsAction::Align(alignments) => {
-                self.heuristics = None;
+                self.tab.heuristics = None;
                 self.apply_heuristics(alignments, within);
             }
-            HeuristicsAction::Cancel => self.heuristics = None,
+            HeuristicsAction::Cancel => self.tab.heuristics = None,
         }
     }
 
@@ -1601,10 +1899,10 @@ Shortcut: {}", link.display()),
     }
 
     fn clear_alignments(&mut self) {
-        if self.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()) {
+        if self.tab.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()) {
             self.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit);
         } else {
-            self.status = Some(Status {
+            self.tab.status = Some(Status {
                 text: "There are no alignment marks".to_string(),
                 is_error: false,
             });
@@ -1616,7 +1914,7 @@ Shortcut: {}", link.display()),
         if !self.is_merge() {
             return Vec::new();
         }
-        let count = self.mirror.as_ref().map_or(0, |mirror| mirror.documents().len());
+        let count = self.tab.mirror.as_ref().map_or(0, |mirror| mirror.documents().len());
         Document::ALL.iter().take(count.min(3)).cloned().collect()
     }
 
@@ -1632,7 +1930,7 @@ Shortcut: {}", link.display()),
             if ctx.input_mut(|input| input.consume_shortcut(&REDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Redo);
             }
-            if self.mirror.is_some() {
+            if self.tab.mirror.is_some() {
                 if ctx.input_mut(|input| input.consume_shortcut(&MARK_FUNCTION_SHORTCUT)) {
                     self.mark_function_at_caret();
                 }
@@ -1663,7 +1961,7 @@ Shortcut: {}", link.display()),
                     self.choose_current(document);
                 }
             }
-            if self.mirror.is_some() {
+            if self.tab.mirror.is_some() {
                 for (to, _, shortcut) in NAVIGATION_SHORTCUTS.iter() {
                     if ctx.input_mut(|input| input.consume_shortcut(shortcut)) {
                         self.navigate(to.clone());
@@ -1671,7 +1969,7 @@ Shortcut: {}", link.display()),
                 }
             }
         }
-        if self.mirror.is_some() {
+        if self.tab.mirror.is_some() {
             if ctx.input_mut(|input| input.consume_shortcut(&FIND_PREVIOUS_SHORTCUT)) {
                 self.find_step(ctx, false);
             }
@@ -1686,7 +1984,7 @@ Shortcut: {}", link.display()),
             }
         }
         if ctx.input_mut(|input| input.consume_shortcut(&OPEN_SHORTCUT)) {
-            self.form_open = true;
+            self.open_form();
         }
         if ctx.input_mut(|input| input.consume_shortcut(&SAVE_AS_SHORTCUT)) {
             self.save_as();
@@ -1695,7 +1993,7 @@ Shortcut: {}", link.display()),
             self.save();
         }
         if ctx.input_mut(|input| input.consume_shortcut(&EXIT_SHORTCUT)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.exit(ctx, false);
         }
         if ctx.input_mut(|input| input.consume_shortcut(&SETTINGS_SHORTCUT)) {
             self.open_settings(ctx);
@@ -1709,7 +2007,7 @@ Shortcut: {}", link.display()),
         if ctx.input_mut(|input| input.consume_shortcut(&IGNORE_WHITESPACE_SHORTCUT)) {
             self.toggle_ignore_whitespace();
         }
-        if self.mirror.is_some() && !ctx.text_edit_focused() {
+        if self.tab.mirror.is_some() && !ctx.text_edit_focused() {
             if ctx.input_mut(|input| input.consume_shortcut(&FOLD_ALL_SHORTCUT)) {
                 self.fold_all(true);
             }
@@ -1727,7 +2025,7 @@ Shortcut: {}", link.display()),
 
     /// Asks where to show the alignment the last mark completed, when the documents disagree on its order. The answer is a `PlaceAlignment` unless the user keeps the suggestion, which is in effect already.
     fn show_inset_prompt(&mut self, ctx: &egui::Context) {
-        let Some(choice) = self.inset_prompt.as_ref() else { return };
+        let Some(choice) = self.tab.inset_prompt.as_ref() else { return };
         let mut answer = None;
         let spec = DialogSpec { id: "inset_dialog", title: "Alignment Placement", width: inset_dialog::DIALOG_WIDTH, closable: true };
         let closed = self.dialogs.show(ctx, &spec, |ui| answer = inset_dialog::show(ui, choice));
@@ -1740,7 +2038,7 @@ Shortcut: {}", link.display()),
     }
 
     fn answer_inset_prompt(&mut self, answer: InsetAnswer) {
-        let Some(choice) = self.inset_prompt.take() else { return };
+        let Some(choice) = self.tab.inset_prompt.take() else { return };
         if let InsetAnswer::Place(slot) = answer {
             self.send(Command::PlaceAlignment { number: choice.number, slot }, Pending::AlignmentEdit);
         }
@@ -1748,7 +2046,7 @@ Shortcut: {}", link.display()),
 
     /// Asks for the output's line ending style when the user saved while the sources disagree. A style sets it and then saves; closing the window saves nothing.
     fn show_eol_prompt(&mut self, ctx: &egui::Context) {
-        if self.eol_prompt.is_none() {
+        if self.tab.eol_prompt.is_none() {
             return;
         }
         let mut answer = None;
@@ -1763,7 +2061,7 @@ Shortcut: {}", link.display()),
     }
 
     fn answer_eol_prompt(&mut self, answer: EolAnswer) {
-        let Some(save) = self.eol_prompt.take() else { return };
+        let Some(save) = self.tab.eol_prompt.take() else { return };
         let EolAnswer::Use(style) = answer else { return };
         self.send(Command::SetOutputEol(style), Pending::SetOutputEol);
         match save {
@@ -1797,14 +2095,14 @@ Shortcut: {}", link.display()),
 
     fn show_menu(&mut self, ui: &mut egui::Ui) {
         let is_merge = self.is_merge();
-        let savable = is_merge && self.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
-        let has_session = self.mirror.is_some();
+        let savable = is_merge && self.tab.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
+        let has_session = self.tab.mirror.is_some();
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     let open = egui::Button::new("Open...").shortcut_text(ui.ctx().format_shortcut(&OPEN_SHORTCUT));
                     if ui.add(open).clicked() {
-                        self.form_open = true;
+                        self.open_form();
                     }
                     let reload = egui::Button::new("Reload").shortcut_text(ui.ctx().format_shortcut(&RELOAD_SHORTCUT));
                     if ui.add_enabled(has_session, reload).clicked() {
@@ -1819,9 +2117,13 @@ Shortcut: {}", link.display()),
                         self.save_as();
                     }
                     ui.separator();
+                    let close = egui::Button::new("Close Tab").shortcut_text(ui.ctx().format_shortcut(&CLOSE_TAB_SHORTCUT));
+                    if ui.add_enabled(!self.background.is_empty() && !self.tab.is_saving(), close).clicked() {
+                        self.close_tab_requested = true;
+                    }
                     let exit = egui::Button::new("Exit").shortcut_text(ui.ctx().format_shortcut(&EXIT_SHORTCUT));
                     if ui.add(exit).clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        self.exit(ui.ctx(), false);
                     }
                 });
                 ui.menu_button("Edit", |ui| {
@@ -1871,7 +2173,7 @@ Shortcut: {}", link.display()),
                         }
                     }
                     ui.separator();
-                    let (marks, changed) = self
+                    let (marks, changed) = self.tab
                         .mirror
                         .as_ref()
                         .map_or((0, false), |mirror| (mirror.alignments().marks.len(), mirror.alignments().changed));
@@ -2113,13 +2415,13 @@ Shortcut: {}", link.display()),
     }
 
     fn ignores_whitespace(&self) -> bool {
-        self.mirror.as_ref().is_some_and(|mirror| mirror.options().ignore_whitespace)
+        self.tab.mirror.as_ref().is_some_and(|mirror| mirror.options().ignore_whitespace)
     }
 
 
     /// Turns ignoring whitespace in the character diff on or off, from the toolbar, the View menu or Ctrl+Shift+W. The engine recomputes the character diffs; D keeps its choices and edits.
     fn toggle_ignore_whitespace(&mut self) {
-        let Some(mirror) = self.mirror.as_ref() else { return };
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
         let options = kdiff4_protocol::engine::ComparisonOptions {
             ignore_whitespace: !mirror.options().ignore_whitespace,
             ..mirror.options().clone()
@@ -2164,8 +2466,8 @@ Shortcut: {}", link.display()),
 
     /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip. The language selector sits at the right end, with the output's line ending selector left of it; returns what was picked in them.
     fn show_status(&self, ui: &mut egui::Ui) -> StatusPicks {
-        let eol = self.mirror.as_ref().and_then(Mirror::output).map(|output| output.eol.clone());
-        status_bar(ui, self.status.as_ref(), self.language.current(), eol.as_ref())
+        let eol = self.tab.mirror.as_ref().and_then(Mirror::output).map(|output| output.eol.clone());
+        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), eol.as_ref())
     }
 
     /// egui sets the window theme on the first frame, before the window has focus, and Windows then keeps the old title bar colors until focus changes. Sending the theme again once the window has focus repaints the title bar.
@@ -2179,10 +2481,72 @@ Shortcut: {}", link.display()),
     }
 
     fn update_window_title(&mut self, ctx: &egui::Context) {
-        let title = window_title(self.mirror.as_ref());
+        let title = window_title(self.tab.mirror.as_ref());
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.window_title = title;
+        }
+    }
+
+    fn show_tabs(&mut self, ui: &mut egui::Ui) {
+        if self.tab.is_blank() && self.background.is_empty() {
+            return;
+        }
+        let active = self.tab.id;
+        let reveal = std::mem::take(&mut self.reveal_tab);
+        let mut activate = None;
+        let mut close = None;
+        egui::Panel::top("document_tabs").show(ui, |ui| {
+            ui.add_enabled_ui(!self.tab_switch_blocked(), |ui| {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut tabs: Vec<_> = std::iter::once(&self.tab).chain(&self.background).collect();
+                        tabs.sort_unstable_by_key(|tab| tab.id);
+                        for tab in tabs {
+                            let id = tab.id;
+                            let path = tab.title_path();
+                            let name = path.as_deref().and_then(Path::file_name).map_or("Open".into(), |name| name.to_string_lossy());
+                            let label = if tab.is_modified() { format!("● {name}") } else { name.into_owned() };
+                            ui.push_id(id, |ui| {
+                                let response = ui.scope(|ui| {
+                                    ui.set_max_width(220.0);
+                                    ui.add(egui::Button::selectable(id == active, label).truncate())
+                                }).inner.on_hover_text(path.as_deref().map_or("Open files".into(), |path| path.to_string_lossy()));
+                                if reveal && id == active {
+                                    response.scroll_to_me(None);
+                                }
+                                if response.clicked() {
+                                    activate = Some(id);
+                                }
+                                if !self.background.is_empty()
+                                    && ui.add_enabled(!tab.is_saving(), egui::Button::new("×")).on_hover_text("Close tab").clicked()
+                                {
+                                    close = Some(id);
+                                }
+                            });
+                            ui.separator();
+                        }
+                    });
+                });
+            });
+        });
+        let ctx = ui.ctx();
+        if let Some(id) = close {
+            self.close_tab(ctx, id, false);
+        } else if let Some(id) = activate {
+            self.activate_tab(ctx, id);
+        }
+    }
+
+    fn show_tab_form(&mut self, ui: &mut egui::Ui) -> Option<FormAction> {
+        if self.is_opening() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Opening files…");
+            });
+            None
+        } else {
+            self.tab.form.show(ui, Some(self.tab.id), self.tab.error.as_deref(), false)
         }
     }
 
@@ -2198,60 +2562,86 @@ Shortcut: {}", link.display()),
 
 impl eframe::App for KdiffApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.drain_messages(ctx);
+        self.drain_messages(ctx, true);
+        let mut background = std::mem::take(&mut self.background);
+        for tab in &mut background {
+            std::mem::swap(&mut self.tab, tab);
+            self.drain_messages(ctx, false);
+            std::mem::swap(&mut self.tab, tab);
+        }
+        self.background = background;
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.exit(ctx, false);
+        } else if !self.exiting {
+            self.receive_launches(ctx);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.exiting {
+            return;
+        }
         let ctx = ui.ctx().clone();
-        if self.update_window.is_none() && self.eol_prompt.is_none() {
+        if !self.tab_switch_blocked() {
+            if ctx.input_mut(|input| input.consume_shortcut(&PREVIOUS_TAB_SHORTCUT)) {
+                self.cycle_tab(&ctx, false);
+            } else if ctx.input_mut(|input| input.consume_shortcut(&NEXT_TAB_SHORTCUT)) {
+                self.cycle_tab(&ctx, true);
+            }
+            if ctx.input_mut(|input| input.consume_shortcut(&CLOSE_TAB_SHORTCUT)) {
+                self.close_tab(&ctx, self.tab.id, false);
+            }
+        }
+        self.show_menu(ui);
+        if self.exiting {
+            return;
+        }
+        if std::mem::take(&mut self.close_tab_requested) {
+            self.close_tab(&ctx, self.tab.id, false);
+        }
+        self.show_tabs(ui);
+        if self.close_confirmation.is_none() && self.update_window.is_none() && self.tab.eol_prompt.is_none() {
             self.handle_shortcuts(&ctx);
+        }
+        if self.exiting {
+            return;
         }
         self.handle_pane_keys(&ctx);
         self.unfold_around_caret();
         self.request_fold_ranges();
         self.refresh_find();
-        self.show_menu(ui);
-        if self.mirror.is_some() {
+        if self.tab.mirror.is_some() {
             self.show_toolbar(ui);
         }
         let aligned = self.view().align_output;
-        if let Some(mirror) = self.mirror.as_mut() {
+        if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.set_aligned(aligned);
         }
         let pane_options = self.pane_options();
 
-        let busy = self.is_opening();
         let mut form_action = None;
         let mut pane_actions = Vec::new();
         let mut find_events = Vec::new();
         let mut eol_pick = None;
-        match self.mirror.as_ref() {
+        match self.tab.mirror.as_ref() {
             None => {
                 egui::CentralPanel::default().show(ui, |ui| {
-                    form_action = self.form.show(ui, self.error.as_deref(), busy, false);
+                    form_action = self.show_tab_form(ui);
                 });
             }
             Some(mirror) => {
                 let picks = self.show_status(ui);
                 if let Some(picked) = picks.language {
-                    self.language.pick(picked, mirror);
+                    self.tab.language.pick(picked, mirror);
                 }
                 eol_pick = picks.eol;
                 let find_corner = ui.available_rect_before_wrap().right_top() + egui::vec2(-FIND_BAR_MARGIN.x, FIND_BAR_MARGIN.y);
-                pane_actions = panes::show_session(ui, mirror, &mut self.panes, &pane_options);
-                self.panes.reveal_caret = false;
-                if self.panes.find.open {
-                    find_events = find::show_bar(&ctx, find_corner, &mut self.panes.find);
-                }
-                if self.form_open {
-                    let spec = DialogSpec { id: "open_dialog", title: "Open", width: open_dialog::FORM_MAX_WIDTH, closable: !busy };
-                    let closed = self.dialogs.show(&ctx, &spec, |ui| {
-                        ui.heading("Open");
-                        form_action = self.form.show(ui, self.error.as_deref(), busy, !busy);
-                    });
-                    if closed {
-                        form_action = Some(FormAction::Cancel);
-                    }
+                pane_actions = ui.push_id(("document", self.tab.id), |ui| {
+                    panes::show_session(ui, mirror, &mut self.tab.panes, &pane_options)
+                }).inner;
+                self.tab.panes.reveal_caret = false;
+                if self.tab.panes.find.open {
+                    find_events = find::show_bar(&ctx, self.tab.id, find_corner, &mut self.tab.panes.find);
                 }
             }
         }
@@ -2272,6 +2662,7 @@ impl eframe::App for KdiffApp {
         self.show_heuristics(&ctx);
         self.show_settings(&ctx);
         self.show_update_window(&ctx);
+        self.show_close_confirmation(&ctx);
         self.dialogs.end_frame(frame.window_handle().ok().map(|handle| handle.as_raw()));
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
@@ -2595,10 +2986,191 @@ mod tests {
     fn app_with_session() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
         let (client, host) = kdiff4_protocol::in_process();
         let ctx = egui::Context::default();
-        let mut app = KdiffApp::new(&ctx, client, Startup::default());
+        let mut app = KdiffApp::new(&ctx, client, || Ok(kdiff4_protocol::in_process().0));
         app.config = GuiConfig::default();
-        app.mirror = Some(resolved_mirror());
+        app.tab.mirror = Some(resolved_mirror());
         (app, host, ctx)
+    }
+
+
+    #[test]
+    fn a_forwarded_merge_opens_in_its_own_tab_and_retains_the_other_session() {
+        let (mut app, first_host, ctx) = app_with_session();
+        app.tab.panes.source_scroll.set(400.0);
+        app.tab.panes.find.query = "first".to_string();
+        let (hosts, new_hosts) = std::sync::mpsc::channel();
+        app.new_client = Box::new(move || {
+            let (client, host) = kdiff4_protocol::in_process();
+            hosts.send(host).unwrap();
+            Ok(client)
+        });
+        let (launches, incoming) = std::sync::mpsc::channel();
+        app.connect_launches(incoming, std::sync::mpsc::channel().0);
+        let (first_completion, first_result) = std::sync::mpsc::channel();
+        app.tab.completion = Some(first_completion);
+        let (completion, result) = std::sync::mpsc::channel();
+        let files = OpenFiles {
+            a: "second-base.txt".into(),
+            b: "second-local.txt".into(),
+            output: Some("second.txt".into()),
+            ..OpenFiles::default()
+        };
+        launches.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion: OpenCompletion::TabClosed(completion) }).unwrap();
+        app.receive_launches(&ctx);
+
+        assert_eq!(app.tab_ids(), [0, 1]);
+        assert_eq!(app.tab.id, 1);
+        assert_eq!(app.tab.panes.source_scroll.offset, 0.0);
+        assert!(app.tab.panes.find.query.is_empty());
+        let second_host = new_hosts.try_recv().unwrap();
+        let opened = second_host.recv().unwrap();
+        assert_eq!(opened.command, Command::Open(files));
+        app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(resolved_snapshot())));
+        app.handle_response(opened.id, Ok(()));
+
+        app.cycle_tab(&ctx, false);
+        assert_eq!(app.tab.id, 0);
+        assert_eq!(app.tab.panes.source_scroll.offset, 400.0);
+        assert_eq!(app.tab.panes.find.query, "first");
+        app.close_tab(&ctx, 1, false);
+        assert!(!result.try_recv().unwrap());
+        assert_eq!(first_result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        assert_eq!(sent(app, first_host), []);
+    }
+
+
+    #[test]
+    fn closing_the_main_window_returns_success_for_the_saved_last_tab() {
+        let (mut app, _host, ctx) = app_with_session();
+        let (completion, result) = std::sync::mpsc::channel();
+        let output = PathBuf::from("merged.txt");
+        app.tab.completion = Some(completion);
+        app.tab.required_output = Some(output.clone());
+        apply_change(&mut app, Change::OutputSaved(output));
+        let save = RequestId(10);
+        app.tab.pending.insert(save.clone(), Pending::Save);
+        app.handle_response(save, Ok(()));
+        assert_eq!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        app.close_tab(&ctx, 0, false);
+        assert_eq!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        assert_eq!(app.tab_ids(), [0]);
+        assert!(app.tab.mirror.is_some());
+        assert!(app.close_confirmation.is_none());
+        app.exit(&ctx, false);
+        assert!(result.try_recv().unwrap());
+        assert!(app.exiting);
+    }
+
+
+    #[test]
+    fn an_open_window_submission_preserves_the_previous_comparison_in_a_tab() {
+        let (mut app, first_host, ctx) = app_with_session();
+        let (client, host) = kdiff4_protocol::in_process();
+        let next_client = std::cell::RefCell::new(Some(client));
+        app.new_client = Box::new(move || Ok(next_client.borrow_mut().take().unwrap()));
+        let (launch, incoming) = std::sync::mpsc::channel();
+        app.connect_launches(incoming, std::sync::mpsc::channel().0);
+        let files = OpenFiles { a: "another-a.txt".into(), b: "another-b.txt".into(), ..OpenFiles::default() };
+        let (result, dispatched) = std::sync::mpsc::channel();
+        let completion = OpenCompletion::Dispatched { result, last_dir: None };
+        launch.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion }).unwrap();
+        app.receive_launches(&ctx);
+
+        assert!(dispatched.try_recv().unwrap());
+        assert_eq!(app.tab_ids(), [0, 1]);
+        assert!(app.tab.mirror.is_none());
+        assert_eq!(host.recv().unwrap().command, Command::Open(files));
+        app.cycle_tab(&ctx, true);
+        assert!(app.tab.mirror.is_some());
+        assert_eq!(sent(app, first_host), []);
+    }
+
+
+    #[test]
+    fn file_open_starts_a_separate_window_without_blocking_the_main_window() {
+        let (mut app, host, ctx) = app_with_session();
+        let (opened, opens) = std::sync::mpsc::channel();
+        app.set_open_window(move || {
+            opened.send(()).unwrap();
+            Ok(())
+        });
+        app.open_form();
+        app.open_form();
+        assert_eq!(opens.try_iter().count(), 2);
+        assert!(!app.tab_switch_blocked());
+        assert!(app.activate_new_tab(&ctx));
+        app.cycle_tab(&ctx, false);
+        assert_eq!(app.tab.id, 0);
+        assert_eq!(sent(app, host), []);
+    }
+
+
+    #[test]
+    fn opening_files_from_the_command_line_skips_the_open_form() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, host, ctx) = app_with_session();
+        app.tab.mirror = None;
+        let (launch, incoming) = std::sync::mpsc::channel();
+        app.connect_launches(incoming, std::sync::mpsc::channel().0);
+        let (completion, _result) = std::sync::mpsc::channel();
+        let files = OpenFiles { a: "base.txt".into(), b: "left.txt".into(), ..OpenFiles::default() };
+        launch.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion: OpenCompletion::TabClosed(completion) }).unwrap();
+        app.receive_launches(&ctx);
+        let harness = egui_kittest::Harness::builder().build_ui_state(|ui, app| {
+            app.show_tab_form(ui);
+        }, app);
+        assert_eq!(harness.state().tab_ids(), [0]);
+        assert!(harness.query_by_label("Run").is_none());
+        assert!(harness.query_by_label("Opening files…").is_some());
+        assert_eq!(host.recv().unwrap().command, Command::Open(files));
+    }
+
+
+    #[test]
+    fn clicking_a_tab_switches_to_its_comparison() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        assert!(app.activate_new_tab(&ctx));
+        app.tab.form.set_path(Document::A, Path::new("second.txt"));
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(640.0, 190.0))
+            .build_ui_state(|ui, app| app.show_tabs(ui), app);
+        harness.get_by_label("A.txt").click();
+        harness.run();
+        assert_eq!(harness.state().tab.id, 0);
+        harness.get_by_label("second.txt").click();
+        harness.run();
+        assert_eq!(harness.state().tab.id, 1);
+        harness.state_mut().close_tab(&ctx, 1, false);
+        harness.run();
+        assert_eq!(harness.state().tab.id, 0);
+        assert!(harness.query_by_label("×").is_none());
+    }
+
+
+    #[test]
+    fn closing_a_modified_tab_requires_confirmation() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        snapshot.output.as_mut().unwrap().modified = true;
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, true));
+        app.close_tab(&ctx, 0, false);
+        assert!(app.close_confirmation.is_none());
+        assert!(app.activate_new_tab(&ctx));
+        app.activate_tab(&ctx, 0);
+        app.close_tab(&ctx, 0, false);
+        assert_eq!(app.close_confirmation, Some(CloseConfirmation::Tab(0)));
+        assert_eq!(app.tab.id, 0);
+
+        let mut harness = egui_kittest::Harness::builder()
+            .build_ui_state(|ui, app| app.show_close_confirmation(ui.ctx()), app);
+        harness.get_by_label("Discard Changes").click();
+        harness.run();
+        assert_eq!(harness.state().tab_ids(), [1]);
+        assert!(harness.state().close_confirmation.is_none());
     }
 
 
@@ -2606,13 +3178,13 @@ mod tests {
     fn opening_jumps_to_the_snapshot_region_or_stays_at_the_top() {
         for current in [Some(0), Some(1), None] {
             let (mut app, _host, ctx) = app_with_session();
-            app.panes.source_scroll.set(400.0);
-            app.panes.output_scroll.set(200.0);
-            for scroll in app.panes.pane_scrolls.iter_mut() {
+            app.tab.panes.source_scroll.set(400.0);
+            app.tab.panes.output_scroll.set(200.0);
+            for scroll in app.tab.panes.pane_scrolls.iter_mut() {
                 scroll.set(300.0);
             }
-            app.panes.jump = Some(0);
-            app.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
+            app.tab.panes.jump = Some(0);
+            app.tab.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
             app.send(Command::Open(kdiff4_protocol::OpenFiles::default()), Pending::Open);
             let mut snapshot = resolved_snapshot();
             snapshot.current_region = current.clone();
@@ -2624,18 +3196,18 @@ mod tests {
                 snapshot.comparison.regions[1].status = kdiff4_protocol::engine::RegionStatus::Diff(kdiff4_protocol::engine::HunkChange::Added);
             }
             app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(snapshot)));
-            assert_eq!(app.panes.jump, current);
-            assert_eq!(app.panes.source_scroll.offset, 0.0);
-            assert_eq!(app.panes.output_scroll.offset, 0.0);
-            assert!(app.panes.pane_scrolls.iter().all(|scroll| scroll.offset == 0.0));
+            assert_eq!(app.tab.panes.jump, current);
+            assert_eq!(app.tab.panes.source_scroll.offset, 0.0);
+            assert_eq!(app.tab.panes.output_scroll.offset, 0.0);
+            assert!(app.tab.panes.pane_scrolls.iter().all(|scroll| scroll.offset == 0.0));
             match current {
                 Some(region) => {
                     assert_eq!(app.caret_region(), Some(region));
-                    assert_eq!(app.panes.caret.unwrap().0, Document::A);
-                    assert!(app.panes.caret_hidden);
-                    assert_eq!(app.panes.void_row, (region == 1).then_some(1));
+                    assert_eq!(app.tab.panes.caret.unwrap().0, Document::A);
+                    assert!(app.tab.panes.caret_hidden);
+                    assert_eq!(app.tab.panes.void_row, (region == 1).then_some(1));
                 }
-                None => assert!(app.panes.caret.is_none()),
+                None => assert!(app.tab.panes.caret.is_none()),
             }
         }
     }
@@ -2644,12 +3216,12 @@ mod tests {
     #[test]
     fn resync_snapshot_does_not_jump_to_the_current_region() {
         let (mut app, _host, ctx) = app_with_session();
-        app.panes.source_scroll.set(400.0);
+        app.tab.panes.source_scroll.set(400.0);
         let mut snapshot = resolved_snapshot();
         snapshot.current_region = Some(1);
         app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(snapshot)));
-        assert_eq!(app.panes.jump, None);
-        assert_eq!(app.panes.source_scroll.offset, 400.0);
+        assert_eq!(app.tab.panes.jump, None);
+        assert_eq!(app.tab.panes.source_scroll.offset, 400.0);
     }
 
 
@@ -2676,7 +3248,7 @@ mod tests {
 
     /// Gives the mirror this change, the way a delta from the host does.
     fn apply_change(app: &mut KdiffApp, change: Change) {
-        let mirror = app.mirror.as_mut().unwrap();
+        let mirror = app.tab.mirror.as_mut().unwrap();
         let revision = mirror.revision();
         mirror.apply_delta(kdiff4_protocol::Delta {
             revision: kdiff4_protocol::Revision(revision.0 + 1),
@@ -2705,7 +3277,7 @@ mod tests {
     /// Gives the mirror these marks, the way a delta from the host does.
     fn set_marks(app: &mut KdiffApp, marks: Vec<kdiff4_protocol::AlignmentMark>, changed: bool) {
         let change = Change::AlignmentsChanged(kdiff4_protocol::Alignments { marks, changed, ..Default::default() });
-        let mirror = app.mirror.as_mut().unwrap();
+        let mirror = app.tab.mirror.as_mut().unwrap();
         let revision = mirror.revision();
         mirror.apply_delta(kdiff4_protocol::Delta {
             revision: kdiff4_protocol::Revision(revision.0 + 1),
@@ -2719,7 +3291,7 @@ mod tests {
         let (mut app, host, ctx) = app_with_session();
         name_output(&mut app, EolChoice::Style(EolStyle::CrLf));
         press(&mut app, &ctx, Key::S, Modifiers::COMMAND);
-        assert!(app.eol_prompt.is_none());
+        assert!(app.tab.eol_prompt.is_none());
         assert_eq!(sent(app, host), [Command::Save]);
     }
 
@@ -2728,7 +3300,7 @@ mod tests {
         let (mut app, host, ctx) = app_with_session();
         name_output(&mut app, EolChoice::Conflict);
         press(&mut app, &ctx, Key::S, Modifiers::COMMAND);
-        assert_eq!(app.eol_prompt, Some(PendingSave::Save));
+        assert_eq!(app.tab.eol_prompt, Some(PendingSave::Save));
         assert_eq!(sent(app, host), []);
     }
 
@@ -2736,16 +3308,16 @@ mod tests {
     fn choosing_a_style_sets_it_and_then_saves() {
         let (mut app, host, _ctx) = app_with_session();
         name_output(&mut app, EolChoice::Conflict);
-        app.eol_prompt = Some(PendingSave::Save);
+        app.tab.eol_prompt = Some(PendingSave::Save);
         app.answer_eol_prompt(EolAnswer::Use(EolStyle::CrLf));
-        assert!(app.eol_prompt.is_none());
+        assert!(app.tab.eol_prompt.is_none());
         assert_eq!(sent(app, host), [Command::SetOutputEol(EolStyle::CrLf), Command::Save]);
     }
 
     #[test]
     fn choosing_a_style_for_save_as_saves_to_the_picked_path() {
         let (mut app, host, _ctx) = app_with_session();
-        app.eol_prompt = Some(PendingSave::SaveAs(PathBuf::from("elsewhere.txt")));
+        app.tab.eol_prompt = Some(PendingSave::SaveAs(PathBuf::from("elsewhere.txt")));
         app.answer_eol_prompt(EolAnswer::Use(EolStyle::Cr));
         assert_eq!(sent(app, host), [Command::SetOutputEol(EolStyle::Cr), Command::SaveAs(PathBuf::from("elsewhere.txt"))]);
     }
@@ -2753,16 +3325,16 @@ mod tests {
     #[test]
     fn cancelling_the_line_ending_question_saves_nothing() {
         let (mut app, host, _ctx) = app_with_session();
-        app.eol_prompt = Some(PendingSave::Save);
+        app.tab.eol_prompt = Some(PendingSave::Save);
         app.answer_eol_prompt(EolAnswer::Cancel);
-        assert!(app.eol_prompt.is_none());
+        assert!(app.tab.eol_prompt.is_none());
         assert_eq!(sent(app, host), []);
     }
 
     #[test]
     fn the_line_ending_question_closes_with_the_window() {
         let (mut app, host, ctx) = app_with_session();
-        app.eol_prompt = Some(PendingSave::Save);
+        app.tab.eol_prompt = Some(PendingSave::Save);
         ctx.run_pass(egui::RawInput::default(), |ctx| app.show_eol_prompt(ctx)).drop_without_applying_deltas();
         let events = vec![egui::Event::Key {
             key: Key::Escape,
@@ -2772,14 +3344,14 @@ mod tests {
             modifiers: Modifiers::NONE,
         }];
         ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| app.show_eol_prompt(ctx)).drop_without_applying_deltas();
-        assert!(app.eol_prompt.is_none());
+        assert!(app.tab.eol_prompt.is_none());
         assert_eq!(sent(app, host), []);
     }
 
     #[test]
     fn ctrl_space_marks_the_lines_of_the_selection() {
         let (mut app, host, ctx) = app_with_session();
-        app.panes.set_caret(
+        app.tab.panes.set_caret(
             Document::B,
             Cursor {
                 anchor: Position { line: 0, column: 0 },
@@ -2801,20 +3373,20 @@ mod tests {
     fn marking_needs_lines_of_a_source_document() {
         let (mut app, host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
-        app.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
+        app.tab.panes.set_caret(Document::D, Cursor::at(Position { line: 0, column: 0 }), None);
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND.plus(Modifiers::SHIFT));
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), Some(1));
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), Some(1));
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND);
-        assert!(app.status.as_ref().is_some_and(|status| status.is_error));
+        assert!(app.tab.status.as_ref().is_some_and(|status| status.is_error));
         assert_eq!(sent(app, host), []);
     }
 
     #[test]
     fn ctrl_shift_space_marks_the_function_around_the_caret_line() {
         let (mut app, host, ctx) = app_with_session();
-        let language = app.language.current().name().to_string();
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 1 }), None);
+        let language = app.tab.language.current().name().to_string();
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 1 }), None);
         press(&mut app, &ctx, Key::Space, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::MarkFunctionAlignment { document: Document::A, line: 1, language }]);
     }
@@ -2823,7 +3395,7 @@ mod tests {
     fn ctrl_y_applies_the_alignments_instead_of_redoing() {
         let (mut app, host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
-        assert!(app.status.as_ref().is_some_and(|status| !status.is_error), "nothing to apply says so");
+        assert!(app.tab.status.as_ref().is_some_and(|status| !status.is_error), "nothing to apply says so");
         set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND);
         press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
@@ -2840,7 +3412,7 @@ mod tests {
     #[test]
     fn f5_does_nothing_without_a_session() {
         let (mut app, host, ctx) = app_with_session();
-        app.mirror = None;
+        app.tab.mirror = None;
         press(&mut app, &ctx, Key::F5, Modifiers::NONE);
         assert_eq!(sent(app, host), []);
     }
@@ -2850,7 +3422,7 @@ mod tests {
         let (mut app, _host, _ctx) = app_with_session();
         let id = app.send(Command::Reload { confirmed: false }, Pending::Reload).unwrap();
         app.handle_response(id, Ok(()));
-        assert!(app.status.as_ref().is_some_and(|status| !status.is_error && status.text.starts_with("Reloaded.")));
+        assert!(app.tab.status.as_ref().is_some_and(|status| !status.is_error && status.text.starts_with("Reloaded.")));
     }
 
     #[test]
@@ -2859,8 +3431,8 @@ mod tests {
         app.config.heuristics.types = true;
         app.config.heuristics.signature_similarity = 90;
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
-        assert!(app.heuristics.is_some());
-        let language = app.language.current().name().to_string();
+        assert!(app.tab.heuristics.is_some());
+        let language = app.tab.language.current().name().to_string();
         let options = HeuristicOptions {
             types: true,
             signature_similarity: 90,
@@ -2877,7 +3449,7 @@ mod tests {
     }
 
     fn caret_at(app: &mut KdiffApp, document: Document, line: usize) {
-        app.panes.set_caret(document, Cursor::at(Position { line, column: 0 }), None);
+        app.tab.panes.set_caret(document, Cursor::at(Position { line, column: 0 }), None);
     }
 
     #[test]
@@ -2885,20 +3457,20 @@ mod tests {
         let (mut app, _host, ctx) = app_with_session();
         let hint = "Put the caret inside an applied alignment to align inside it";
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
-        assert!(app.heuristics.is_none());
-        assert_eq!(app.status.as_ref().map(|status| (status.text.as_str(), status.is_error)), Some((hint, true)));
-        app.status = None;
+        assert!(app.tab.heuristics.is_none());
+        assert_eq!(app.tab.status.as_ref().map(|status| (status.text.as_str(), status.is_error)), Some((hint, true)));
+        app.tab.status = None;
         set_marks(&mut app, vec![mark(Document::A, 1, 0..2), mark(Document::B, 1, 0..2)], true);
         caret_at(&mut app, Document::A, 1);
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
-        assert!(app.heuristics.is_none(), "a pending alignment does not count");
-        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(hint));
-        app.status = None;
+        assert!(app.tab.heuristics.is_none(), "a pending alignment does not count");
+        assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(hint));
+        app.tab.status = None;
         set_marks(&mut app, vec![applied(Document::A, 1, 0..1), applied(Document::B, 1, 0..1)], false);
         caret_at(&mut app, Document::A, 1);
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
-        assert!(app.heuristics.is_none(), "the caret is outside it");
-        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(hint));
+        assert!(app.tab.heuristics.is_none(), "the caret is outside it");
+        assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(hint));
     }
 
     #[test]
@@ -2908,9 +3480,9 @@ mod tests {
         set_marks(&mut app, marks, false);
         caret_at(&mut app, Document::B, 4);
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
-        assert_eq!(app.heuristics.as_ref().and_then(|dialog| dialog.within()), Some(2));
+        assert_eq!(app.tab.heuristics.as_ref().and_then(|dialog| dialog.within()), Some(2));
         app.apply_heuristics(vec![vec![2..3, 3..4]], Some(2));
-        let language = app.language.current().name().to_string();
+        let language = app.tab.language.current().name().to_string();
         let options = HeuristicOptions::default();
         assert_eq!(
             sent(app, host),
@@ -2942,7 +3514,7 @@ mod tests {
     fn a_heuristic_proposal_fills_the_window_only_when_it_answers_the_window() {
         let (mut app, _host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
-        let id = app.pending.iter().find(|(_, kind)| **kind == Pending::HeuristicPropose).map(|(id, _)| id.clone()).unwrap();
+        let id = app.tab.pending.iter().find(|(_, kind)| **kind == Pending::HeuristicPropose).map(|(id, _)| id.clone()).unwrap();
         let proposal = |cause| kdiff4_protocol::HeuristicProposal {
             cause,
             matches: vec![kdiff4_protocol::HeuristicMatch {
@@ -2957,9 +3529,9 @@ mod tests {
             blocked: 0,
         };
         app.handle_message(&ctx, HostMessage::Event(Event::HeuristicProposal(proposal(Some(RequestId(id.0 + 100))))));
-        assert!(app.heuristics.as_ref().unwrap().checked_parts().is_empty());
+        assert!(app.tab.heuristics.as_ref().unwrap().checked_parts().is_empty());
         app.handle_message(&ctx, HostMessage::Event(Event::HeuristicProposal(proposal(Some(id)))));
-        assert_eq!(app.heuristics.as_ref().unwrap().checked_parts(), vec![vec![0..1, 1..2]]);
+        assert_eq!(app.tab.heuristics.as_ref().unwrap().checked_parts(), vec![vec![0..1, 1..2]]);
     }
 
     fn inset_choice() -> InsetChoice {
@@ -2977,7 +3549,7 @@ mod tests {
     }
 
     fn deliver_marks(app: &mut KdiffApp, ctx: &egui::Context, alignments: kdiff4_protocol::Alignments) {
-        let revision = app.mirror.as_ref().unwrap().revision();
+        let revision = app.tab.mirror.as_ref().unwrap().revision();
         let delta = kdiff4_protocol::Delta {
             revision: kdiff4_protocol::Revision(revision.0 + 1),
             cause: None,
@@ -2995,9 +3567,9 @@ mod tests {
             ..Default::default()
         };
         deliver_marks(&mut app, &ctx, asking);
-        assert_eq!(app.inset_prompt.as_ref().map(|choice| choice.number), Some(2));
+        assert_eq!(app.tab.inset_prompt.as_ref().map(|choice| choice.number), Some(2));
         deliver_marks(&mut app, &ctx, kdiff4_protocol::Alignments::default());
-        assert!(app.inset_prompt.is_some(), "only the user's answer closes the question");
+        assert!(app.tab.inset_prompt.is_some(), "only the user's answer closes the question");
         drop(sent(app, host));
     }
 
@@ -3009,19 +3581,19 @@ mod tests {
             ..Default::default()
         };
         deliver_marks(&mut app, &ctx, quiet);
-        assert!(app.inset_prompt.is_none());
+        assert!(app.tab.inset_prompt.is_none());
         drop(sent(app, host));
     }
 
     #[test]
     fn choosing_another_place_sends_it_and_keeping_the_suggestion_sends_nothing() {
         let (mut app, host, _ctx) = app_with_session();
-        app.inset_prompt = Some(inset_choice());
+        app.tab.inset_prompt = Some(inset_choice());
         app.answer_inset_prompt(InsetAnswer::Place(1));
-        assert!(app.inset_prompt.is_none());
-        app.inset_prompt = Some(inset_choice());
+        assert!(app.tab.inset_prompt.is_none());
+        app.tab.inset_prompt = Some(inset_choice());
         app.answer_inset_prompt(InsetAnswer::Keep);
-        assert!(app.inset_prompt.is_none());
+        assert!(app.tab.inset_prompt.is_none());
         app.answer_inset_prompt(InsetAnswer::Place(0));
         assert_eq!(sent(app, host), [Command::PlaceAlignment { number: 2, slot: 1 }]);
     }
@@ -3068,11 +3640,11 @@ mod tests {
         set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
         let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
         app.handle_response(id, Ok(()));
-        assert_eq!(app.status.as_ref().map(|status| status.text.as_str()), Some(ALIGNMENTS_CHANGED_HINT));
+        assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(ALIGNMENTS_CHANGED_HINT));
         set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], false);
         let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
         app.handle_response(id, Ok(()));
-        assert!(app.status.is_none());
+        assert!(app.tab.status.is_none());
         let id = app
             .send(
                 Command::MarkAlignment {
@@ -3089,7 +3661,7 @@ mod tests {
                 message: "no".to_string(),
             }),
         );
-        assert!(app.status.as_ref().is_some_and(|status| status.is_error && status.text.contains("no")));
+        assert!(app.tab.status.as_ref().is_some_and(|status| status.is_error && status.text.contains("no")));
         drop(sent(app, host));
     }
 
@@ -3220,7 +3792,7 @@ mod tests {
 
     /// Gives the mirror the fold ranges of `document`, as the host's answer to `FindFoldRanges` does.
     fn give_fold_ranges(app: &mut KdiffApp, document: Document, ranges: Vec<std::ops::Range<usize>>) {
-        let mirror = app.mirror.as_mut().unwrap();
+        let mirror = app.tab.mirror.as_mut().unwrap();
         let revision = mirror.revision();
         mirror.set_fold_ranges(kdiff4_protocol::FoldRanges {
             cause: None,
@@ -3231,25 +3803,25 @@ mod tests {
 
 
     fn folded(app: &KdiffApp, document: Document) -> Vec<std::ops::Range<usize>> {
-        app.mirror.as_ref().unwrap().folds(document).folded().to_vec()
+        app.tab.mirror.as_ref().unwrap().folds(document).folded().to_vec()
     }
 
 
     #[test]
     fn fold_ranges_are_asked_for_every_document_then_for_d_after_it_changed() {
         let (mut app, host, ctx) = app_with_session();
-        let language = app.language.current().name().to_string();
+        let language = app.tab.language.current().name().to_string();
         app.request_fold_ranges();
         app.request_fold_ranges();
         let found = kdiff4_protocol::FoldRanges {
-            cause: app.fold_request.clone(),
-            revision: app.mirror.as_ref().unwrap().revision(),
+            cause: app.tab.fold_request.clone(),
+            revision: app.tab.mirror.as_ref().unwrap().revision(),
             documents: vec![(Document::A, vec![0..2])],
         };
         app.handle_message(&ctx, HostMessage::Event(Event::FoldRanges(found)));
-        assert_eq!(app.mirror.as_ref().unwrap().folds(Document::A).range_at(0), Some(0..2));
+        assert_eq!(app.tab.mirror.as_ref().unwrap().folds(Document::A).range_at(0), Some(0..2));
         app.request_fold_ranges();
-        app.output_folds_stale = true;
+        app.tab.output_folds_stale = true;
         app.request_fold_ranges();
         let all = Command::FindFoldRanges {
             language: language.clone(),
@@ -3265,10 +3837,10 @@ mod tests {
         let (mut app, _host, ctx) = app_with_session();
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
         let at = |line, column| Position { line, column };
-        app.panes.set_caret(Document::A, Cursor::at(at(1, 1)), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(1, 1)), None);
         press(&mut app, &ctx, Key::Minus, Modifiers::COMMAND);
         assert_eq!(folded(&app, Document::A), [0..2]);
-        assert_eq!(app.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
+        assert_eq!(app.tab.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
         press(&mut app, &ctx, Key::Plus, Modifiers::COMMAND);
         assert!(folded(&app, Document::A).is_empty());
     }
@@ -3279,7 +3851,7 @@ mod tests {
         let (mut app, _host, ctx) = app_with_session();
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
         give_fold_ranges(&mut app, Document::D, vec![0..2]);
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
         press(&mut app, &ctx, Key::Minus, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!((folded(&app, Document::A), folded(&app, Document::D)), (vec![0..2], Vec::new()));
         press(&mut app, &ctx, Key::Plus, Modifiers::COMMAND.plus(Modifiers::SHIFT));
@@ -3292,10 +3864,10 @@ mod tests {
         let (mut app, _host, ctx) = app_with_session();
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
         let at = |line, column| Position { line, column };
-        app.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
         app.handle_pane_action(&ctx, PaneAction::ToggleFold(Document::A, 0));
         assert_eq!(folded(&app, Document::A), [0..2]);
-        assert_eq!(app.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
+        assert_eq!(app.tab.panes.caret, Some((Document::A, Cursor::at(at(0, 1)))));
         app.handle_pane_action(&ctx, PaneAction::ToggleFold(Document::A, 0));
         assert!(folded(&app, Document::A).is_empty());
     }
@@ -3305,11 +3877,11 @@ mod tests {
     fn the_caret_entering_a_fold_unfolds_it_and_on_the_header_keeps_it() {
         let (mut app, _host, _ctx) = app_with_session();
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
-        app.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 1 }), None);
+        app.tab.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 1 }), None);
         app.unfold_around_caret();
         assert_eq!(folded(&app, Document::A), [0..2]);
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 1, column: 0 }), None);
         app.unfold_around_caret();
         assert!(folded(&app, Document::A).is_empty());
     }
@@ -3321,7 +3893,7 @@ mod tests {
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
         give_fold_ranges(&mut app, Document::D, vec![0..2]);
         for document in [Document::A, Document::D] {
-            app.mirror.as_mut().unwrap().change_folds(document, |folds| folds.fold(0..2));
+            app.tab.mirror.as_mut().unwrap().change_folds(document, |folds| folds.fold(0..2));
         }
         app.jump_to(0);
         assert_eq!((folded(&app, Document::A), folded(&app, Document::D)), (vec![0..2], vec![0..2]));
@@ -3334,8 +3906,8 @@ mod tests {
     fn marking_a_folded_header_for_alignment_marks_every_line_of_the_fold() {
         let (mut app, host, _ctx) = app_with_session();
         give_fold_ranges(&mut app, Document::A, vec![0..2]);
-        app.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
-        app.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
+        app.tab.mirror.as_mut().unwrap().change_folds(Document::A, |folds| folds.fold(0..2));
+        app.tab.panes.set_caret(Document::A, Cursor::at(Position { line: 0, column: 0 }), None);
         app.mark_selected_lines();
         assert_eq!(sent(app, host), [Command::MarkAlignment { document: Document::A, lines: 0..2 }]);
     }
@@ -3474,7 +4046,7 @@ mod tests {
     }
 
     fn selected(app: &KdiffApp) -> Option<(Document, Position, Position)> {
-        app.panes.caret.map(|(document, cursor)| (document, cursor.range().0, cursor.range().1))
+        app.tab.panes.caret.map(|(document, cursor)| (document, cursor.range().0, cursor.range().1))
     }
 
     fn at(line: usize, column: usize) -> Position {
@@ -3484,8 +4056,8 @@ mod tests {
     /// An app searching for every character.
     fn app_finding_every_character() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
         let (mut app, host, ctx) = app_with_session();
-        app.panes.find.query = ".".to_string();
-        app.panes.find.options.regex = true;
+        app.tab.panes.find.query = ".".to_string();
+        app.tab.panes.find.options.regex = true;
         (app, host, ctx)
     }
 
@@ -3493,43 +4065,43 @@ mod tests {
     fn ctrl_f_opens_the_find_bar_with_the_keyboard() {
         let (mut app, _host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::F, Modifiers::COMMAND);
-        assert!(app.panes.find.open && app.panes.find.focus);
+        assert!(app.tab.panes.find.open && app.tab.panes.find.focus);
     }
 
     #[test]
     fn ctrl_f_searches_for_the_selected_text() {
         let (mut app, _host, ctx) = app_with_session();
-        app.panes.set_caret(Document::A, Cursor { anchor: at(1, 0), head: at(1, 1) }, None);
+        app.tab.panes.set_caret(Document::A, Cursor { anchor: at(1, 0), head: at(1, 1) }, None);
         press(&mut app, &ctx, Key::F, Modifiers::COMMAND);
-        assert_eq!(app.panes.find.query, "x");
+        assert_eq!(app.tab.panes.find.query, "x");
     }
 
     #[test]
     fn f3_without_a_query_opens_the_find_bar() {
         let (mut app, _host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
-        assert!(app.panes.find.open && app.panes.find.focus);
+        assert!(app.tab.panes.find.open && app.tab.panes.find.focus);
         assert_eq!(selected(&app), None);
     }
 
     #[test]
     fn f3_selects_the_next_match_in_the_pane_with_the_caret() {
         let (mut app, _host, ctx) = app_finding_every_character();
-        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))));
-        assert_eq!(app.panes.find.current, Some(0));
+        assert_eq!(app.tab.panes.find.current, Some(0));
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))), "wraps to the first match");
-        assert!(app.panes.reveal_caret);
+        assert!(app.tab.panes.reveal_caret);
     }
 
     #[test]
     fn shift_f3_selects_the_previous_match_and_wraps() {
         let (mut app, _host, ctx) = app_finding_every_character();
-        app.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(1, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
         assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))));
         press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
@@ -3539,21 +4111,21 @@ mod tests {
     #[test]
     fn the_search_runs_in_the_pane_that_was_clicked() {
         let (mut app, _host, ctx) = app_with_session();
-        app.panes.find.query = "b".to_string();
-        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        app.tab.panes.find.query = "b".to_string();
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 0))), "A has no b");
-        app.panes.set_caret(Document::B, Cursor::at(at(1, 0)), None);
+        app.tab.panes.set_caret(Document::B, Cursor::at(at(1, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::B, at(0, 0), at(0, 1))));
-        assert_eq!(app.panes.find.document, Some(Document::B));
+        assert_eq!(app.tab.panes.find.document, Some(Document::B));
     }
 
     #[test]
     fn the_output_pane_can_be_searched() {
         let (mut app, _host, ctx) = app_with_session();
-        app.panes.find.query = "x".to_string();
-        app.panes.set_caret(Document::D, Cursor::at(at(0, 0)), None);
+        app.tab.panes.find.query = "x".to_string();
+        app.tab.panes.set_caret(Document::D, Cursor::at(at(0, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::D, at(1, 0), at(1, 1))));
     }
@@ -3561,9 +4133,9 @@ mod tests {
     #[test]
     fn typing_in_the_find_bar_selects_the_first_match_from_the_caret() {
         let (mut app, _host, ctx) = app_with_session();
-        app.panes.set_caret(Document::A, Cursor::at(at(0, 1)), None);
-        app.panes.find.query = "x".to_string();
-        app.panes.find.open = true;
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 1)), None);
+        app.tab.panes.find.query = "x".to_string();
+        app.tab.panes.find.open = true;
         app.handle_find_event(&ctx, FindEvent::Changed);
         assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
     }
@@ -3573,20 +4145,20 @@ mod tests {
         let (mut app, _host, ctx) = app_finding_every_character();
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         app.handle_find_event(&ctx, FindEvent::Close);
-        assert!(!app.panes.find.open && app.panes.find.matches.is_empty());
-        assert_eq!(app.panes.find.query, ".");
+        assert!(!app.tab.panes.find.open && app.tab.panes.find.matches.is_empty());
+        assert_eq!(app.tab.panes.find.query, ".");
         assert!(selected(&app).is_some());
     }
 
     #[test]
     fn f3_after_closing_the_find_bar_continues_the_search() {
         let (mut app, _host, ctx) = app_finding_every_character();
-        app.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         app.handle_find_event(&ctx, FindEvent::Close);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))));
-        assert!(app.panes.find.open);
+        assert!(app.tab.panes.find.open);
     }
 
     fn update_release(url: &str) -> ReleaseInfo {
@@ -3689,12 +4261,12 @@ mod tests {
             title: "t".to_string(),
             text: "x".to_string(),
         });
-        app.panes.caret = Some((Document::D, Default::default()));
-        let before = app.status.clone();
+        app.tab.panes.caret = Some((Document::D, Default::default()));
+        let before = app.tab.status.clone();
         ctx.input_mut(|input| input.events.push(egui::Event::Text("typed".to_string())));
         app.handle_pane_keys(&ctx);
-        assert_eq!(app.status, before);
-        assert!(app.mirror.as_ref().and_then(|mirror| mirror.output()).is_none_or(|output| !output.modified));
+        assert_eq!(app.tab.status, before);
+        assert!(app.tab.mirror.as_ref().and_then(|mirror| mirror.output()).is_none_or(|output| !output.modified));
     }
 
 

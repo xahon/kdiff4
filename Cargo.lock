@@ -2130,6 +2130,7 @@ version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "flexi_logger",
  "insta",
  "kdiff4-core",
@@ -2137,6 +2138,8 @@ dependencies = [
  "kdiff4-protocol",
  "log",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

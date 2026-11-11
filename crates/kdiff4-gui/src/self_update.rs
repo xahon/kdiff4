@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -129,15 +128,6 @@ pub fn swap_executable(exe: &Path, new: &Path) -> Result<(), UpdateError> {
         return Err(install_error(&format!("cannot put the new version at {}", exe.display()), error));
     }
     Ok(())
-}
-
-
-pub fn relaunch(exe: &Path, args: Vec<OsString>) -> Result<(), UpdateError> {
-    std::process::Command::new(exe)
-        .args(args)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| UpdateError::Install(format!("cannot start {}: {error}", exe.display())))
 }
 
 

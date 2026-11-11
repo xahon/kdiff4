@@ -54,6 +54,9 @@ anyhow.workspace = true
 log.workspace = true
 flexi_logger.workspace = true
 clap.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

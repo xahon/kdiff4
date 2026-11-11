@@ -185,10 +185,10 @@ pub enum FindEvent {
 }
 
 /// The find bar, floating at the top right of `top_right`: a field, the option toggles, the result count, previous and next, and close.
-pub fn show_bar(ctx: &Context, top_right: Pos2, state: &mut FindState) -> Vec<FindEvent> {
+pub fn show_bar(ctx: &Context, tab: usize, top_right: Pos2, state: &mut FindState) -> Vec<FindEvent> {
     let mut events = Vec::new();
-    let field_id = Id::unique(FIELD_ID);
-    Area::new(Id::unique("find_bar"))
+    let field_id = Id::unique((FIELD_ID, tab));
+    Area::new(Id::unique(("find_bar", tab)))
         .order(Order::Foreground)
         .fixed_pos(top_right)
         .pivot(Align2::RIGHT_TOP)
@@ -441,7 +441,7 @@ mod tests {
             .with_size(vec2(600.0, 200.0))
             .build_ui_state(|ui, test: &mut BarTest| {
                 egui_extras::install_image_loaders(ui.ctx());
-                test.events.extend(show_bar(ui.ctx(), Pos2::new(580.0, 10.0), &mut test.state));
+                test.events.extend(show_bar(ui.ctx(), 0, Pos2::new(580.0, 10.0), &mut test.state));
             }, test);
         harness.run_steps(3);
         harness

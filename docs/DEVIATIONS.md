@@ -27,6 +27,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 
 ### Added features
 
+- Document tabs (see GUI in `ARCHITECTURE.md`): File → Open and subsequent command-line invocations add independent comparisons and merges to the same window. The last tab closes with the main window. Launching without arguments opens an independent, non-modal Open window whose Run button adds a tab. kdiff3 opens a separate comparison window for each invocation.
 - Splitting a region into smaller regions (see Splitting regions in `ARCHITECTURE.md`). kdiff3 cannot split its merge blocks.
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
 - Pluggable comparison engines (see Comparison engine in `ARCHITECTURE.md`). kdiff3 has one built-in algorithm.
@@ -101,7 +102,7 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 ### Open dialog
 
 - Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.
-- File dialogs remember the directory of the last confirmed file between sessions.
+- The standalone Open window remembers its last browsed directory and shares it with the main window on Run. File pickers in the main window remember the directory of the last confirmed file between sessions.
 
 ### Configuration
 
