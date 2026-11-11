@@ -29,6 +29,7 @@ mod text_view;
 mod theme;
 mod update_check;
 mod update_dialog;
+mod updater;
 mod window_frame;
 
 use std::path::PathBuf;
@@ -94,7 +95,8 @@ pub fn run(
 
 /// Runs an independent Open window and submits the chosen files to the comparison window.
 pub fn run_open_window(
+    check_for_updates: bool,
     submit: impl Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
-) -> Result<(), GuiError> {
-    open_dialog::run_window(submit)
+) -> Result<Option<PathBuf>, GuiError> {
+    open_dialog::run_window(check_for_updates, submit)
 }

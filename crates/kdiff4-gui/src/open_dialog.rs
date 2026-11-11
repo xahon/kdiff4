@@ -1,11 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
+use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
 use egui::{Align, Color32, Id, Label, Layout, Margin, Rect, RichText, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetText, pos2, vec2};
 use kdiff4_protocol::{Document, Labels, OpenFiles};
 
 use crate::{GuiError, config, theme};
+use crate::dialog_window::DialogWindows;
 use crate::paths::clean_path_text;
+use crate::updater::{UpdateWindow, Updater};
 
 /// The form fills the window or dialog up to this width; path fields take whatever the labels and buttons leave.
 const FORM_MAX_WIDTH: f32 = 720.0;
@@ -124,8 +127,9 @@ impl OpenForm {
 
 
 pub fn run_window(
+    check_for_updates: bool,
     submit: impl Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
-) -> Result<(), GuiError> {
+) -> Result<Option<PathBuf>, GuiError> {
     let options = eframe::NativeOptions {
         centered: true,
         viewport: egui::ViewportBuilder::default()
@@ -134,12 +138,23 @@ pub fn run_window(
             .with_min_inner_size(vec2(WINDOW_MIN_WIDTH, 0.0)),
         ..Default::default()
     };
+    let (restart, restarted) = mpsc::channel();
     eframe::run_native("Open", options, Box::new(move |cc| {
-        let settings = config::default_config_path()
-            .and_then(|path| config::load(&path).ok())
-            .unwrap_or_default();
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+        let loaded = config::default_config_path().and_then(|path| match config::load(&path) {
+            Ok(settings) => Some((path, settings)),
+            Err(error) => {
+                log::error!("{error}");
+                None
+            }
+        });
+        let (config_path, settings) = loaded.map_or_else(|| (None, config::GuiConfig::default()), |(path, settings)| (Some(path), settings));
         cc.egui_ctx.set_theme(theme::preference(settings.view.theme.clone()));
         theme::apply_style(&cc.egui_ctx, &settings.view);
+        let mut updater = Updater::default();
+        if check_for_updates {
+            updater.begin_startup_update_tasks(&cc.egui_ctx, &settings.updates, crate::update_check::release_url());
+        }
         Ok(Box::new(OpenWindow {
             form: OpenForm::default(),
             last_dir: settings.recent.last_dir,
@@ -148,8 +163,14 @@ pub fn run_window(
             pending: None,
             error: None,
             form_height: None,
+            updater,
+            updates: settings.updates,
+            dialogs: DialogWindows::default(),
+            config_path,
+            restart: Some(restart),
         }))
-    })).map_err(|error| GuiError::Eframe(error.to_string()))
+    })).map_err(|error| GuiError::Eframe(error.to_string()))?;
+    Ok(restarted.try_recv().ok())
 }
 
 
@@ -161,6 +182,11 @@ struct OpenWindow<F> {
     pending: Option<mpsc::Receiver<Result<(), String>>>,
     error: Option<String>,
     form_height: Option<f32>,
+    updater: Updater,
+    updates: config::UpdateConfig,
+    dialogs: DialogWindows,
+    config_path: Option<PathBuf>,
+    restart: Option<mpsc::Sender<PathBuf>>,
 }
 
 
@@ -169,8 +195,42 @@ where
     F: Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
 {
     fn show_panel(&mut self, ui: &mut Ui) {
+        let update_was_open = self.updater.update_window.is_some();
+        if self.pending.is_none() {
+            let previous = self.updates.clone();
+            self.updater.show(ui.ctx(), &mut self.dialogs, &mut self.updates, false);
+            if self.updates != previous && let Some(path) = &self.config_path {
+                if let Err(error) = config::load(path).and_then(|mut settings| {
+                    if self.updates.last_check_unix != previous.last_check_unix {
+                        settings.updates.last_check_unix = self.updates.last_check_unix;
+                    }
+                    if self.updates.skipped_version != previous.skipped_version {
+                        settings.updates.skipped_version = self.updates.skipped_version.clone();
+                    }
+                    config::save(path, &settings)
+                }) {
+                    log::error!("{error}");
+                }
+            }
+            if let Some(exe) = self.updater.restart.take() {
+                if let Some(restart) = &self.restart {
+                    let _ = restart.send(exe);
+                }
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+        }
+        if matches!(self.updater.update_window, Some(UpdateWindow::Installing { .. })) && ui.input(|input| input.viewport().close_requested()) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        let update_open = update_was_open || self.updater.update_window.is_some();
         let frame = egui::Frame::central_panel(ui.style()).inner_margin(WINDOW_MARGIN);
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| self.show(ui));
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            ui.add_enabled_ui(!update_open, |ui| self.show(ui));
+        });
+        if update_was_open && self.updater.update_window.is_none() {
+            ui.ctx().request_repaint();
+        }
     }
 
 
@@ -203,6 +263,9 @@ where
         let form = ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| self.form.show(ui, None, self.error.as_deref(), true));
         self.fit_height(ui.ctx(), form.response.rect.height().ceil());
         let action = form.inner;
+        if !ui.is_enabled() {
+            return;
+        }
         let action = if ui.input(|input| input.key_pressed(egui::Key::Escape)) { Some(FormAction::Cancel) } else { action };
         match action {
             Some(FormAction::Browse(document)) => {
@@ -260,8 +323,9 @@ impl<F> eframe::App for OpenWindow<F>
 where
     F: Fn(OpenFiles, Option<PathBuf>) -> Result<(), String> + Send + Sync + 'static,
 {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         self.show_panel(ui);
+        self.dialogs.end_frame(frame.window_handle().ok().map(|handle| handle.as_raw()));
     }
 }
 
@@ -384,6 +448,11 @@ mod tests {
             pending: None,
             error: None,
             form_height: None,
+            updater: Updater::default(),
+            updates: config::UpdateConfig::default(),
+            dialogs: DialogWindows::default(),
+            config_path: None,
+            restart: None,
         };
         let mut first = make_window();
         first.form = form(["a.txt", "b.txt", "", ""]);
@@ -411,7 +480,39 @@ mod tests {
             pending: None,
             error: None,
             form_height: None,
+            updater: Updater::default(),
+            updates: config::UpdateConfig::default(),
+            dialogs: DialogWindows::default(),
+            config_path: None,
+            restart: None,
         }
+    }
+
+
+    #[test]
+    fn standalone_open_window_offers_a_newer_release_at_startup() {
+        use egui_kittest::kittest::Queryable;
+        use std::time::{Duration, Instant};
+
+        let mut url = Some(crate::update_check::tests::serve_once("200 OK", r#"{"tag_name":"v99.0.0","html_url":"https://example.com/release"}"#));
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(720.0, 400.0))
+            .build_ui_state(move |ui, window| {
+                if let Some(url) = url.take() {
+                    window.updater.begin_startup_update_tasks(ui.ctx(), &window.updates, url);
+                }
+                window.show_panel(ui);
+            }, layout_test_window());
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while harness.state().updater.update_window.is_none() && Instant::now() < deadline {
+            harness.run();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.get_by_label("Update Available");
+        assert_ne!(harness.state().updates.last_check_unix, 0);
+        harness.get_by_label(crate::update_dialog::REMIND_LABEL).click();
+        harness.run_steps(2);
+        assert!(harness.state().updater.update_window.is_none());
     }
 
 

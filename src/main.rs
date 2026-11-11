@@ -92,8 +92,7 @@ fn run_window(directory: PathBuf) -> anyhow::Result<bool> {
         }, spawn_open_window).context("GUI failed");
         drop(server);
         if let Some(exe) = restart? {
-            std::process::Command::new(&exe).env_remove(instance::SERVER_ENV).spawn()
-                .with_context(|| format!("cannot restart {}", exe.display()))?;
+            restart_updated_executable(&exe)?;
         }
         Ok(true)
     })();
@@ -117,14 +116,26 @@ fn spawn_open_window() -> std::io::Result<()> {
 }
 
 
+fn restart_updated_executable(exe: &std::path::Path) -> anyhow::Result<()> {
+    std::process::Command::new(exe).env_remove(instance::SERVER_ENV).spawn()
+        .with_context(|| format!("cannot restart {}", exe.display()))?;
+    Ok(())
+}
+
+
 fn run_open_window() -> anyhow::Result<bool> {
-    kdiff4_gui::run_open_window(|files, last_dir| {
+    let check_for_updates = !instance::has_window().unwrap_or(false);
+    let _logger = check_for_updates.then(logging::init);
+    let restart = kdiff4_gui::run_open_window(check_for_updates, |files, last_dir| {
         match instance::open_from_form(files, last_dir) {
             Ok(true) => Ok(()),
             Ok(false) => Err("Kdiff4 could not accept the files.".into()),
             Err(error) => Err(format!("{error:#}")),
         }
     }).context("cannot show the Open window")?;
+    if let Some(exe) = restart {
+        restart_updated_executable(&exe)?;
+    }
     Ok(true)
 }
 

@@ -91,6 +91,14 @@ pub fn open_from_form(files: OpenFiles, last_dir: Option<PathBuf>) -> anyhow::Re
 }
 
 
+pub fn has_window() -> io::Result<bool> {
+    let Some(cache) = dirs::cache_dir() else {
+        return Ok(false);
+    };
+    current_window(&cache.join("kdiff4").join("instance-v2")).map(|window| window.is_some())
+}
+
+
 fn submit(launch: OpenDocument, form: Option<FormSubmission>) -> anyhow::Result<bool> {
     let document = LaunchFiles::new(launch).context("cannot resolve launch paths")?;
     let request = Invocation { document, form };

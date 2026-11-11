@@ -191,7 +191,7 @@ impl UpdateCheck {
 
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -209,7 +209,7 @@ mod tests {
         }
     }
 
-    fn serve_once(status_line: &'static str, body: &'static str) -> String {
+    pub(crate) fn serve_once(status_line: &'static str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/latest", listener.local_addr().unwrap());
         std::thread::spawn(move || {
