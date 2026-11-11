@@ -2126,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "kdiff4"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "kdiff4-core"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "chardetng",
  "dirs",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "kdiff4-gui"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "dirs",
  "eframe",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "kdiff4-protocol"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "insta",
  "log",
