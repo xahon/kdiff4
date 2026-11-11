@@ -33,6 +33,7 @@ use crate::updater::{UpdateWindow, Updater};
 use crate::window_frame;
 
 const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const OPEN_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
 const RELOAD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
 const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
@@ -47,6 +48,9 @@ const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modif
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
+const REOPEN_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
+const LEFT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft);
+const RIGHT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight);
 const NEXT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
 const PREVIOUS_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
@@ -54,7 +58,7 @@ const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
-const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::W);
+const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
 const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
 /// egui can't tell the numeric keypad's minus and plus from the main ones, so both fold and unfold.
 const FOLD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
@@ -184,9 +188,17 @@ struct DocumentTab {
 }
 
 
+struct ClosedTab {
+    id: usize,
+    form: OpenForm,
+    files: Option<OpenFiles>,
+}
+
+
 pub struct KdiffApp {
     tab: DocumentTab,
     background: Vec<DocumentTab>,
+    closed_tabs: Vec<ClosedTab>,
     next_tab_id: usize,
     new_client: Box<dyn Fn() -> std::io::Result<Client>>,
     incoming: Option<Receiver<OpenRequest>>,
@@ -273,6 +285,22 @@ impl DocumentTab {
         }
     }
 
+    fn reopen_files(&self) -> Option<OpenFiles> {
+        let Some(mirror) = &self.mirror else {
+            return self.pending.values().any(|kind| *kind == Pending::Open).then(|| self.form.files()).flatten();
+        };
+        let a = mirror.document(Document::A)?;
+        let b = mirror.document(Document::B)?;
+        let c = mirror.document(Document::C);
+        Some(OpenFiles {
+            a: a.path.clone(),
+            b: b.path.clone(),
+            c: c.map(|source| source.path.clone()),
+            output: mirror.output().and_then(|output| output.path.clone()),
+            labels: kdiff4_protocol::Labels { a: a.label.clone(), b: b.label.clone(), c: c.and_then(|source| source.label.clone()) },
+        })
+    }
+
     fn title_path(&self) -> Option<PathBuf> {
         self.mirror.as_ref().and_then(|mirror| {
             mirror.output().and_then(|output| output.path.clone())
@@ -303,6 +331,7 @@ impl KdiffApp {
         let mut app = KdiffApp {
             tab: DocumentTab::new(ctx, 0, client),
             background: Vec::new(),
+            closed_tabs: Vec::new(),
             next_tab_id: 1,
             new_client: Box::new(new_client),
             incoming: None,
@@ -411,17 +440,41 @@ impl KdiffApp {
             ctx.request_repaint();
             return;
         }
-        if let Some(index) = index {
-            self.background.swap_remove(index).finish();
+        let mut closed = if let Some(index) = index {
+            self.background.swap_remove(index)
         } else {
             let index = self.background.iter().enumerate()
                 .min_by_key(|(_, tab)| (tab.id < id, tab.id.abs_diff(id)))
                 .map(|(index, _)| index)
                 .expect("Tabs: no replacement tab");
             let replacement = self.background.swap_remove(index);
-            std::mem::replace(&mut self.tab, replacement).finish();
+            let closed = std::mem::replace(&mut self.tab, replacement);
             self.tab_activated(ctx);
+            closed
+        };
+        closed.finish();
+        let files = closed.reopen_files();
+        self.closed_tabs.push(ClosedTab { id, form: closed.form, files });
+    }
+
+    fn reopen_tab(&mut self, ctx: &egui::Context) {
+        let Some(closed) = self.closed_tabs.last() else { return };
+        let client = match (self.new_client)() {
+            Ok(client) => client,
+            Err(error) => {
+                self.report_error(format!("Cannot reopen tab: {error}"));
+                return;
+            }
+        };
+        let mut tab = DocumentTab::new(ctx, closed.id, client);
+        let closed = self.closed_tabs.pop().expect("Tabs: no closed tab to reopen");
+        tab.form = closed.form;
+        self.background.push(std::mem::replace(&mut self.tab, tab));
+        if let Some(files) = closed.files {
+            self.tab.form.set_files(&files);
+            self.open_files(files);
         }
+        self.tab_activated(ctx);
     }
 
     fn exit(&mut self, ctx: &egui::Context, discard: bool) {
@@ -1918,7 +1971,8 @@ Shortcut: {}", link.display()),
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    let open = egui::Button::new("Open...").shortcut_text(ui.ctx().format_shortcut(&OPEN_SHORTCUT));
+                    let shortcuts = format!("{} / {}", ui.ctx().format_shortcut(&OPEN_SHORTCUT), ui.ctx().format_shortcut(&OPEN_TAB_SHORTCUT));
+                    let open = egui::Button::new("Open...").shortcut_text(shortcuts);
                     if ui.add(open).clicked() {
                         self.open_form();
                     }
@@ -1938,6 +1992,10 @@ Shortcut: {}", link.display()),
                     let close = egui::Button::new("Close Tab").shortcut_text(ui.ctx().format_shortcut(&CLOSE_TAB_SHORTCUT));
                     if ui.add_enabled(!self.background.is_empty() && !self.tab.is_saving(), close).clicked() {
                         self.close_tab_requested = true;
+                    }
+                    let reopen = egui::Button::new("Reopen Closed Tab").shortcut_text(ui.ctx().format_shortcut(&REOPEN_TAB_SHORTCUT));
+                    if ui.add_enabled(!self.closed_tabs.is_empty() && !self.tab_switch_blocked(), reopen).clicked() {
+                        self.reopen_tab(ui.ctx());
                     }
                     let exit = egui::Button::new("Exit").shortcut_text(ui.ctx().format_shortcut(&EXIT_SHORTCUT));
                     if ui.add(exit).clicked() {
@@ -2237,7 +2295,7 @@ Shortcut: {}", link.display()),
     }
 
 
-    /// Turns ignoring whitespace in the character diff on or off, from the toolbar, the View menu or Ctrl+Shift+W. The engine recomputes the character diffs; D keeps its choices and edits.
+    /// Turns ignoring whitespace in the character diff on or off, from the toolbar, the View menu or Ctrl+Shift+I. The engine recomputes the character diffs; D keeps its choices and edits.
     fn toggle_ignore_whitespace(&mut self) {
         let Some(mirror) = self.tab.mirror.as_ref() else { return };
         let options = kdiff4_protocol::engine::ComparisonOptions {
@@ -2376,6 +2434,32 @@ Shortcut: {}", link.display()),
             self.frame_radius = Some(radius);
         }
     }
+
+    fn handle_tab_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.tab_switch_blocked() {
+            return;
+        }
+        let consume = |shortcut: &KeyboardShortcut| ctx.input_mut(|input| {
+            let count = input.events.len();
+            input.events.retain(|event| !matches!(event,
+                egui::Event::Key { key, pressed: true, modifiers, .. }
+                    if *key == shortcut.logical_key && modifiers.matches_exact(shortcut.modifiers)
+            ));
+            input.events.len() != count
+        });
+        if consume(&PREVIOUS_TAB_SHORTCUT) || consume(&LEFT_TAB_SHORTCUT) {
+            self.cycle_tab(ctx, false);
+        } else if consume(&NEXT_TAB_SHORTCUT) || consume(&RIGHT_TAB_SHORTCUT) {
+            self.cycle_tab(ctx, true);
+        }
+        if consume(&REOPEN_TAB_SHORTCUT) {
+            self.reopen_tab(ctx);
+        } else if consume(&OPEN_TAB_SHORTCUT) {
+            self.open_form();
+        } else if consume(&CLOSE_TAB_SHORTCUT) {
+            self.close_tab(ctx, self.tab.id, false);
+        }
+    }
 }
 
 impl eframe::App for KdiffApp {
@@ -2400,16 +2484,7 @@ impl eframe::App for KdiffApp {
             return;
         }
         let ctx = ui.ctx().clone();
-        if !self.tab_switch_blocked() {
-            if ctx.input_mut(|input| input.consume_shortcut(&PREVIOUS_TAB_SHORTCUT)) {
-                self.cycle_tab(&ctx, false);
-            } else if ctx.input_mut(|input| input.consume_shortcut(&NEXT_TAB_SHORTCUT)) {
-                self.cycle_tab(&ctx, true);
-            }
-            if ctx.input_mut(|input| input.consume_shortcut(&CLOSE_TAB_SHORTCUT)) {
-                self.close_tab(&ctx, self.tab.id, false);
-            }
-        }
+        self.handle_tab_shortcuts(&ctx);
         self.show_menu(ui);
         if self.exiting {
             return;
@@ -2813,6 +2888,41 @@ mod tests {
 
 
     #[test]
+    fn tab_shortcuts_switch_close_and_reopen_in_place() {
+        let (mut app, _host, ctx) = app_with_session();
+        assert!(app.activate_new_tab(&ctx));
+        assert!(app.activate_new_tab(&ctx));
+        press(&mut app, &ctx, Key::ArrowLeft, Modifiers::ALT);
+        assert_eq!(app.tab.id, 1);
+        press(&mut app, &ctx, Key::ArrowRight, Modifiers::ALT);
+        assert_eq!(app.tab.id, 2);
+        press(&mut app, &ctx, Key::ArrowRight, Modifiers::ALT);
+        assert_eq!(app.tab.id, 0);
+
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab_ids(), [0, 1, 2]);
+        press(&mut app, &ctx, Key::W, Modifiers::COMMAND);
+        assert_eq!(app.tab_ids(), [1, 2]);
+        press(&mut app, &ctx, Key::W, Modifiers::COMMAND);
+        assert_eq!(app.tab_ids(), [2]);
+
+        press(&mut app, &ctx, Key::W, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab_ids(), [2]);
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab.id, 1);
+        assert_eq!(app.tab_ids(), [1, 2]);
+        let (client, host) = kdiff4_protocol::in_process();
+        let client = std::cell::RefCell::new(Some(client));
+        app.new_client = Box::new(move || Ok(client.borrow_mut().take().unwrap()));
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab.id, 0);
+        assert_eq!(app.tab_ids(), [0, 1, 2]);
+        let files = OpenFiles { a: "A.txt".into(), b: "B.txt".into(), ..OpenFiles::default() };
+        assert_eq!(sent(app, host), [Command::Open(files)]);
+    }
+
+
+    #[test]
     fn a_forwarded_merge_opens_in_its_own_tab_and_retains_the_other_session() {
         let (mut app, first_host, ctx) = app_with_session();
         app.tab.panes.source_scroll.set(400.0);
@@ -2914,8 +3024,11 @@ mod tests {
             Ok(())
         });
         app.open_form();
-        app.open_form();
-        assert_eq!(opens.try_iter().count(), 2);
+        press(&mut app, &ctx, Key::O, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(opens.try_iter().count(), 3);
+        assert_eq!(app.tab_ids(), [0]);
         assert!(!app.tab_switch_blocked());
         assert!(app.activate_new_tab(&ctx));
         app.cycle_tab(&ctx, false);
@@ -3055,7 +3168,10 @@ mod tests {
                 modifiers,
             },
         ];
-        ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| app.handle_shortcuts(ctx))
+        ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| {
+            app.handle_tab_shortcuts(ctx);
+            app.handle_shortcuts(ctx);
+        })
             .drop_without_applying_deltas();
     }
 
