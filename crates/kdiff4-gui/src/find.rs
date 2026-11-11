@@ -1,15 +1,15 @@
 use egui::text::{CCursor, CCursorRange};
-use egui::{Align2, Area, Context, Frame, Id, Key, Order, Painter, Pos2, Response, Sense, Stroke, TextEdit, Ui, Vec2, Role, WidgetInfo, vec2};
+use egui::{Align2, Area, Context, Frame, Id, Key, Order, Pos2, Rect, Response, Sense, TextEdit, Ui, Vec2, Role, WidgetInfo, vec2};
 use kdiff4_protocol::Document;
 use regex::RegexBuilder;
 use thiserror::Error;
 
 use crate::editing::{Cursor, Lines, Position};
+use crate::icons::{self, Icon};
 
 const FIELD_ID: &str = "find_field";
 const FIELD_WIDTH: f32 = 220.0;
-/// Half the size of the icons of the bar's buttons.
-const ICON_ARM: f32 = 4.0;
+const ICON_SIZE: f32 = 10.0;
 /// Upper bound on the compiled size of a search expression, so a pathological one fails instead of eating memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
@@ -227,13 +227,13 @@ pub fn show_bar(ctx: &Context, top_right: Pos2, state: &mut FindState) -> Vec<Fi
                     let summary = state.summary();
                     let color = if state.error.is_some() { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
                     ui.add_sized(vec2(90.0, ui.spacing().interact_size.y), egui::Label::new(egui::RichText::new(summary).color(color)).truncate());
-                    if icon_button(ui, "Previous Match", "Previous Match (Shift+F3)", |painter, center, stroke| chevron(painter, center, stroke, -1.0)).clicked() {
+                    if icon_button(ui, "Previous Match", "Previous Match (Shift+F3)", icons::PREVIOUS_MATCH).clicked() {
                         events.push(FindEvent::Previous);
                     }
-                    if icon_button(ui, "Next Match", "Next Match (F3)", |painter, center, stroke| chevron(painter, center, stroke, 1.0)).clicked() {
+                    if icon_button(ui, "Next Match", "Next Match (F3)", icons::NEXT_MATCH).clicked() {
                         events.push(FindEvent::Next);
                     }
-                    if icon_button(ui, "Close", "Close (Escape)", cross).clicked() {
+                    if icon_button(ui, "Close", "Close (Escape)", icons::CLOSE).clicked() {
                         events.push(FindEvent::Close);
                     }
                 });
@@ -243,28 +243,16 @@ pub fn show_bar(ctx: &Context, top_right: Pos2, state: &mut FindState) -> Vec<Fi
 }
 
 
-/// A square button with an icon painted by `paint` around the center, named `label` for screen readers.
-fn icon_button(ui: &mut Ui, label: &str, hint: &str, paint: impl FnOnce(&Painter, Pos2, Stroke)) -> Response {
+/// A square button with a centered icon, named `label` for screen readers.
+fn icon_button(ui: &mut Ui, label: &str, hint: &str, image: Icon) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(ui.spacing().interact_size.y), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(Role::Button, ui.is_enabled(), label));
     if response.hovered() {
         ui.painter().rect_filled(rect, ui.visuals().widgets.hovered.corner_radius, ui.visuals().widgets.hovered.weak_bg_fill);
     }
-    paint(ui.painter(), rect.center(), Stroke::new(1.5, ui.visuals().text_color()));
+    let icon = Rect::from_center_size(rect.center(), Vec2::splat(ICON_SIZE));
+    image.image().tint(ui.visuals().text_color()).paint_at(ui, icon);
     response.on_hover_text(hint)
-}
-
-
-/// A chevron pointing down for a `direction` of 1 and up for -1.
-fn chevron(painter: &Painter, center: Pos2, stroke: Stroke, direction: f32) {
-    let half = ICON_ARM / 2.0 * direction;
-    painter.line(vec![center + vec2(-ICON_ARM, -half), center + vec2(0.0, half), center + vec2(ICON_ARM, -half)], stroke);
-}
-
-
-fn cross(painter: &Painter, center: Pos2, stroke: Stroke) {
-    painter.line_segment([center + vec2(-ICON_ARM, -ICON_ARM), center + vec2(ICON_ARM, ICON_ARM)], stroke);
-    painter.line_segment([center + vec2(-ICON_ARM, ICON_ARM), center + vec2(ICON_ARM, -ICON_ARM)], stroke);
 }
 
 
@@ -451,7 +439,10 @@ mod tests {
         };
         let mut harness = egui_kittest::Harness::builder()
             .with_size(vec2(600.0, 200.0))
-            .build_ui_state(|ui, test: &mut BarTest| test.events.extend(show_bar(ui.ctx(), Pos2::new(580.0, 10.0), &mut test.state)), test);
+            .build_ui_state(|ui, test: &mut BarTest| {
+                egui_extras::install_image_loaders(ui.ctx());
+                test.events.extend(show_bar(ui.ctx(), Pos2::new(580.0, 10.0), &mut test.state));
+            }, test);
         harness.run_steps(3);
         harness
     }

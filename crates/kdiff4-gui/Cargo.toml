@@ -23,6 +23,9 @@ semver.workspace = true
 serde_json.workspace = true
 egui_commonmark.workspace = true
 
+[build-dependencies]
+egui_extras.workspace = true
+
 [dev-dependencies]
 insta.workspace = true
 proptest.workspace = true

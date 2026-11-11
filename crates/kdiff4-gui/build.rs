@@ -11,7 +11,20 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 
+fn rasterize_application_icon() {
+    const SOURCE: &str = "../../res/icons/kdiff4.svg";
+    println!("cargo:rerun-if-changed={SOURCE}");
+    let svg = std::fs::read(SOURCE).expect("Build: could not read the application icon");
+    let image = egui_extras::image::load_svg_bytes(&svg, &Default::default()).expect("Build: could not rasterize the application icon");
+    assert_eq!(image.size, [64, 64], "Build: the application icon must be 64 by 64 pixels");
+    let rgba: Vec<u8> = image.pixels.iter().flat_map(|pixel| pixel.to_srgba_unmultiplied()).collect();
+    let out_dir = std::env::var_os("OUT_DIR").expect("Build: Cargo did not supply OUT_DIR");
+    std::fs::write(std::path::Path::new(&out_dir).join("kdiff4.rgba"), rgba).expect("Build: could not write the application icon raster");
+}
+
+
 fn main() {
+    rasterize_application_icon();
     println!("cargo:rerun-if-changed=build.rs");
     for name in ["HEAD", "packed-refs"] {
         if let Some(path) = git(&["rev-parse", "--git-path", name]) {

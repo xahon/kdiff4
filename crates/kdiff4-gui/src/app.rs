@@ -16,6 +16,7 @@ use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
 use crate::folding::{self, Folds};
 use crate::fonts::{self, FontScan};
+use crate::icons::{self, Icon};
 use crate::language::{self, Language, LanguageState};
 use crate::mirror::{DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
@@ -2012,29 +2013,29 @@ Shortcut: {}", link.display()),
         let mut ignore_whitespace_toggled = false;
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, paint_void_icon).on_hover_text(VOID_TOGGLE_HINT);
+                let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, icons::SHOW_VOID).on_hover_text(VOID_TOGGLE_HINT);
                 if is_merge && response.clicked() {
                     toggled = true;
                 }
-                if toolbar_toggle(ui, OVERVIEW_TOGGLE_LABEL, overview_on, true, paint_overview_icon)
+                if toolbar_toggle(ui, OVERVIEW_TOGGLE_LABEL, overview_on, true, icons::OVERVIEW)
                     .on_hover_text(OVERVIEW_TOGGLE_HINT)
                     .clicked()
                 {
                     overview_toggled = true;
                 }
-                if toolbar_toggle(ui, MINIMAP_TOGGLE_LABEL, minimap_on, true, paint_minimap_icon)
+                if toolbar_toggle(ui, MINIMAP_TOGGLE_LABEL, minimap_on, true, icons::MINIMAP)
                     .on_hover_text(MINIMAP_TOGGLE_HINT)
                     .clicked()
                 {
                     minimap_toggled = true;
                 }
-                if toolbar_toggle(ui, INDEPENDENT_SCROLL_TOGGLE_LABEL, independent_on, true, paint_independent_scroll_icon)
+                if toolbar_toggle(ui, INDEPENDENT_SCROLL_TOGGLE_LABEL, independent_on, true, icons::INDEPENDENT_SCROLL)
                     .on_hover_text(INDEPENDENT_SCROLL_TOGGLE_HINT)
                     .clicked()
                 {
                     independent_toggled = true;
                 }
-                if toolbar_toggle(ui, IGNORE_WHITESPACE_TOGGLE_LABEL, ignore_whitespace_on, true, paint_ignore_whitespace_icon)
+                if toolbar_toggle(ui, IGNORE_WHITESPACE_TOGGLE_LABEL, ignore_whitespace_on, true, icons::IGNORE_WHITESPACE)
                     .on_hover_text(IGNORE_WHITESPACE_TOGGLE_HINT)
                     .clicked()
                 {
@@ -2369,8 +2370,8 @@ fn toolbar_button_size(label_size: egui::Vec2, padding: egui::Vec2) -> egui::Vec
     egui::vec2(label_size.x.max(TOOLBAR_ICON_SIZE), TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + label_size.y) + padding * 2.0
 }
 
-/// A bordered toolbar button with its icon centered above the label; filled while `on`. `paint_icon` draws the icon into its square in the given color.
-fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, paint_icon: impl FnOnce(&egui::Ui, egui::Rect, egui::Color32)) -> egui::Response {
+/// A bordered toolbar button with its icon centered above the label; filled while `on`.
+fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, image: Icon) -> egui::Response {
     let palette = theme::palette_of(ui);
     let color = if enabled { palette.text } else { palette.weak_text.gamma_multiply(0.5) };
     let galley = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Button.resolve(ui.style()), color);
@@ -2395,89 +2396,12 @@ fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, paint
         egui::pos2(rect.center().x, rect.top() + padding.y + TOOLBAR_ICON_SIZE / 2.0),
         egui::vec2(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE),
     );
-    paint_icon(ui, icon, color);
+    image.image().tint(color).paint_at(ui, icon);
     ui.painter()
         .galley(egui::pos2(rect.center().x - galley.size().x / 2.0, icon.bottom() + TOOLBAR_ICON_GAP), galley, color);
     response
 }
 
-/// A small square, hatched like void space.
-fn paint_void_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
-    let radius = theme::corner_radius_of(ui).max(3);
-    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
-    let clip = ui.painter().with_clip_rect(square);
-    let spacing = 3.0;
-    let mut sum = square.left() + square.top() - square.height();
-    while sum < square.right() + square.bottom() {
-        clip.line_segment(
-            [egui::pos2(sum - square.bottom(), square.bottom()), egui::pos2(sum - square.top(), square.top())],
-            egui::Stroke::new(1.0, stroke_color),
-        );
-        sum += spacing;
-    }
-    ui.painter()
-        .rect_stroke(square, radius.min(4), egui::Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
-}
-
-/// A tall box with a smaller box inside it, standing for the view on the whole document.
-fn paint_minimap_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
-    let radius = theme::corner_radius_of(ui).max(3);
-    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
-    let stroke = egui::Stroke::new(1.0, stroke_color);
-    let view = egui::Rect::from_min_size(square.min + egui::vec2(3.0, square.height() * 0.3), egui::vec2(square.width() - 6.0, square.height() * 0.3));
-    ui.painter().rect_filled(view, 0.0, stroke_color.gamma_multiply(0.4));
-    ui.painter().rect_stroke(view, 0.0, stroke, egui::StrokeKind::Inside);
-    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
-}
-
-/// Two boxes side by side, each with a view band at a different height: panes scrolled apart.
-fn paint_independent_scroll_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
-    let radius = theme::corner_radius_of(ui).max(3).min(4);
-    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
-    let stroke = egui::Stroke::new(1.0, stroke_color);
-    let width = (square.width() - 2.0) / 2.0;
-    for (index, band_top) in [0.15, 0.55].iter().enumerate() {
-        let left = square.left() + index as f32 * (width + 2.0);
-        let column = egui::Rect::from_min_size(egui::pos2(left, square.top()), egui::vec2(width, square.height()));
-        let band = egui::Rect::from_min_size(egui::pos2(left + 2.0, square.top() + square.height() * band_top), egui::vec2(width - 4.0, square.height() * 0.3));
-        ui.painter().rect_filled(band, 0.0, stroke_color.gamma_multiply(0.4));
-        ui.painter().rect_stroke(column, radius, stroke, egui::StrokeKind::Inside);
-    }
-}
-
-
-/// Two words with a dotted gap between them in a box: whitespace that doesn't count.
-fn paint_ignore_whitespace_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
-    let radius = theme::corner_radius_of(ui).max(3);
-    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
-    let stroke = egui::Stroke::new(1.0, stroke_color);
-    let left = square.left() + 3.0;
-    let right = square.right() - 3.0;
-    let width = right - left;
-    for (index, y) in [0.35, 0.65].iter().enumerate() {
-        let y = square.top() + square.height() * y;
-        let words = if index == 0 { (0.3, 0.6) } else { (0.45, 0.7) };
-        ui.painter().hline(left..=left + width * words.0, y, stroke);
-        ui.painter().hline(left + width * words.1..=right, y, stroke);
-        let dot = egui::pos2(left + width * (words.0 + words.1) / 2.0, y);
-        ui.painter().circle_filled(dot, 1.0, stroke_color.gamma_multiply(0.5));
-    }
-    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
-}
-
-
-/// Four lines of text of different lengths in a box.
-fn paint_overview_icon(ui: &egui::Ui, rect: egui::Rect, stroke_color: egui::Color32) {
-    let radius = theme::corner_radius_of(ui).max(3);
-    let square = egui::Rect::from_center_size(rect.center(), rect.size() * 0.8);
-    let stroke = egui::Stroke::new(1.0, stroke_color);
-    let left = square.left() + 3.0;
-    for (index, share) in [0.8, 0.55, 0.7, 0.45].iter().enumerate() {
-        let y = square.top() + square.height() * (index as f32 + 1.0) / 5.0;
-        ui.painter().hline(left..=left + (square.width() - 6.0) * share, y, stroke);
-    }
-    ui.painter().rect_stroke(square, radius.min(4), stroke, egui::StrokeKind::Inside);
-}
 
 /// The number of the applied alignment around `line` of `document` that is innermost: the one with the shortest part there, and of equal parts the one nested in the most alignments.
 fn innermost_applied_alignment(alignments: &Alignments, document: Document, line: usize, documents: usize) -> Option<u32> {
