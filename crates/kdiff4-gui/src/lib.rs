@@ -31,6 +31,7 @@ mod update_check;
 mod update_dialog;
 mod updater;
 mod window_frame;
+mod window_placement;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
@@ -83,9 +84,10 @@ pub fn run(
             let ctx = cc.egui_ctx.clone();
             set_waker(Box::new(move || ctx.request_repaint()));
             let mut app = app::KdiffApp::new(&cc.egui_ctx, client, new_client);
+            app.restore_window(cc);
             app.connect_launches(incoming, restart);
             app.set_open_window(open_window);
-            app.receive_launches(&cc.egui_ctx);
+            app.receive_startup_launches(&cc.egui_ctx);
             app.begin_startup_update_tasks(&cc.egui_ctx);
             Ok(Box::new(app))
         })).map_err(|error| GuiError::Eframe(error.to_string()))?;

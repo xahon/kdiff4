@@ -215,6 +215,9 @@ pub struct KdiffApp {
     /// False when the config file failed to load, so the broken file is not overwritten.
     config_writable: bool,
     window_enlarged: bool,
+    restore_window_state: bool,
+    window_placement_changed: bool,
+    activate_window: bool,
     settings: Option<SettingsDialog>,
     font_scan: FontScan,
     /// The view settings currently applied to the egui context: the saved ones, or the settings dialog's draft.
@@ -347,6 +350,9 @@ impl KdiffApp {
             config,
             config_writable,
             window_enlarged: false,
+            restore_window_state: false,
+            window_placement_changed: false,
+            activate_window: false,
             settings: None,
             font_scan: FontScan::default(),
             applied_view: None,
@@ -361,6 +367,32 @@ impl KdiffApp {
         app.apply_view(ctx, &view);
         app
     }
+
+    pub fn restore_window(&mut self, cc: &eframe::CreationContext<'_>) {
+        let (Some(saved), Some(window)) = (&self.config.window, cc.winit_window()) else { return };
+        self.window_enlarged = true;
+        self.restore_window_state = true;
+        let monitor = window.available_monitors().find(|monitor| {
+            let pos = monitor.position();
+            saved.monitor == Some([pos.x, pos.y])
+        }).or_else(|| window.current_monitor()).or_else(|| window.primary_monitor());
+        if let Some(monitor) = monitor {
+            let mut position = monitor.position();
+            let bounds = monitor.size();
+            let scale = monitor.scale_factor() as f32;
+            let size = saved.size_on_monitor(INITIAL_WINDOW_SIZE.into(), egui::vec2(bounds.width as f32, bounds.height as f32) / scale) * scale;
+            if saved.monitor == Some([position.x, position.y]) && let Some([x, y]) = saved.position {
+                position.x = x.clamp(position.x, position.x.saturating_add(bounds.width.saturating_sub(64) as i32));
+                position.y = y.clamp(position.y, position.y.saturating_add(bounds.height.saturating_sub(64) as i32));
+                window.set_outer_position(position);
+            }
+            let mut inner_size = window.inner_size();
+            inner_size.width = size.x.round() as u32;
+            inner_size.height = size.y.round() as u32;
+            let _ = window.request_inner_size(inner_size);
+        }
+    }
+
 
     pub fn connect_launches(&mut self, incoming: Receiver<OpenRequest>, restart: Sender<PathBuf>) {
         self.incoming = Some(incoming);
@@ -494,6 +526,9 @@ impl KdiffApp {
             return;
         }
         self.exiting = true;
+        if self.window_placement_changed {
+            self.save_config(false);
+        }
         self.tab.finish();
         for tab in &mut self.background {
             tab.finish();
@@ -539,17 +574,17 @@ impl KdiffApp {
         }
     }
 
-    pub fn receive_launches(&mut self, ctx: &egui::Context) {
-        let mut raise_window = false;
+    pub fn receive_startup_launches(&mut self, ctx: &egui::Context) {
+        self.receive_launches(ctx, true);
+    }
+
+
+    fn receive_launches(&mut self, ctx: &egui::Context, starting: bool) {
         if let Some(incoming) = &self.incoming {
             for request in incoming.try_iter() {
-                raise_window = true;
+                self.activate_window |= !starting || matches!(request.document, OpenDocument::Prefill(..));
                 self.waiting_launches.push_back(request);
             }
-        }
-        if raise_window {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         while !self.tab_switch_blocked() {
             let Some(request) = self.waiting_launches.pop_front() else {
@@ -588,6 +623,37 @@ impl KdiffApp {
                 let _ = completion.send(dispatched);
             }
             self.reveal_tab = true;
+        }
+    }
+
+
+    fn update_window_state(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if std::mem::take(&mut self.restore_window_state) {
+            if let Some(saved) = &self.config.window {
+                if saved.maximized {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                }
+                if saved.minimized && !self.activate_window {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+            }
+        } else if let Some(window) = frame.winit_window() {
+            let monitor = window.current_monitor().map(|monitor| {
+                let pos = monitor.position();
+                [pos.x, pos.y]
+            });
+            let previous = self.config.window.clone();
+            ctx.input(|input| crate::window_placement::WindowPlacement::record(&mut self.config.window, input.viewport(), input.pixels_per_point, monitor));
+            self.window_placement_changed |= self.config.window != previous;
+        }
+        if self.activate_window {
+            if ctx.input(|input| input.viewport().minimized == Some(true)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                self.activate_window = false;
+            }
         }
     }
 
@@ -2463,7 +2529,7 @@ Shortcut: {}", link.display()),
 }
 
 impl eframe::App for KdiffApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.drain_messages(ctx, true);
         let mut background = std::mem::take(&mut self.background);
         for tab in &mut background {
@@ -2472,10 +2538,13 @@ impl eframe::App for KdiffApp {
             std::mem::swap(&mut self.tab, tab);
         }
         self.background = background;
-        if ctx.input(|input| input.viewport().close_requested()) {
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        if !closing && !self.exiting {
+            self.receive_launches(ctx, false);
+        }
+        self.update_window_state(ctx, frame);
+        if closing {
             self.exit(ctx, false);
-        } else if !self.exiting {
-            self.receive_launches(ctx);
         }
     }
 
@@ -2945,7 +3014,7 @@ mod tests {
             ..OpenFiles::default()
         };
         launches.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion: OpenCompletion::TabClosed(completion) }).unwrap();
-        app.receive_launches(&ctx);
+        app.receive_launches(&ctx, false);
 
         assert_eq!(app.tab_ids(), [0, 1]);
         assert_eq!(app.tab.id, 1);
@@ -3003,7 +3072,7 @@ mod tests {
         let (result, dispatched) = std::sync::mpsc::channel();
         let completion = OpenCompletion::Dispatched { result, last_dir: None };
         launch.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion }).unwrap();
-        app.receive_launches(&ctx);
+        app.receive_launches(&ctx, false);
 
         assert!(dispatched.try_recv().unwrap());
         assert_eq!(app.tab_ids(), [0, 1]);
@@ -3048,7 +3117,8 @@ mod tests {
         let (completion, _result) = std::sync::mpsc::channel();
         let files = OpenFiles { a: "base.txt".into(), b: "left.txt".into(), ..OpenFiles::default() };
         launch.send(OpenRequest { document: OpenDocument::Open(files.clone()), completion: OpenCompletion::TabClosed(completion) }).unwrap();
-        app.receive_launches(&ctx);
+        app.receive_launches(&ctx, true);
+        assert!(!app.activate_window);
         let harness = egui_kittest::Harness::builder().build_ui_state(|ui, app| {
             app.show_tab_form(ui);
         }, app);
@@ -3056,6 +3126,30 @@ mod tests {
         assert!(harness.query_by_label("Run").is_none());
         assert!(harness.query_by_label("Opening files…").is_some());
         assert_eq!(host.recv().unwrap().command, Command::Open(files));
+    }
+
+
+    #[test]
+    fn prefill_restores_a_minimized_main_window_before_focusing_it() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.mirror = None;
+        let (launch, incoming) = std::sync::mpsc::channel();
+        app.connect_launches(incoming, std::sync::mpsc::channel().0);
+        let (completion, _result) = std::sync::mpsc::channel();
+        let path = PathBuf::from("base.txt");
+        launch.send(OpenRequest {
+            document: OpenDocument::Prefill(vec![(Document::A, path.clone())], Default::default()),
+            completion: OpenCompletion::TabClosed(completion),
+        }).unwrap();
+        let mut frame = eframe::Frame::_new_kittest();
+        for (minimized, expected) in [(true, egui::ViewportCommand::Minimized(false)), (false, egui::ViewportCommand::Focus)] {
+            let mut input = egui::RawInput::default();
+            input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().minimized = Some(minimized);
+            let mut output = ctx.run_logic(&input, |ctx| eframe::App::logic(&mut app, ctx, &mut frame));
+            assert_eq!(output.viewport_commands.remove(&egui::ViewportId::ROOT).unwrap(), [expected]);
+        }
+        assert_eq!(app.tab.form.path(Document::A), Some(path));
+        assert!(!app.activate_window);
     }
 
 

@@ -56,6 +56,8 @@ pub struct GuiConfig {
     pub view: ViewConfig,
     pub recent: RecentConfig,
     pub updates: UpdateConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<crate::window_placement::WindowPlacement>,
     /// The options the Heuristics Alignment window was last closed with. Its extractor is the one of the view settings.
     pub heuristics: HeuristicOptions,
 }
@@ -67,6 +69,7 @@ impl Default for GuiConfig {
             view: ViewConfig::default(),
             recent: RecentConfig::default(),
             updates: UpdateConfig::default(),
+            window: None,
             heuristics: HeuristicOptions::default(),
         }
     }
@@ -409,6 +412,24 @@ last_dir = \"x\"
     fn missing_file_gives_defaults() {
         let dir = temp_dir("missing");
         assert_eq!(load(&dir.join("gui.toml")).unwrap(), GuiConfig::default());
+    }
+
+    #[test]
+    fn main_window_placement_round_trips() {
+        let dir = temp_dir("window-placement");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "version = 1\n").unwrap();
+        let mut config = load(&path).unwrap();
+        assert_eq!(config.window, None);
+        config.window = Some(crate::window_placement::WindowPlacement {
+            position: Some([-1400, 50]),
+            monitor: Some([-1920, 0]),
+            size: [900.0, 700.0],
+            maximized: true,
+            minimized: true,
+        });
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap().window, config.window);
     }
 
     #[test]

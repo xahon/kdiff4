@@ -103,6 +103,7 @@ kdiff3's "Add Manual Diff Alignment" is reworked (see Manual alignment in `ARCHI
 
 - Run needs A and B; C and D are optional. A session with C or D is a merge. kdiff3 shows A, B and C without an output as a 3-way diff unless Merge is checked; Kdiff4 makes it a merge whose output stays in memory until it is saved.
 - The standalone Open window remembers its last browsed directory and shares it with the main window on Run. File pickers in the main window remember the directory of the last confirmed file between sessions.
+- The main window restores its last monitor, normal size and position, and maximized or minimized state. A prefill invocation activates the main window and restores it from the taskbar if needed.
 
 ### Configuration
 

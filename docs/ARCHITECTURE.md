@@ -78,6 +78,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 | gui | `text_view.rs` | the virtualized text widget: draws only visible rows (text, hatching for a void, or the conflict marker), the margin of line numbers, alignment column and gutter blocks, active for the current region, the context menu (Copy in every pane, alignment actions in source panes), the region boxes, the jumped-to region's background, the caret and selection, and maps pointer input to positions; scrolls while a selection is dragged past its edges and for middle-button scrolling, drawing that mode's cursor; reports which rows it shows, so a jump can tell whether it needs to scroll, and the vertical wheel scrolling over it, which it leaves to the caller |
 | gui | `editing.rs` | caret motion, word and line selection, and turning keys into edits of D, independent of egui |
 | gui | `open_dialog.rs` | the standalone Open window, the file selection form shared with tabs, file pickers, and the overwrite question |
+| gui | `window_placement.rs` | main window geometry and state saved between runs |
 | gui | `settings_dialog.rs` | the Settings dialog: Panes, Appearance and Comparison tabs, with live preview of the view settings |
 | gui | `config.rs` | `gui.toml`: loading, saving and backing up a broken file |
 | gui | `update_check.rs` | finding out whether a newer release exists: the GitHub latest-release request on a worker thread, parsing the release (version, Markdown notes, page, files), choosing the file for this platform, the once-a-day rule and the skipped-version rule |
@@ -258,6 +259,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Find bar**: the floating bar at the top right of the panes, VS Code style: a field, toggles for match case, whole word and regular expression, the result count, previous and next buttons and close. It searches the pane that has the caret.
 - **Find match**: one occurrence of the find bar text in a line of the searched pane. All of them are highlighted, the one the selection covers stronger.
 - **Open window**: a standalone window where A, B, C and D are chosen. The form is left-aligned and vertically centered. The window fits its initial height to the form contents. It runs in the launcher process and submits a launch request when the user clicks Run.
+- **Window placement**: the main window's monitor, normal size and position, and maximized and minimized state. The GUI saves it on close in `gui.toml`. A prefill request restores and focuses the main window.
 - **Settings dialog**: the window where GUI config is edited, with a live preview.
 - **Dialog window**: a modal dialog shown as a separate native window (an egui viewport) over the main window; see Dialogs.
 - **About window**: Help → About Kdiff4, showing the package version, build commit, target, profile, and Cargo features, with clipboard copy, a GitHub link, and a manual update check button.
@@ -600,7 +602,7 @@ Config lives in two TOML files in the per-user config directory reported by `dir
 | File | Owner | Contents |
 |---|---|---|
 | `config.toml` | engine | engine config: options that change diff, alignment, merge or save results |
-| `gui.toml` | GUI | GUI config: presentation preferences |
+| `gui.toml` | GUI | GUI config: presentation preferences and main window placement |
 
 The split follows the protocol boundary: the engine and the GUI may run in different processes or on different machines, so each side reads and writes only its own file. `--config FILE` replaces the path of `config.toml` for one run (kdiff3 compatible); `gui.toml` has no override.
 
