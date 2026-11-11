@@ -8,7 +8,7 @@ const SHORTCUT_NAME: &str = "Kdiff4.lnk";
 const SHORTCUT_ENV: &str = "KDIFF4_SHORTCUT";
 const TARGET_ENV: &str = "KDIFF4_TARGET";
 const WORKING_DIR_ENV: &str = "KDIFF4_WORKING_DIR";
-const SCRIPT: &str = "$ErrorActionPreference = 'Stop'; $link = (New-Object -ComObject WScript.Shell).CreateShortcut($env:KDIFF4_SHORTCUT); $link.TargetPath = $env:KDIFF4_TARGET; $link.WorkingDirectory = $env:KDIFF4_WORKING_DIR; $link.Description = 'Kdiff4: diff and merge tool'; $link.Save()";
+const SCRIPT: &str = "$ErrorActionPreference = 'Stop'; $link = (New-Object -ComObject WScript.Shell).CreateShortcut($env:KDIFF4_SHORTCUT); $link.TargetPath = $env:KDIFF4_TARGET; $link.IconLocation = $env:KDIFF4_TARGET + ',0'; $link.WorkingDirectory = $env:KDIFF4_WORKING_DIR; $link.Description = 'Kdiff4: diff and merge tool'; $link.Save()";
 
 #[derive(Debug, Error)]
 pub enum ShortcutError {
@@ -151,6 +151,13 @@ mod tests {
         assert!(link.is_file());
         let again = create_shortcut(&programs, &exe).expect("Test: second install");
         assert_eq!(again, link);
+        let icon = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $icon = (New-Object -ComObject WScript.Shell).CreateShortcut($env:KDIFF4_SHORTCUT).IconLocation; if (($icon -replace ',[ ]*0$', ',0') -ne ($env:KDIFF4_TARGET + ',0')) { throw 'Unexpected shortcut icon' }"])
+            .env(SHORTCUT_ENV, &link)
+            .env(TARGET_ENV, &exe)
+            .output()
+            .expect("Test: read the shortcut icon");
+        assert!(icon.status.success(), "{}", String::from_utf8_lossy(&icon.stderr));
         std::fs::remove_dir_all(&dir).expect("Test: cleanup");
     }
 

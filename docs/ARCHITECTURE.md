@@ -248,7 +248,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 
 ### GUI
 
-- **Application icon**: the main window viewport icon. It depicts a white K and a red 4 on a navy circle. During the Cargo build, `build.rs` rasterizes `res/icons/kdiff4.svg` to 64-by-64 RGBA pixels for embedding.
+- **Application icon**: a white K and a red 4 on a navy circle. The GUI build script rasterizes `res/icons/kdiff4.svg` to 64-by-64 RGBA pixels for the main window. The executable build script links `res/icons/kdiff4.res` into Windows MSVC builds so Explorer and taskbar pins can extract the icon. Regenerate the resource from the SVG when the artwork changes.
 - **Pane**: the view of one document.
 - **Merge pane**: the pane showing D. A custom editor widget.
 - **Overview strip**: the lens between the source panes and the merge pane: one line per document, A, B and C, then D, on the row that lines up with the caret.
@@ -708,7 +708,7 @@ The binary routes each override by its section to the engine (in the open comman
 ### Start menu shortcut
 
 - Windows only: Settings → Add to Start Menu writes `Kdiff4.lnk` into `%APPDATA%\Microsoft\Windows\Start Menu\Programs`, the current user's Start menu, so no administrator rights are needed. The shortcut starts the running executable (the path it was started from) in its own folder. Running it again overwrites the shortcut, which points it at the executable now running. A self-update keeps the executable's path, so the shortcut stays valid.
-- PowerShell runs on a worker thread without a console window, and the paths reach it through environment variables, so no quoting is involved. The result, with the shortcut's path or the reason it failed, is shown in the same dialog window as update notices.
+- The shortcut selects the first icon resource in the target executable. PowerShell runs on a worker thread without a console window, and the paths reach it through environment variables, so no quoting is involved. The result, with the shortcut's path or the reason it failed, is shown in the same dialog window as update notices.
 - Not done: removing the shortcut, and an all-users shortcut.
 
 ### Releasing
