@@ -58,6 +58,49 @@ fn expect_ok(client: &Client, id: kdiff4_protocol::RequestId) {
 }
 
 #[test]
+fn choose_everywhere_warns_then_saves_the_sources_final_line_break() {
+    let dir = temp_dir("choose-everywhere");
+    let a = write(&dir, "a.txt", "base");
+    let b = write(&dir, "b.txt", "left\n");
+    let c = write(&dir, "c.txt", "right\n");
+    let output = dir.join("out.txt");
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(OpenFiles { a, b, c: Some(c), output: Some(output.clone()), labels: Labels::default() })).unwrap();
+    let base = expect_snapshot(&client).revision;
+    expect_ok(&client, id);
+
+    let id = client.send(Command::EditOutput(OutputEdit { base, range: 0..0, text: "manual\n".to_string(), region: None })).unwrap();
+    let base = expect_delta(&client).revision;
+    expect_ok(&client, id);
+
+    let id = client.send(Command::ChooseEverywhere { base, document: Document::C, confirmed: false }).unwrap();
+    let HostMessage::Response(Response { id: response_id, result: Err(error) }) = next_message(&client) else {
+        panic!("expected a confirmation request");
+    };
+    assert_eq!(response_id, id);
+    assert_eq!(error.kind, ErrorKind::NeedsConfirmation);
+
+    let id = client.send(Command::ChooseEverywhere { base, document: Document::C, confirmed: true }).unwrap();
+    assert!(matches!(expect_delta(&client).change, Change::OutputEdited { text, .. } if text == "right\n"));
+    expect_ok(&client, id);
+    let id = client.send(Command::Save).unwrap();
+    assert_eq!(expect_delta(&client).change, Change::OutputSaved(output.clone()));
+    expect_ok(&client, id);
+    assert_eq!(fs::read(&output).unwrap(), b"right\n");
+
+    let id = client.send(Command::Undo).unwrap();
+    assert!(matches!(expect_delta(&client).change, Change::OutputEdited { text, .. } if text == "manual\n"));
+    expect_ok(&client, id);
+    let id = client.send(Command::Save).unwrap();
+    assert_eq!(expect_delta(&client).change, Change::OutputSaved(output.clone()));
+    expect_ok(&client, id);
+    assert_eq!(fs::read(&output).unwrap(), b"manual");
+
+    drop(client);
+    host.join().unwrap();
+}
+
+#[test]
 fn open_sends_snapshot_then_ok_response() {
     let dir = temp_dir("open");
     let a = write(&dir, "a.txt", "base\n");

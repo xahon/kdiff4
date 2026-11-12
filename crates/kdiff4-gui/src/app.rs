@@ -126,6 +126,7 @@ enum Pending {
     UndoRedo,
     /// A choice for one region, which its delta keeps the caret in, or for every unresolved one.
     Choose(Option<usize>),
+    ChooseEverywhere(kdiff4_protocol::Revision, Document),
     /// A move to the next or previous difference or conflict; becomes `Navigated` when the current region moved.
     Navigate(Navigation),
     Navigated,
@@ -275,7 +276,7 @@ impl DocumentTab {
     }
 
     fn may_discard_work(&self) -> bool {
-        self.is_modified() || self.pending.values().any(|kind| matches!(kind, Pending::Choose(_) | Pending::Edit | Pending::UndoRedo))
+        self.is_modified() || self.pending.values().any(|kind| matches!(kind, Pending::Choose(_) | Pending::ChooseEverywhere(..) | Pending::Edit | Pending::UndoRedo))
     }
 
     fn finish(&mut self) {
@@ -1129,7 +1130,7 @@ Shortcut: {}", link.display()),
                         text: format!("No {}", navigation_noun(to)),
                         is_error: false,
                     }),
-                    Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ComparisonOptions => self.tab.mirror.as_ref().map(|mirror| Status {
+                    Pending::Open | Pending::LoadSource(_) | Pending::Choose(_) | Pending::ChooseEverywhere(..) | Pending::ComparisonOptions => self.tab.mirror.as_ref().map(|mirror| Status {
                         text: mirror.difference_summary(),
                         is_error: false,
                     }),
@@ -1176,7 +1177,12 @@ Shortcut: {}", link.display()),
             Pending::SetOutputPath => self.report_error(format!("Cannot change the output path: {}", error.message)),
             Pending::SetOutputEol => self.report_error(format!("Cannot change the line ending style: {}", error.message)),
             Pending::Save => self.report_error(format!("Cannot save: {}", error.message)),
-            Pending::Choose(_) => self.report_error(format!("Cannot choose: {}", error.message)),
+            Pending::ChooseEverywhere(base, document) if error.kind == ErrorKind::NeedsConfirmation => {
+                if open_dialog::confirm_choose_everywhere(document) {
+                    self.send(Command::ChooseEverywhere { base, document, confirmed: true }, Pending::ChooseEverywhere(base, document));
+                }
+            }
+            Pending::Choose(_) | Pending::ChooseEverywhere(..) => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
             Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
@@ -1685,6 +1691,12 @@ Shortcut: {}", link.display()),
         self.send(Command::ChooseForUnresolved { base, document }, Pending::Choose(None));
     }
 
+    fn choose_everywhere(&mut self, document: Document) {
+        let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::choice_base) else { return };
+        self.send(Command::ChooseEverywhere { base, document, confirmed: false }, Pending::ChooseEverywhere(base, document));
+    }
+
+
     /// Marks the lines the selection touches in A, B or C.
     fn mark_selected_lines(&mut self) {
         let Some((document, cursor)) = self.tab.panes.caret else {
@@ -1890,12 +1902,13 @@ Shortcut: {}", link.display()),
             if ctx.input_mut(|input| input.consume_shortcut(&UNDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Undo);
             }
-            for document in self.choosable() {
-                let shortcut = CHOOSE_SHORTCUTS.iter().find(|(choosable, _)| *choosable == document).map(|(_, shortcut)| shortcut.clone());
-                if let Some(shortcut) = shortcut
-                    && ctx.input_mut(|input| input.consume_shortcut(&shortcut))
-                {
-                    self.choose_current(document);
+            let choosable = self.choosable();
+            for (document, shortcut) in CHOOSE_SHORTCUTS.iter().filter(|(document, _)| choosable.contains(document)) {
+                let everywhere = KeyboardShortcut::new(shortcut.modifiers.plus(Modifiers::SHIFT), shortcut.logical_key);
+                if ctx.input_mut(|input| input.consume_shortcut(&everywhere)) {
+                    self.choose_everywhere(document.clone());
+                } else if ctx.input_mut(|input| input.consume_shortcut(shortcut)) {
+                    self.choose_current(document.clone());
                 }
             }
             if self.tab.mirror.is_some() {
@@ -2098,6 +2111,17 @@ Shortcut: {}", link.display()),
                         let button = egui::Button::new(format!("Choose {} Here", document.letter())).shortcut_text(ui.ctx().format_shortcut(shortcut));
                         if ui.add_enabled(choosable.contains(document), button).clicked() {
                             self.choose_current(document.clone());
+                        }
+                    }
+                    ui.separator();
+                    for (document, shortcut) in CHOOSE_SHORTCUTS.iter() {
+                        if *document == Document::C && !choosable.contains(document) {
+                            continue;
+                        }
+                        let everywhere = KeyboardShortcut::new(shortcut.modifiers.plus(Modifiers::SHIFT), shortcut.logical_key);
+                        let button = egui::Button::new(format!("Choose {} Everywhere", document.letter())).shortcut_text(ui.ctx().format_shortcut(&everywhere));
+                        if ui.add_enabled(choosable.contains(document), button).clicked() {
+                            self.choose_everywhere(document.clone());
                         }
                     }
                     ui.separator();
@@ -3430,6 +3454,21 @@ mod tests {
         press(&mut app, &ctx, Key::Z, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::ApplyAlignments { confirmed: false }, Command::Redo]);
     }
+
+    #[test]
+    fn ctrl_shift_numbers_choose_everywhere_for_available_sources() {
+        let (mut app, host, ctx) = app_with_session();
+        let modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+        press(&mut app, &ctx, Key::Num1, modifiers);
+        press(&mut app, &ctx, Key::Num2, modifiers);
+        press(&mut app, &ctx, Key::Num3, modifiers);
+        let base = kdiff4_protocol::Revision(1);
+        assert_eq!(sent(app, host), [
+            Command::ChooseEverywhere { base, document: Document::A, confirmed: false },
+            Command::ChooseEverywhere { base, document: Document::B, confirmed: false },
+        ]);
+    }
+
 
     #[test]
     fn f5_reloads_the_files() {

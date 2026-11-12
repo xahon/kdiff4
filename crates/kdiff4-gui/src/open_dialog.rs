@@ -389,6 +389,17 @@ The conflicts you resolved and the changes you made to the output will be lost, 
     proceeded(&answer)
 }
 
+pub fn confirm_choose_everywhere(document: Document) -> bool {
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(format!("Choose {} everywhere?", document.letter()))
+        .set_description(format!("This replaces the merge output, including your manual edits, with source {}. You can undo this in one step.", document.letter()))
+        .set_buttons(rfd::MessageButtons::OkCancelCustom(PROCEED_LABEL.to_string(), "Cancel".to_string()))
+        .show();
+    proceeded(&answer)
+}
+
+
 fn proceeded(answer: &rfd::MessageDialogResult) -> bool {
     *answer == rfd::MessageDialogResult::Ok || *answer == rfd::MessageDialogResult::Custom(PROCEED_LABEL.to_string())
 }

@@ -20,16 +20,19 @@ pub struct MergeStep {
     pub at: usize,
     pub before: Vec<(Region, RegionState)>,
     pub after: Vec<(Region, RegionState)>,
+    /// Whether D's final line break is explicit, before and after a whole-source choice.
+    pub explicit_final_eol: Option<(bool, bool)>,
 }
 
 impl StepData for MergeStep {
     /// Typing joins while it stays inside one region.
     fn joined(&self, next: &MergeStep) -> Option<MergeStep> {
         let same_region = next.at == self.at && self.after.len() == 1 && next.before.len() == 1 && next.after.len() == 1;
-        same_region.then(|| MergeStep {
+        (same_region && self.explicit_final_eol.is_none() && next.explicit_final_eol.is_none()).then(|| MergeStep {
             at: self.at.clone(),
             before: self.before.clone(),
             after: next.after.clone(),
+            explicit_final_eol: None,
         })
     }
 }
@@ -641,18 +644,21 @@ z"
             at: 2,
             before: vec![entry(3)],
             after: vec![entry(4)],
+            explicit_final_eol: None,
         };
         let second = MergeStep {
             at: 2,
             before: vec![entry(4)],
             after: vec![entry(5)],
+            explicit_final_eol: None,
         };
         assert_eq!(
             first.joined(&second),
             Some(MergeStep {
                 at: 2,
                 before: vec![entry(3)],
-                after: vec![entry(5)]
+                after: vec![entry(5)],
+                explicit_final_eol: None,
             })
         );
         let elsewhere = MergeStep { at: 3, ..second.clone() };
@@ -661,6 +667,7 @@ z"
             at: 2,
             before: vec![entry(4), entry(1)],
             after: vec![entry(6)],
+            explicit_final_eol: None,
         };
         assert_eq!(first.joined(&joining), None);
     }

@@ -145,6 +145,10 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             Some(change) => change,
             None => return Ok(()),
         },
+        Command::ChooseEverywhere { base, document, confirmed } => match active(session)?.choose_everywhere(&base, document, confirmed, registry.default_engine())? {
+            Some(change) => change,
+            None => return Ok(()),
+        },
         Command::SetOutputPath(path) => active(session)?.set_output_path(path)?,
         Command::SetOutputEol(eol) => active(session)?.set_output_eol(eol)?,
         Command::Save => active(session)?.save()?,

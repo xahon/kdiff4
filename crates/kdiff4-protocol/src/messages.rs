@@ -63,6 +63,12 @@ pub enum Command {
         base: Revision,
         document: Document,
     },
+    /// Replaces D with one source in a single undo step. Hand edits require confirmation for `base`.
+    ChooseEverywhere {
+        base: Revision,
+        document: Document,
+        confirmed: bool,
+    },
     /// Changes where D is saved, without writing it. `None` makes D an unnamed in-memory document.
     SetOutputPath(Option<PathBuf>),
     Save,

@@ -53,6 +53,7 @@ struct Output {
     text: String,
     /// What the sources give, or what the user chose over it.
     eol: EolChoice,
+    explicit_final_eol: bool,
     history: History<MergeStep>,
 }
 
@@ -107,6 +108,7 @@ impl Session {
                     path: files.output.clone(),
                     text,
                     eol: auto_eol(&sources),
+                    explicit_final_eol: false,
                     history: History::new_saved(),
                 }),
             )
@@ -481,6 +483,7 @@ impl Session {
                 let (merge, text) = Merge::with_output(comparison.regions, &source_lines(&self.sources));
                 self.merge = merge;
                 output.text = text;
+                output.explicit_final_eol = false;
                 output.history = History::new_unsaved();
             }
             None => self.merge = Merge::without_output(comparison.regions),
@@ -518,6 +521,7 @@ impl Session {
                     at: 0,
                     before: Vec::new(),
                     after: vec![(region, state)],
+                    explicit_final_eol: None,
                 },
             ));
         }
@@ -535,7 +539,7 @@ impl Session {
             let relative = range.start - span.start..range.end - span.start;
             let split = merge::split_stable(region, state, &output.text[span.clone()], relative, &inserted);
             if let Some(after) = split {
-                return Ok(self.apply(range, inserted, MergeStep { at: touched.start, before, after }));
+                return Ok(self.apply(range, inserted, MergeStep { at: touched.start, before, after, explicit_final_eol: None }));
             }
         }
         let (region, choice) = match before.as_slice() {
@@ -560,6 +564,7 @@ impl Session {
                 at: touched.start,
                 before,
                 after: vec![(region, state)],
+                explicit_final_eol: None,
             },
         ))
     }
@@ -610,8 +615,9 @@ impl Session {
             at: first,
             before: self.merge.entries(first..last + 1),
             after: vec![entry],
+            explicit_final_eol: None,
         };
-        Ok(self.apply(offsets[first]..offsets[last + 1], text, step))
+        Ok(self.apply_choice(offsets[first]..offsets[last + 1], text, step))
     }
 
     /// Chooses the hunk of `document` for every unresolved region, as one undo step. `Ok(None)` when no region is unresolved.
@@ -657,8 +663,60 @@ impl Session {
                 text.push_str(&output.text[offsets[index]..offsets[index + 1]]);
             }
         }
-        Ok(Some(self.apply(offsets[first]..offsets[last + 1], text, MergeStep { at: first, before, after })))
+        Ok(Some(self.apply_choice(offsets[first]..offsets[last + 1], text, MergeStep { at: first, before, after, explicit_final_eol: None })))
     }
+
+    /// Replaces D with the chosen source as one undo step. Hand edits require confirmation for this revision.
+    pub fn choose_everywhere(&mut self, base: &Revision, document: Document, confirmed: bool, engine: &dyn ComparisonEngine) -> Result<Option<Change>, CoreError> {
+        self.check_base(base)?;
+        let output = self.output.as_ref().ok_or(CoreError::NotAMerge)?;
+        let source_index = self.sources.iter().position(|source| source.document == document).ok_or(CoreError::NoSuchDocument { document })?;
+        if !confirmed && self.merge.states().iter().any(|state| state.merge.edited) {
+            return Err(CoreError::NeedsConfirmation);
+        }
+
+        let choice = Choice::Hunks(vec![document]);
+        let source = &self.sources[source_index].text;
+        let lines = source_lines(&self.sources);
+        let regions = self.merge.regions();
+        let before = self.merge.entries(0..regions.len());
+        let mut end = 0;
+        let in_source_order = regions.iter().map(|region| &region.hunks[source_index]).filter(|hunk| !hunk.is_empty()).all(|hunk| {
+            let adjacent = hunk.start == end;
+            end = hunk.end;
+            adjacent
+        });
+        // Insets can display hunks out of source order. Join the regions so D can take the source in its original order.
+        let joined;
+        let regions = if in_source_order && end == source.lines.len() {
+            regions
+        } else {
+            joined = [merge::join(regions, &lines, engine)?];
+            &joined
+        };
+
+        let mut text = String::with_capacity(source.text.len());
+        let mut after = Vec::with_capacity(regions.len());
+        for region in regions {
+            let hunk = &region.hunks[source_index];
+            let mut rendered = merge::render(region, &choice, &lines);
+            if !hunk.is_empty() && hunk.end == source.lines.len() && !source.final_eol {
+                rendered.pop();
+            }
+            let state = RegionState {
+                merge: RegionMerge { choice: choice.clone(), edited: false, output_lines: merge::line_count(&rendered) },
+                text_len: rendered.len(),
+            };
+            text.push_str(&rendered);
+            after.push((region.clone(), state));
+        }
+        if before == after && output.text == text && (output.explicit_final_eol || regions.is_empty()) {
+            return Ok(None);
+        }
+        let explicit_final_eol = Some((output.explicit_final_eol, true));
+        Ok(Some(self.apply(0..output.text.len(), text, MergeStep { at: 0, before, after, explicit_final_eol })))
+    }
+
 
     /// `Ok(None)` when there is nothing to undo.
     pub fn undo(&mut self) -> Result<Option<Change>, CoreError> {
@@ -669,6 +727,9 @@ impl Session {
         let (range, text) = step.backward();
         let text = text.to_string();
         let data = step.data;
+        if let Some((before, _)) = data.explicit_final_eol {
+            output.explicit_final_eol = before;
+        }
         let added = data.before.len();
         let removed = data.after.len();
         self.merge.splice(data.at.clone(), removed.clone(), data.before);
@@ -684,6 +745,9 @@ impl Session {
         let (range, text) = step.forward();
         let text = text.to_string();
         let data = step.data;
+        if let Some((_, after)) = data.explicit_final_eol {
+            output.explicit_final_eol = after;
+        }
         let added = data.after.len();
         let removed = data.before.len();
         self.merge.splice(data.at.clone(), removed.clone(), data.after);
@@ -739,7 +803,7 @@ impl Session {
         let EolChoice::Style(eol) = output.eol.clone() else {
             return Err(CoreError::EolConflict);
         };
-        let bytes = text::encode_output(&output.text, eol, bom, final_eol);
+        let bytes = text::encode_output(&output.text, eol, bom, final_eol || output.explicit_final_eol);
         text::write_atomic(path, &bytes).map_err(|source| CoreError::Write { path: path.to_path_buf(), source })?;
         output.path = Some(path.to_path_buf());
         output.history.mark_saved();
@@ -768,6 +832,26 @@ impl Session {
         }
     }
 
+    /// A hunk appended after an unterminated final line starts on its own line.
+    fn apply_choice(&mut self, range: Range<usize>, mut text: String, mut step: MergeStep) -> Change {
+        if !text.is_empty()
+            && self.output.as_ref().is_some_and(|output| range.start == output.text.len() && !output.text.ends_with('\n'))
+            && let Some(previous) = self.merge.states()[..step.at].iter().rposition(|state| state.text_len > 0)
+        {
+            let mut before = self.merge.entries(previous..step.at);
+            let mut after = before.clone();
+            after[0].1.text_len += 1;
+            text.insert(0, '\n');
+            before.extend(step.before);
+            after.extend(step.after);
+            step.at = previous;
+            step.before = before;
+            step.after = after;
+        }
+        self.apply(range, text, step)
+    }
+
+
     /// Makes a merge op: replaces `range` of D with `inserted` and the regions of `step.before` with `step.after`, and records it for undo.
     fn apply(&mut self, range: Range<usize>, inserted: String, step: MergeStep) -> Change {
         let at = step.at.clone();
@@ -775,6 +859,9 @@ impl Session {
         let added = step.after.len();
         self.merge.splice(at.clone(), removed.clone(), step.after.clone());
         if let Some(output) = self.output.as_mut() {
+            if let Some((_, after)) = step.explicit_final_eol {
+                output.explicit_final_eol = after;
+            }
             let removed_text = output.text[range.clone()].to_string();
             output.history.record(Step {
                 start: range.start,
@@ -2309,6 +2396,63 @@ cc
         assert_eq!(output_text(&session), "s\nX\ns2\n");
         assert_consistent(&session);
     }
+
+    #[test]
+    fn choose_everywhere_replaces_choices_and_edits_with_one_undo() {
+        let dir = temp_dir("choose-everywhere");
+        let mut session = merge_of_texts(&dir, "a\ns\nx\nt\np", "b\ns\nX\nt\nq", "c\ns\nx\nt\nr");
+        session.set_choice(&session.revision(), 0, Choice::Hunks(vec![Document::B, Document::C])).unwrap();
+        session.edit_output(&edit(&session, 4..5, "manual"), &BuiltinEngine).unwrap();
+        let before = session.snapshot();
+        let base = session.revision();
+        assert!(matches!(session.choose_everywhere(&base, Document::A, false, &BuiltinEngine), Err(CoreError::NeedsConfirmation)));
+        assert_eq!(session.snapshot(), before);
+        session.choose_everywhere(&base, Document::A, true, &BuiltinEngine).unwrap().unwrap();
+        assert_eq!(output_text(&session), "a\ns\nx\nt\np");
+        assert_eq!(session.unresolved_count(), 0);
+        assert!(session.snapshot().merge.iter().all(|state| !state.edited && state.choice == Choice::Hunks(vec![Document::A])));
+        assert_consistent(&session);
+        assert_eq!(session.choose_everywhere(&session.revision(), Document::A, false, &BuiltinEngine).unwrap(), None);
+        session.undo().unwrap().unwrap();
+        assert_eq!(session.snapshot().merge, before.merge);
+        assert_eq!(session.snapshot().output, before.output);
+        assert_eq!(session.snapshot().comparison, before.comparison);
+        session.redo().unwrap().unwrap();
+        assert_eq!(output_text(&session), "a\ns\nx\nt\np");
+        assert_consistent(&session);
+    }
+
+
+    #[test]
+    fn choose_everywhere_uses_source_order_across_insets() {
+        let dir = temp_dir("choose-everywhere-insets");
+        let mut session = merge_of(&dir, &["a", "b"], &["b", "a"], &["a", "b"]);
+        mark_a_and_b_reversed_in_b(&mut session);
+        session.apply_alignments(true, &BuiltinEngine).unwrap();
+        let before = session.snapshot();
+        session.choose_everywhere(&session.revision(), Document::A, false, &BuiltinEngine).unwrap().unwrap();
+        assert_eq!(output_text(&session), "a\nb\n");
+        assert_consistent(&session);
+        session.undo().unwrap().unwrap();
+        assert_eq!(session.snapshot().comparison, before.comparison);
+        assert_eq!(output_text(&session), "b\na\n");
+    }
+
+
+    #[test]
+    fn choosing_a_trailing_hunk_after_choose_everywhere_starts_a_new_line() {
+        let dir = temp_dir("choose-everywhere-trailing-hunk");
+        let mut session = merge_of_texts(&dir, "first", "first\nsecond\n", "first");
+        session.choose_everywhere(&session.revision(), Document::A, false, &BuiltinEngine).unwrap().unwrap();
+        assert_eq!(output_text(&session), "first");
+        session.set_choice(&session.revision(), 1, Choice::Hunks(vec![Document::B])).unwrap();
+        assert_eq!(output_text(&session), "first\nsecond\n");
+        assert_consistent(&session);
+        session.undo().unwrap().unwrap();
+        assert_eq!(output_text(&session), "first");
+        assert_consistent(&session);
+    }
+
 
     #[test]
     fn choosing_a_hunk_of_a_split_stable_line_joins_it_back() {
