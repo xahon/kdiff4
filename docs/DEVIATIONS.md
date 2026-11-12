@@ -44,6 +44,7 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 
 ### Merge result
 
+- Choosing a hunk for one region focuses the output pane and puts the caret at the start of that region. kdiff3 keeps keyboard focus where it was.
 - Inside a changed region, lines are paired into rows by how alike they are, so a line that changed a little stays next to its old version even when lines were added or removed before it (comparison option `pair_similar_lines`, on by default; see Regions and rows in `ARCHITECTURE.md`). kdiff3 pairs them by position. Rows that keep equal lines of two documents together still win, so kdiff3's alignment tests give kdiff3's rows.
 - A hand edit that crosses region boundaries joins the touched regions into one edited region; undo restores them (see Merge model in `ARCHITECTURE.md`).
 - A hand edit inside a region whose hunks are all equal splits each touched line into an edited region of its own, boxed with a gutter block in every pane and reached by Previous and Next Difference; choosing A, B or C for it joins it back with the regions around it (see Merge model in `ARCHITECTURE.md`). kdiff3 keeps the edited lines inside the unchanged block, which navigation skips.

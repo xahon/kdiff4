@@ -924,7 +924,7 @@ Shortcut: {}", link.display()),
                             self.tab.panes.reveal_caret = true;
                         }
                         if let Some(region) = chosen_region {
-                            self.keep_caret_in_region(region);
+                            self.focus_output_region(region);
                         }
                         if let Some(number) = asked {
                             self.tab.inset_prompt = self.tab.mirror.as_ref().and_then(|mirror| mirror.alignments().insets.iter().find(|choice| choice.number == number).cloned());
@@ -1102,11 +1102,15 @@ Shortcut: {}", link.display()),
         }
     }
 
-    /// A choice adds or removes the region's output lines, so the caret's line may now belong to a neighbor: puts it back at the region's start, keeping it hidden if it was.
-    fn keep_caret_in_region(&mut self, region: usize) {
-        let Some((document, _)) = self.tab.panes.caret.clone() else { return };
-        let hidden = self.tab.panes.caret_hidden;
-        self.caret_to_region(document, region, hidden);
+    /// Gives the output pane the keyboard and shows the start of the chosen region.
+    fn focus_output_region(&mut self, region: usize) {
+        let Some(mirror) = self.tab.mirror.as_mut() else { return };
+        if let Some(line) = mirror.unfolded_rows(Document::D).map(Rows::Mapped).and_then(|rows| rows.line_at_or_after(rows.region_start(region)?)) {
+            mirror.change_folds(Document::D, |folds| folds.reveal(line..line));
+        }
+        self.caret_to_region(Document::D, region, false);
+        self.tab.panes.strip_focused = false;
+        self.tab.panes.reveal_caret = true;
     }
 
     fn handle_response(&mut self, id: RequestId, result: Result<(), kdiff4_protocol::ProtocolError>) {
@@ -3732,6 +3736,42 @@ mod tests {
         assert!(app.tab.status.as_ref().is_some_and(|status| status.is_error && status.text.contains("no")));
         drop(sent(app, host));
     }
+
+    #[test]
+    fn choosing_a_hunk_moves_keyboard_focus_to_its_first_output_line() {
+        use kdiff4_protocol::{Choice, Delta, MergeUpdate, RegionMerge, Revision};
+        let (mut app, host, ctx) = app_with_session();
+        app.tab.panes.set_hidden_caret(Document::A, Cursor::at(Position { line: 0, column: 1 }), None);
+        app.tab.panes.strip_focused = true;
+        app.choose_current(Document::A);
+        let request = host.recv().unwrap();
+        let region = resolved_snapshot().comparison.regions[0].clone();
+        app.handle_message(&ctx, HostMessage::Event(Event::Delta(Delta {
+            revision: Revision(2),
+            cause: Some(request.id),
+            change: Change::OutputEdited {
+                range: 0..2,
+                text: "b\na\n".to_string(),
+                modified: true,
+                merge: MergeUpdate {
+                    at: 0,
+                    removed: 1,
+                    regions: vec![region],
+                    merge: vec![RegionMerge {
+                        choice: Choice::Hunks(vec![Document::B, Document::A]),
+                        edited: false,
+                        output_lines: 2,
+                    }],
+                },
+            },
+        })));
+        let caret = app.tab.panes.visible_caret(Document::D).unwrap();
+        assert_eq!(caret.cursor, Cursor::at(Position { line: 0, column: 0 }));
+        assert_eq!(caret.void_row, None);
+        assert!(!app.tab.panes.strip_focused);
+        assert!(app.tab.panes.reveal_caret);
+    }
+
 
     #[test]
     fn caret_stays_in_a_region_that_loses_its_lines() {
