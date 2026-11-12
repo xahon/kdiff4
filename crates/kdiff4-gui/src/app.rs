@@ -72,16 +72,31 @@ const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
     (Document::B, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)),
     (Document::C, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)),
 ];
-/// Ctrl+Up and Ctrl+Down go to the previous and next difference, Ctrl+PageUp and Ctrl+PageDown to the previous and next conflict.
-const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut); 4] = [
+const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut, KeyboardShortcut); 4] = [
     (
         Navigation::PreviousDifference,
         "Previous Difference",
         KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowUp),
+        KeyboardShortcut::new(Modifiers::ALT, Key::ArrowUp),
     ),
-    (Navigation::NextDifference, "Next Difference", KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowDown)),
-    (Navigation::PreviousConflict, "Previous Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp)),
-    (Navigation::NextConflict, "Next Conflict", KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown)),
+    (
+        Navigation::NextDifference,
+        "Next Difference",
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowDown),
+        KeyboardShortcut::new(Modifiers::ALT, Key::ArrowDown),
+    ),
+    (
+        Navigation::PreviousConflict,
+        "Previous Conflict",
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp),
+        KeyboardShortcut::new(Modifiers::ALT, Key::PageUp),
+    ),
+    (
+        Navigation::NextConflict,
+        "Next Conflict",
+        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown),
+        KeyboardShortcut::new(Modifiers::ALT, Key::PageDown),
+    ),
 ];
 /// Distance of the find bar from the top right corner of the panes.
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
@@ -1959,8 +1974,12 @@ Shortcut: {}", link.display()),
                 }
             }
             if self.tab.mirror.is_some() {
-                for (to, _, shortcut) in NAVIGATION_SHORTCUTS.iter() {
-                    if ctx.input_mut(|input| input.consume_shortcut(shortcut)) {
+                for (to, _, shortcut, alternate) in NAVIGATION_SHORTCUTS.iter() {
+                    if ctx.input_mut(|input| {
+                        let primary_pressed = input.consume_shortcut(shortcut);
+                        let alternate_pressed = input.consume_shortcut(alternate);
+                        primary_pressed || alternate_pressed
+                    }) {
                         self.navigate(to.clone());
                     }
                 }
@@ -2179,8 +2198,9 @@ Shortcut: {}", link.display()),
                         }
                     }
                     ui.separator();
-                    for (to, label, shortcut) in NAVIGATION_SHORTCUTS.iter() {
-                        let button = egui::Button::new(*label).shortcut_text(ui.ctx().format_shortcut(shortcut));
+                    for (to, label, shortcut, alternate) in NAVIGATION_SHORTCUTS.iter() {
+                        let shortcut_text = format!("{} / {}", ui.ctx().format_shortcut(shortcut), ui.ctx().format_shortcut(alternate));
+                        let button = egui::Button::new(*label).shortcut_text(shortcut_text);
                         if ui.add_enabled(has_session, button).clicked() {
                             self.navigate(to.clone());
                         }
@@ -3795,6 +3815,26 @@ mod tests {
         press(&mut app, &ctx, Key::Y, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert_eq!(sent(app, host), [Command::ClearAlignmentMarks]);
     }
+
+    #[test]
+    fn alt_and_ctrl_navigate_between_differences_and_conflicts() {
+        for modifiers in [Modifiers::ALT, Modifiers::COMMAND] {
+            let (mut app, host, ctx) = app_with_session();
+            press(&mut app, &ctx, Key::ArrowUp, modifiers);
+            press(&mut app, &ctx, Key::ArrowDown, modifiers);
+            press(&mut app, &ctx, Key::PageUp, modifiers);
+            press(&mut app, &ctx, Key::PageDown, modifiers);
+            let destinations: Vec<_> = sent(app, host)
+                .into_iter()
+                .map(|command| match command {
+                    Command::Navigate { to, .. } => to,
+                    other => panic!("Expected navigation, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(destinations, [Navigation::PreviousDifference, Navigation::NextDifference, Navigation::PreviousConflict, Navigation::NextConflict]);
+        }
+    }
+
 
     #[test]
     fn navigation_asks_for_alignment_stops_as_configured() {
