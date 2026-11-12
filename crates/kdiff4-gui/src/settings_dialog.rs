@@ -4,7 +4,7 @@ use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
 use crate::config::{
     MAX_CORNER_RADIUS, MAX_FONT_SIZE, MAX_INSET_ARROW_GAP, MAX_JUMP_CONTEXT_LINES, MAX_OTHER_REGION_BORDER_PERCENT, MAX_REGION_CORNER_RADIUS, MAX_SCROLL_STEP_LINES,
-    MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MAX_AUTOSCROLL_LINES_PER_SECOND, MIN_AUTOSCROLL_LINES_PER_SECOND, MIN_SMOOTH_SCROLL_MS, ThemeChoice, ViewConfig,
+    MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MAX_AUTOSCROLL_LINES_PER_SECOND, MIN_AUTOSCROLL_LINES_PER_SECOND, MIN_SMOOTH_SCROLL_MS, MAX_TAB_SIZE, TabIndentation, ThemeChoice, ViewConfig,
 };
 use crate::fonts::MonospaceFamily;
 use crate::theme;
@@ -195,6 +195,29 @@ impl SettingsDialog {
                 show_preview(ui);
                 ui.add_space(4.0);
             });
+            ui.end_row();
+        });
+
+        section(ui, "output_indentation", "Merge output: Indentation", |ui| {
+            ui.label("Tab inserts:");
+            ComboBox::from_id_salt("tab_indentation")
+                .selected_text(match self.draft.tab_indentation {
+                    TabIndentation::Tabs => "Tabs",
+                    TabIndentation::Spaces => "Spaces",
+                    TabIndentation::Auto => "Auto-detect",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.draft.tab_indentation, TabIndentation::Tabs, "Tabs");
+                    ui.selectable_value(&mut self.draft.tab_indentation, TabIndentation::Spaces, "Spaces");
+                    ui.selectable_value(&mut self.draft.tab_indentation, TabIndentation::Auto, "Auto-detect");
+                })
+                .response
+                .on_hover_text("Auto-detect samples the merge output and uses tabs if the indentation is unclear.");
+            ui.end_row();
+
+            ui.label("Tab size:");
+            ui.add(DragValue::new(&mut self.draft.tab_size).range(1..=MAX_TAB_SIZE))
+                .on_hover_text("Columns per tab stop when inserting spaces. Auto-detect uses this size if it finds spaces but no clear width.");
             ui.end_row();
         });
 

@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use crate::config::{MAX_TAB_SIZE, TabIndentation};
+
 /// A caret position: line index and column, counted in characters. Orders by line, then column.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
@@ -73,6 +75,66 @@ impl<'a> Lines<'a> {
         start + char_to_byte(self.line(position.line), position.column)
     }
 }
+
+/// Samples leading whitespace and votes for the most frequent increase in space indentation.
+pub fn detect_indentation(lines: Lines<'_>) -> (TabIndentation, Option<u8>) {
+    let mut tab_lines = 0;
+    let mut space_lines = 0;
+    let mut previous_spaces = None;
+    let mut steps = [0; MAX_TAB_SIZE as usize + 1];
+    for index in 0..lines.count().min(1_000) {
+        let line = lines.line(index).as_bytes();
+        let length = line.iter().take(MAX_TAB_SIZE as usize + 1).take_while(|byte| matches!(byte, b' ' | b'\t')).count();
+        if length == line.len() || length > MAX_TAB_SIZE as usize {
+            continue;
+        }
+        let prefix = &line[..length];
+        if prefix.contains(&b'\t') {
+            tab_lines += usize::from(!prefix.contains(&b' '));
+            previous_spaces = None;
+        } else {
+            space_lines += usize::from(length > 0);
+            if let Some(previous) = previous_spaces
+                && length > previous
+            {
+                steps[length - previous] += 1;
+            }
+            previous_spaces = Some(length);
+        }
+    }
+    if tab_lines >= space_lines {
+        return (TabIndentation::Tabs, None);
+    }
+    let votes = steps.iter().copied().max().unwrap_or(0);
+    let mut widths = (1..steps.len()).filter(|width| steps[*width] == votes);
+    let width = widths.next().filter(|_| votes > 0 && widths.next().is_none());
+    (TabIndentation::Spaces, width.map(|width| width as u8))
+}
+
+
+/// The effective indentation for the merge output after applying its defaults or file override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Indentation {
+    pub spaces: bool,
+    pub size: u8,
+}
+
+
+impl Indentation {
+    /// Resolves Tab to text at the selection start, where the replacement will be inserted.
+    pub fn tab_text(self, lines: Lines<'_>, cursor: Cursor) -> String {
+        if !self.spaces {
+            return "\t".to_string();
+        }
+        let width = usize::from(self.size.clamp(1, MAX_TAB_SIZE));
+        let start = clamp(lines, cursor.range().0);
+        let column = lines.line(start.line).chars().take(start.column).fold(0, |column, character| {
+            column + if character == '\t' { width - column % width } else { 1 }
+        });
+        " ".repeat(width - column % width)
+    }
+}
+
 
 /// D's lines: split at `\n` only, and a final `\n` starts an empty last line the caret can go to. Never empty.
 pub fn editor_lines(text: &str) -> Vec<Range<usize>> {
@@ -561,6 +623,35 @@ mod tests {
         result.replace_range(edit.range, &edit.text);
         Some((result, caret))
     }
+
+    #[test]
+    fn tab_spaces_advance_to_the_next_stop_after_existing_tabs_and_unicode() {
+        let text = "\téxy";
+        let ranges = editor_lines(text);
+        let lines = Lines { text, ranges: &ranges };
+        let cursor = selection(at(0, 4), at(0, 2));
+        let spaces = Indentation { spaces: true, size: 4 };
+        let tabs = Indentation { spaces: false, size: 4 };
+        assert_eq!(spaces.tab_text(lines, cursor), "   ");
+        assert_eq!(spaces.tab_text(lines, Cursor::at(at(0, 1))), "    ");
+        assert_eq!(tabs.tab_text(lines, cursor), "\t");
+    }
+
+
+    #[test]
+    fn auto_indentation_detects_style_and_width_and_falls_back_when_ambiguous() {
+        for (text, expected) in [
+            ("root\n  child\n    leaf\n  child\n", (TabIndentation::Spaces, Some(2))),
+            ("root\n\tchild\n\t\tleaf\n", (TabIndentation::Tabs, None)),
+            ("root\n  child\n     leaf\n", (TabIndentation::Spaces, None)),
+            ("root\n\tchild\n  child\n", (TabIndentation::Tabs, None)),
+            ("root\n   \nplain\n", (TabIndentation::Tabs, None)),
+        ] {
+            let ranges = editor_lines(text);
+            assert_eq!(detect_indentation(Lines { text, ranges: &ranges }), expected, "{text:?}");
+        }
+    }
+
 
     fn lines_of(text: &str) -> (String, Vec<Range<usize>>) {
         (text.to_string(), editor_lines(text))

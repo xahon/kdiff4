@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -7,9 +8,9 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, OpenFiles, RequestId, Response};
 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
-use crate::config::{self, GuiConfig, ViewConfig};
+use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
-use crate::editing::{self, Cursor, EditKey, Lines, Motion, Position};
+use crate::editing::{self, Cursor, EditKey, Indentation, Lines, Motion, Position};
 use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
 use crate::folding::{self, Folds};
@@ -172,6 +173,8 @@ struct DocumentTab {
     engine_stopped: bool,
     mirror: Option<Mirror>,
     language: LanguageState,
+    indentation_override: Option<Indentation>,
+    detected_indentation: Cell<Option<(TabIndentation, Option<u8>)>>,
     panes: PaneState,
     pending: HashMap<RequestId, Pending>,
     /// The alignment a mark just completed that the documents disagree on, waiting for the user to say where to show it.
@@ -252,6 +255,8 @@ impl DocumentTab {
             engine_stopped: false,
             mirror: None,
             language: LanguageState::default(),
+            indentation_override: None,
+            detected_indentation: Cell::new(None),
             panes: PaneState::default(),
             pending: HashMap::new(),
             inset_prompt: None,
@@ -865,6 +870,7 @@ Shortcut: {}", link.display()),
                 let opening = self.is_opening();
                 let initial_region = snapshot.current_region.clone();
                 if opening {
+                    self.tab.indentation_override = None;
                     self.tab.panes = PaneState {
                         merge_fraction: self.tab.panes.merge_fraction.clone(),
                         ..PaneState::default()
@@ -880,6 +886,7 @@ Shortcut: {}", link.display()),
                 }
                 self.tab.language.follow(&mirror);
                 self.tab.mirror = Some(mirror);
+                self.tab.detected_indentation.set(None);
                 self.tab.folds_language = None;
                 self.tab.panes.void_row = None;
                 if opening && let Some(region) = initial_region {
@@ -917,6 +924,9 @@ Shortcut: {}", link.display()),
                     }
                     DeltaOutcome::Applied => {
                         self.tab.output_folds_stale |= edits_output;
+                        if edits_output {
+                            self.tab.detected_indentation.set(None);
+                        }
                         if let Some(offset) = changed_end
                             && let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, Document::D))
                         {
@@ -1487,6 +1497,23 @@ Shortcut: {}", link.display()),
         }
     }
 
+    fn output_accepts_tab(&self, ctx: &egui::Context) -> bool {
+        matches!(self.tab.panes.caret, Some((Document::D, _)))
+            && self.tab.mirror.as_ref().and_then(Mirror::output).is_some()
+            && !self.tab_switch_blocked()
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.text_edit_focused()
+    }
+
+
+    fn keep_tab_in_output(&self, ctx: &egui::Context) {
+        if self.output_accepts_tab(ctx) && ctx.input(|input| input.events.iter().any(is_plain_tab)) {
+            // egui reads Tab for focus traversal before it gives the event to widgets.
+            ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+        }
+    }
+
+
     /// Keys go to the pane with the caret, unless a text field or dialog has the keyboard.
     fn handle_pane_keys(&mut self, ctx: &egui::Context) {
         let document = match self.tab.panes.caret {
@@ -1496,7 +1523,14 @@ Shortcut: {}", link.display()),
         if self.tab.mirror.is_none() || self.close_confirmation.is_some() || self.settings.is_some() || self.updater.update_window.is_some() || self.tab.eol_prompt.is_some() || ctx.text_edit_focused() {
             return;
         }
-        let events = ctx.input(|input| input.events.clone());
+        let accepts_tab = self.output_accepts_tab(ctx);
+        let events = ctx.input_mut(|input| {
+            let events = input.events.clone();
+            if accepts_tab {
+                input.events.retain(|event| !is_plain_tab(event));
+            }
+            events
+        });
         for event in events {
             match event {
                 egui::Event::Key {
@@ -1505,6 +1539,14 @@ Shortcut: {}", link.display()),
                     modifiers,
                     ..
                 } if modifiers.command => self.select_all(),
+                event if accepts_tab && is_plain_tab(&event) => {
+                    if let Some((_, cursor)) = self.tab.panes.caret
+                        && let Some(output) = self.tab.mirror.as_ref().and_then(Mirror::output)
+                    {
+                        let text = self.output_indentation(output.lines()).tab_text(output.lines(), cursor);
+                        self.edit_output(EditKey::Insert(text));
+                    }
+                }
                 egui::Event::Key {
                     key, pressed: true, modifiers, ..
                 } => {
@@ -1636,6 +1678,7 @@ Shortcut: {}", link.display()),
             Some(command) => command,
             None => return,
         };
+        self.tab.detected_indentation.set(None);
         self.tab.panes.set_caret(Document::D, Cursor::at(caret), None);
         self.tab.panes.reveal_caret = true;
         if let Some(id) = self.send(Command::EditOutput(command), Pending::Edit)
@@ -2434,10 +2477,28 @@ Shortcut: {}", link.display()),
         }
     }
 
-    /// Always shown and one line high, so the panes never move when a message comes or goes. Long messages are cut, with the full text in a tooltip. The language selector sits at the right end, with the output's line ending selector left of it; returns what was picked in them.
+    fn output_indentation(&self, lines: Lines<'_>) -> Indentation {
+        if let Some(indentation) = self.tab.indentation_override {
+            return indentation;
+        }
+        let view = self.view();
+        let (style, detected_size) = match view.tab_indentation {
+            TabIndentation::Auto => self.tab.detected_indentation.get().unwrap_or_else(|| {
+                let detected = editing::detect_indentation(lines);
+                self.tab.detected_indentation.set(Some(detected));
+                detected
+            }),
+            style => (style, None),
+        };
+        Indentation { spaces: style == TabIndentation::Spaces, size: detected_size.unwrap_or(view.tab_size) }
+    }
+
+
+    /// Always one line high, with the message truncated to fit beside the selectors.
     fn show_status(&self, ui: &mut egui::Ui) -> StatusPicks {
-        let eol = self.tab.mirror.as_ref().and_then(Mirror::output).map(|output| output.eol.clone());
-        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), eol.as_ref())
+        let output = self.tab.mirror.as_ref().and_then(Mirror::output);
+        let indentation = output.map(|output| (self.output_indentation(output.lines()), self.tab.indentation_override.is_some()));
+        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation)
     }
 
     /// egui sets the window theme on the first frame, before the window has focus, and Windows then keeps the old title bar colors until focus changes. Sending the theme again once the window has focus repaints the title bar.
@@ -2581,6 +2642,7 @@ impl eframe::App for KdiffApp {
             return;
         }
         let ctx = ui.ctx().clone();
+        self.keep_tab_in_output(&ctx);
         self.handle_tab_shortcuts(&ctx);
         self.show_menu(ui);
         if self.exiting {
@@ -2625,6 +2687,9 @@ impl eframe::App for KdiffApp {
                     self.tab.language.pick(picked, mirror);
                 }
                 eol_pick = picks.eol;
+                if let Some(indentation) = picks.indentation {
+                    self.tab.indentation_override = indentation;
+                }
                 let find_corner = ui.available_rect_before_wrap().right_top() + egui::vec2(-FIND_BAR_MARGIN.x, FIND_BAR_MARGIN.y);
                 pane_actions = ui.push_id(("document", self.tab.id), |ui| {
                     panes::show_session(ui, mirror, &mut self.tab.panes, &pane_options)
@@ -2722,10 +2787,11 @@ fn navigation_noun(to: Navigation) -> &'static str {
 struct StatusPicks {
     language: Option<Language>,
     eol: Option<EolStyle>,
+    indentation: Option<Option<Indentation>>,
 }
 
-/// The message at the left, cut to what fits beside the selectors at the right: the language, and the output's line ending style when there is an output.
-fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>) -> StatusPicks {
+/// The message at the left and the language, line ending, and indentation selectors at the right.
+fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>) -> StatusPicks {
     let mut picks = StatusPicks::default();
     egui::Panel::bottom("status_bar").show(ui, |ui| {
         let (text, color) = match status {
@@ -2738,6 +2804,9 @@ fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, e
             if let Some(eol) = eol {
                 picks.eol = eol::show_selector(ui, eol);
             }
+            if let Some((current, overridden)) = indentation {
+                picks.indentation = indentation_selector(ui, current, overridden);
+            }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
             });
@@ -2745,6 +2814,42 @@ fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, e
     });
     picks
 }
+
+fn indentation_selector(ui: &mut egui::Ui, current: Indentation, overridden: bool) -> Option<Option<Indentation>> {
+    let kind = match (current.spaces, current.size) {
+        (true, 1) => "space",
+        (true, _) => "spaces",
+        (false, 1) => "tab",
+        (false, _) => "tabs",
+    };
+    let mut updated = current.clone();
+    let mut restore = false;
+    egui::ComboBox::from_id_salt("output_indentation_selector")
+        .width(84.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .selected_text(format!("{} {kind}", current.size))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut updated.spaces, false, "Tabs");
+            ui.selectable_value(&mut updated.spaces, true, "Spaces");
+            ui.horizontal(|ui| {
+                let label = ui.label("Tab size");
+                ui.add(egui::DragValue::new(&mut updated.size).range(1..=config::MAX_TAB_SIZE)).labelled_by(label.id);
+            });
+            ui.separator();
+            restore = ui.add_enabled(overridden, egui::Button::new("Restore defaults")).clicked();
+            if restore {
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Change indentation for this merge output");
+    if restore {
+        Some(None)
+    } else {
+        (updated != current).then_some(Some(updated))
+    }
+}
+
 
 /// The size of a toolbar button: room for the icon above the label, plus the button padding.
 fn toolbar_button_size(label_size: egui::Vec2, padding: egui::Vec2) -> egui::Vec2 {
@@ -2865,6 +2970,11 @@ fn changes_line_structure(lines: Lines<'_>, cursor: Cursor, on_void: bool, key: 
         EditKey::Delete | EditKey::DeleteWordRight => !cursor.has_selection() && cursor.head.column >= lines.line_chars(cursor.head.line),
     }
 }
+
+fn is_plain_tab(event: &egui::Event) -> bool {
+    matches!(event, egui::Event::Key { key: Key::Tab, pressed: true, modifiers, .. } if modifiers.is_none())
+}
+
 
 /// Enter works with Ctrl held too, so a fast Ctrl+V, Enter sequence loses no line breaks. Ctrl+Backspace and Ctrl+Delete delete by words.
 fn edit_key_for(key: Key, modifiers: Modifiers) -> Option<EditKey> {
@@ -3873,6 +3983,45 @@ mod tests {
     }
 
     #[test]
+    fn plain_tab_replaces_the_output_selection_and_sends_the_edit() {
+        for (mode, expected) in [(config::TabIndentation::Tabs, "\t"), (config::TabIndentation::Spaces, "   ")] {
+            let (mut app, host, ctx) = app_with_session();
+            app.config.view.tab_indentation = mode;
+            app.config.view.tab_size = 3;
+            app.apply_view(&ctx, &app.config.view.clone());
+            app.tab.panes.set_caret(Document::D, Cursor { anchor: Position { line: 0, column: 1 }, head: Position::default() }, None);
+            let events = vec![egui::Event::Key { key: Key::Tab, physical_key: Some(Key::Tab), pressed: true, repeat: false, modifiers: Modifiers::NONE }];
+            ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| {
+                app.keep_tab_in_output(ctx);
+                let mut ui = egui::Ui::new(ctx.clone(), egui::Id::unique("tab_focus_test"), egui::UiBuilder::new());
+                assert!(!ui.button("Toolbar button").has_focus());
+                app.handle_pane_keys(ctx);
+                assert!(!ctx.input(|input| input.key_pressed(Key::Tab)));
+            })
+                .drop_without_applying_deltas();
+            assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().text, format!("{expected}\nx\n"));
+            assert!(matches!(&sent(app, host)[..], [Command::EditOutput(edit)] if edit.range == (0..1) && edit.text == expected));
+        }
+    }
+
+
+    #[test]
+    fn tab_only_edits_with_the_output_caret_and_no_modifiers() {
+        let (mut app, host, ctx) = app_with_session();
+        for (document, modifiers) in [(Document::A, Modifiers::NONE), (Document::D, Modifiers::SHIFT), (Document::D, Modifiers::CTRL)] {
+            app.tab.panes.set_caret(document, Cursor::default(), None);
+            let events = vec![egui::Event::Key { key: Key::Tab, physical_key: Some(Key::Tab), pressed: true, repeat: false, modifiers }];
+            ctx.run_pass(egui::RawInput { events, ..Default::default() }, |ctx| {
+                app.handle_pane_keys(ctx);
+                assert!(ctx.input(|input| input.key_pressed(Key::Tab)));
+            })
+                .drop_without_applying_deltas();
+        }
+        assert!(sent(app, host).is_empty());
+    }
+
+
+    #[test]
     fn editing_keys_work_with_ctrl() {
         assert_eq!(edit_key_for(Key::Enter, Modifiers::NONE), Some(EditKey::Newline));
         assert_eq!(edit_key_for(Key::Backspace, Modifiers::SHIFT), Some(EditKey::Backspace));
@@ -4086,7 +4235,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, status.as_ref(), &Language::plain_text(), None);
+            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None);
         });
         harness.run();
         let selector = harness.get_by_label("Language of the documents").rect();
@@ -4111,7 +4260,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), Some(&eol));
+            status_bar(ui, None, &Language::plain_text(), Some(&eol), None);
         });
         harness.run();
         harness
@@ -4140,12 +4289,51 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(|ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), None);
+            status_bar(ui, None, &Language::plain_text(), None, None);
         });
         harness.run();
         assert!(harness.query_by_label(eol::SELECTOR_HINT).is_none());
         assert!(harness.query_by_label(eol::CONFLICT_HINT).is_none());
+        assert!(harness.query_by_label("Change indentation for this merge output").is_none());
     }
+
+    #[test]
+    fn status_indentation_can_override_and_restore_the_current_file() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        app.apply_view(&ctx, &app.config.view.clone());
+        let mut second = DocumentTab::new(&ctx, 1, kdiff4_protocol::in_process().0);
+        second.mirror = Some(resolved_mirror());
+        app.background.push(second);
+
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 240.0)).build_ui_state(
+            |ui, app: &mut KdiffApp| {
+                egui_extras::install_image_loaders(ui.ctx());
+                if let Some(indentation) = app.show_status(ui).indentation {
+                    app.tab.indentation_override = indentation;
+                }
+            },
+            app,
+        );
+        harness.run();
+        harness.get_by_value("4 tabs").click();
+        harness.run();
+        harness.get_by_label("Spaces").click();
+        harness.run();
+        harness.get_by_value("4 spaces");
+        harness.get_by_value("4").set_value_accesskit(3.0);
+        harness.run();
+        harness.get_by_value("3 spaces");
+        assert_eq!(harness.state().config.view.tab_indentation, TabIndentation::Auto);
+        assert!(harness.state().background[0].indentation_override.is_none());
+
+        harness.get_by_label("Restore defaults").click();
+        harness.run();
+        harness.get_by_value("4 tabs");
+        assert!(harness.state().tab.indentation_override.is_none());
+    }
+
 
     #[test]
     fn missing_navigation_targets_are_named() {

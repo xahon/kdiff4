@@ -75,6 +75,18 @@ impl Default for GuiConfig {
     }
 }
 
+pub const MAX_TAB_SIZE: u8 = 100;
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabIndentation {
+    Tabs,
+    Spaces,
+    Auto,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewConfig {
@@ -91,6 +103,8 @@ pub struct ViewConfig {
     pub show_gutters: bool,
     /// D lines up with the source panes: every region gets the same rows in every pane, padded with void space.
     pub align_output: bool,
+    pub tab_indentation: TabIndentation,
+    pub tab_size: u8,
     /// The overview strip: the current line of every document, between the source panes and D.
     pub show_overview_strip: bool,
     /// The minimap: the whole document as a narrow column right of the panes, which scrolls them like a scroll bar.
@@ -140,6 +154,8 @@ impl Default for ViewConfig {
             show_line_numbers: true,
             show_gutters: true,
             align_output: false,
+            tab_indentation: TabIndentation::Auto,
+            tab_size: 4,
             show_overview_strip: true,
             show_minimap: true,
             independent_scroll: false,
@@ -172,6 +188,7 @@ impl ViewConfig {
         } else {
             DEFAULT_FONT_SIZE
         };
+        self.tab_size = self.tab_size.clamp(1, MAX_TAB_SIZE);
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.smooth_scroll_ms = self.smooth_scroll_ms.clamp(MIN_SMOOTH_SCROLL_MS, MAX_SMOOTH_SCROLL_MS);
@@ -447,6 +464,8 @@ last_dir = \"x\"
             show_line_numbers: false,
             show_gutters: false,
             align_output: true,
+            tab_indentation: TabIndentation::Auto,
+            tab_size: 3,
             show_overview_strip: false,
             show_minimap: false,
             independent_scroll: true,

@@ -27,6 +27,8 @@ The owner decides which kdiff3 bugs get fixed. When you find one while porting, 
 
 ### Added features
 
+- Tab indentation in D can auto-detect tabs or spaces and their indentation width from the merge output by default. The status bar can override indentation for the current merge. KDiff3 uses its explicit ReplaceTabs and TabSize settings and also applies its tab size to pane rendering.
+
 - Document tabs (see GUI in `ARCHITECTURE.md`): File → Open and subsequent command-line invocations add independent comparisons and merges to the same window. The last tab closes with the main window. Alt+Left and Alt+Right switch tabs, and Ctrl+Shift+T reopens the most recently closed tab. Ctrl+T opens the file selection dialog. Launching without arguments opens an independent, non-modal Open window whose Run button adds a tab. kdiff3 opens a separate comparison window for each invocation.
 - Splitting a region into smaller regions (see Splitting regions in `ARCHITECTURE.md`). kdiff3 cannot split its merge blocks.
 - Session files (`.kd4`, see Session file in `ARCHITECTURE.md`): a partially resolved merge can be saved with its source documents and continued later or on another computer. kdiff3 has no session files.
