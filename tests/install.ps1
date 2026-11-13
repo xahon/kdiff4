@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$installer = Join-Path $PSScriptRoot '../scripts/install.ps1'
+$installer = [scriptblock]::Create((Get-Content -LiteralPath (Join-Path $PSScriptRoot '../scripts/install.ps1') -Raw))
 $originalLocalAppData = $env:LOCALAPPDATA
+$originalOs = $env:OS
 $env:LOCALAPPDATA = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())
 $binDir = Join-Path $env:LOCALAPPDATA 'Programs\Kdiff4'
 $executable = Join-Path $binDir 'kdiff4.exe'
@@ -40,6 +41,7 @@ function New-Object($ComObject) {
 }
 
 try {
+    $env:OS = $null
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     Set-Content -LiteralPath $executable -Value 'old version'
     $failDownload = $true
@@ -60,8 +62,19 @@ try {
         if ($_.Exception.Message -notlike '*Shortcut verified*') { throw }
     }
     if ((Get-Content -LiteralPath $executable) -ne 'new version') { throw 'Executable was not replaced' }
+
+    & {
+        function Get-ItemPropertyValue { 'ARM64' }
+        try {
+            & $installer
+            throw 'Expected Windows ARM64 to be rejected'
+        } catch {
+            if ($_.Exception.Message -ne 'Kdiff4 releases support Windows x64 with this installer.') { throw }
+        }
+    }
 } finally {
     Get-ChildItem -LiteralPath $binDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Remove-Item -LiteralPath $binDir, (Split-Path -Parent $binDir), $env:LOCALAPPDATA -Force -ErrorAction SilentlyContinue
     $env:LOCALAPPDATA = $originalLocalAppData
+    $env:OS = $originalOs
 }

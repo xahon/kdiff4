@@ -1,6 +1,7 @@
 & {
     $ErrorActionPreference = 'Stop'
-    if ($env:OS -ne 'Windows_NT' -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+    if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or
+        (Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name 'PROCESSOR_ARCHITECTURE') -ne 'AMD64') {
         throw 'Kdiff4 releases support Windows x64 with this installer.'
     }
 

@@ -723,7 +723,7 @@ The binary routes each override by its section to the engine (in the open comman
 
 The owner changes the version in `Cargo.toml` by hand. A `post-commit` hook in `.githooks` then creates the annotated tag `vX.Y.Z` on `master` for the commit that changed the workspace version (it never edits the version and never moves an existing tag). Enable it once per clone with `git config core.hooksPath .githooks`, and `sh .githooks/test-post-commit.sh` tests it. Push the commit and its tag together with `git push --follow-tags`. The tag must equal the version in `Cargo.toml`. `.github/workflows/release.yml` tests, builds and publishes executables for Windows x64, Linux x86-64 and Apple silicon macOS with generated release notes.
 
-The one-line commands in `README.md` run `scripts/install.sh` or `scripts/install.ps1` from `master`. Each downloads the matching executable from the GitHub latest-release asset URL. The Bash installer puts it in `~/.local/bin` and updates Bash or Zsh startup files. The PowerShell installer puts it in `%LOCALAPPDATA%\Programs\Kdiff4`, updates the user's PATH, and writes `Kdiff4.lnk` in the user's Start menu Programs folder.
+The one-line commands in `README.md` run `scripts/install.sh` or `scripts/install.ps1` from `master`. Each downloads the matching executable from the GitHub latest-release asset URL. The Bash installer puts it in `~/.local/bin` and updates Bash or Zsh startup files. The PowerShell installer checks the native Windows architecture in the machine registry, so 32-bit PowerShell can install on Windows x64. It puts the executable in `%LOCALAPPDATA%\Programs\Kdiff4`, updates the user's PATH, and writes `Kdiff4.lnk` in the user's Start menu Programs folder.
 
 ## Binary and CLI
 
