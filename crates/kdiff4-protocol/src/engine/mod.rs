@@ -124,6 +124,14 @@ pub enum RegionStatus {
     Merge(MergeStatus),
 }
 
+impl RegionStatus {
+    /// Whether the region is a conflict before merge choices and edits are applied.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Diff(HunkChange::Added | HunkChange::Removed | HunkChange::Modified)
+            | Self::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict))
+    }
+}
+
 /// One line index per source document, or `None` where that document has a void.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {

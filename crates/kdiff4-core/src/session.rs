@@ -118,7 +118,7 @@ impl Session {
         let regions = merge.regions();
         let current = regions
             .iter()
-            .position(|region| merge::is_conflict(&region.status))
+            .position(|region| region.status.is_conflict())
             .or_else(|| regions.iter().position(|region| merge::is_difference(&region.status)));
         Ok(Session {
             revision: 1,
@@ -269,7 +269,7 @@ impl Session {
         };
         let wanted = |index: &usize| match to {
             Navigation::PreviousDifference | Navigation::NextDifference => merge::is_difference(&regions[*index].status) || states.get(*index).is_some_and(|state| state.merge.edited) || stops.contains(index),
-            Navigation::PreviousConflict | Navigation::NextConflict => merge::is_conflict(&regions[*index].status),
+            Navigation::PreviousConflict | Navigation::NextConflict => regions[*index].status.is_conflict(),
         };
         let found = match to {
             Navigation::NextDifference | Navigation::NextConflict => (from.map_or(0, |index| index + 1)..count).find(wanted),

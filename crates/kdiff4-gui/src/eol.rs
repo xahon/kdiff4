@@ -1,10 +1,10 @@
-use egui::{RichText, Ui};
+use egui::{PopupCloseBehavior, RichText, Ui};
 use kdiff4_protocol::{EolChoice, EolStyle};
 
+use crate::bottom_controls::{bottom_switch, SwitchPopup};
 use crate::theme;
 
 pub(crate) const DIALOG_WIDTH: f32 = 380.0;
-const SELECTOR_WIDTH: f32 = 150.0;
 const STYLES: [EolStyle; 3] = [EolStyle::Lf, EolStyle::Cr, EolStyle::CrLf];
 pub const CONFLICT_LABEL: &str = "Conflict line ending";
 pub const SELECTOR_HINT: &str = "Line ending style of the output";
@@ -35,18 +35,16 @@ pub fn show_selector(ui: &mut Ui, current: &EolChoice) -> Option<EolStyle> {
         EolChoice::Style(style) => RichText::new(name(style.clone())),
         EolChoice::Conflict => RichText::new(CONFLICT_LABEL).color(theme::palette_of(ui).red()),
     };
-    let combo = egui::ComboBox::from_id_salt("output_eol_selector")
-        .width(SELECTOR_WIDTH)
-        .selected_text(selected)
-        .show_ui(ui, |ui| {
-            for style in STYLES {
-                let selected = *current == EolChoice::Style(style.clone());
-                if ui.selectable_label(selected, name(style.clone())).clicked() {
-                    picked = Some(style);
-                }
+    let hint = if *current == EolChoice::Conflict { CONFLICT_HINT } else { SELECTOR_HINT };
+    let popup = SwitchPopup { title: Some("Line Endings"), close_behavior: PopupCloseBehavior::CloseOnClick, max_height: None };
+    bottom_switch(ui, hint, selected.into(), STYLES.map(name), None, popup, |ui| {
+        for style in STYLES {
+            let selected = *current == EolChoice::Style(style.clone());
+            if ui.selectable_label(selected, name(style.clone())).clicked() {
+                picked = Some(style);
             }
-        });
-    combo.response.on_hover_text(if *current == EolChoice::Conflict { CONFLICT_HINT } else { SELECTOR_HINT });
+        }
+    });
     picked
 }
 

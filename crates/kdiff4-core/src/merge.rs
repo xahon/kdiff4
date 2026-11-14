@@ -265,22 +265,19 @@ pub fn join_stable(previous: &(Region, RegionState), next: &(Region, RegionState
 
 /// The choice auto-resolve makes for a region with this status.
 pub fn auto_choice(status: &RegionStatus) -> Choice {
+    if status.is_conflict() {
+        return Choice::Unresolved;
+    }
     match status {
-        RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged) => Choice::Hunks(vec![Document::A]),
         RegionStatus::Merge(MergeStatus::ChangedInB | MergeStatus::ChangedAlike) => Choice::Hunks(vec![Document::B]),
         RegionStatus::Merge(MergeStatus::ChangedInC) => Choice::Hunks(vec![Document::C]),
-        RegionStatus::Diff(_) | RegionStatus::Merge(MergeStatus::Conflict | MergeStatus::WhitespaceConflict) => Choice::Unresolved,
+        _ => Choice::Hunks(vec![Document::A]),
     }
 }
 
 /// A region whose hunks are not all equal.
 pub fn is_difference(status: &RegionStatus) -> bool {
     !matches!(status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged))
-}
-
-/// A region auto-resolve leaves unresolved, whatever D holds for it now.
-pub fn is_conflict(status: &RegionStatus) -> bool {
-    auto_choice(status) == Choice::Unresolved
 }
 
 /// Rejects choices of D, of documents the session doesn't have, and of one hunk twice.

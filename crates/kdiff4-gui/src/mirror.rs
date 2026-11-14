@@ -53,6 +53,12 @@ pub enum DeltaOutcome {
     Ignored,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConflictCounts {
+    pub unresolved: usize,
+    pub total: usize,
+}
+
 /// The client's copy of the session, built from a snapshot and the deltas after it. D edits are applied here at once and confirmed by the host later.
 #[derive(Debug, Clone)]
 pub struct Mirror {
@@ -66,6 +72,7 @@ pub struct Mirror {
     folded_row_maps: Vec<RowMap>,
     /// Per region, its merge state; empty without D.
     merge: Vec<RegionMerge>,
+    conflicts: ConflictCounts,
     /// D's rows: its lines and the placeholders of unresolved conflicts, without folds.
     output_rows: RowMap,
     /// `output_rows` with D's folds folded.
@@ -107,6 +114,7 @@ impl Mirror {
             row_maps: Vec::new(),
             folded_row_maps: Vec::new(),
             merge: snapshot.merge,
+            conflicts: ConflictCounts::default(),
             output_rows: RowMap::default(),
             folded_output_rows: RowMap::default(),
             folds: Default::default(),
@@ -119,6 +127,7 @@ impl Mirror {
             has_char_diffs: snapshot.engine.char_diff,
             alignments: snapshot.alignments,
         };
+        mirror.refresh_conflicts();
         mirror.refresh_rows();
         mirror
     }
@@ -298,7 +307,21 @@ impl Mirror {
     }
 
     pub fn unresolved_count(&self) -> usize {
-        self.merge.iter().filter(|state| state.is_unresolved()).count()
+        self.conflicts.unresolved
+    }
+
+    pub fn conflict_counts(&self) -> Option<ConflictCounts> {
+        self.is_merge().then_some(self.conflicts)
+    }
+
+    fn refresh_conflicts(&mut self) {
+        let mut counts = ConflictCounts::default();
+        for (index, state) in self.merge.iter().enumerate() {
+            let unresolved = state.is_unresolved();
+            counts.unresolved += usize::from(unresolved);
+            counts.total += usize::from(unresolved || self.comparison.regions.get(index).is_some_and(|region| region.status.is_conflict()));
+        }
+        self.conflicts = counts;
     }
 
     /// The revision a choice command is based on, or `None` while local edits are unconfirmed: their deltas may join regions, so region indices aren't known yet.
@@ -335,6 +358,7 @@ impl Mirror {
         let range = update.at..update.at + update.removed;
         self.comparison.regions.splice(range.clone(), update.regions);
         self.merge.splice(range, update.merge);
+        self.refresh_conflicts();
         self.current_region = Some(update.at);
         self.refresh_rows();
         true
@@ -451,6 +475,7 @@ impl Mirror {
         if let Some(state) = region.and_then(|region| self.merge.get_mut(region)) {
             state.edited = true;
             state.output_lines = edit.text.matches('\n').count();
+            self.refresh_conflicts();
         }
         self.refresh_output_rows();
         Some(OutputEdit {
@@ -752,6 +777,7 @@ mod tests {
     fn unresolved_conflicts_show_in_d_and_the_summary() {
         let mirror = conflict_mirror();
         assert_eq!(mirror.unresolved_count(), 1);
+        assert_eq!(mirror.conflict_counts(), Some(ConflictCounts { unresolved: 1, total: 1 }));
         assert_eq!(mirror.difference_summary(), "1 difference; 1 unresolved");
         let rows = Rows::Mapped(mirror.output_rows());
         assert_eq!(

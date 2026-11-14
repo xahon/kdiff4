@@ -1,8 +1,9 @@
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use egui::{Image, Ui, vec2};
+use egui::{Image, PopupCloseBehavior, Ui, Vec2, vec2};
 
+use crate::bottom_controls::{bottom_switch, SwitchPopup};
 use crate::mirror::Mirror;
 
 const PLAIN_TEXT: &str = "Plain text";
@@ -10,7 +11,6 @@ const PLAIN_TEXT: &str = "Plain text";
 const BACKUP_SUFFIXES: &[&str] = &["orig", "bak", "old", "new", "tmp", "rej"];
 /// Starts of a first line, compared in lower case, that name a language without a shebang.
 const FIRST_LINE_MARKERS: &[(&str, &str)] = &[("<?xml", "XML"), ("<?php", "PHP"), ("<!doctype html", "HTML"), ("<html", "HTML")];
-const SELECTOR_WIDTH: f32 = 170.0;
 const SELECTOR_HEIGHT: f32 = 400.0;
 const ICON_SIZE: f32 = 16.0;
 const SELECTOR_HINT: &str = "Language of the documents";
@@ -361,18 +361,16 @@ fn source_paths(mirror: &Mirror) -> Vec<PathBuf> {
 /// The drop-down for the status bar. Returns the language the user picked this frame.
 pub fn show_selector(ui: &mut Ui, current: &Language) -> Option<Language> {
     let mut picked = None;
-    let combo = egui::ComboBox::from_id_salt("language_selector")
-        .width(SELECTOR_WIDTH)
-        .height(SELECTOR_HEIGHT)
-        .selected_text((current.icon(), current.name()))
-        .show_ui(ui, |ui| {
-            for language in Language::all() {
-                if ui.selectable_label(language == *current, (language.icon(), language.name())).clicked() {
-                    picked = Some(language);
-                }
+    let entries = std::iter::once(PLAIN_TEXT).chain(RULES.iter().map(|rule| rule.name));
+    let icon = Some((current.icon(), Vec2::splat(ICON_SIZE)));
+    let popup = SwitchPopup { title: Some("Language"), close_behavior: PopupCloseBehavior::CloseOnClick, max_height: Some(SELECTOR_HEIGHT) };
+    bottom_switch(ui, SELECTOR_HINT, current.name().into(), entries, icon, popup, |ui| {
+        for language in Language::all() {
+            if ui.selectable_label(language == *current, (language.icon(), language.name())).clicked() {
+                picked = Some(language);
             }
-        });
-    combo.response.on_hover_text(SELECTOR_HINT);
+        }
+    });
     picked
 }
 

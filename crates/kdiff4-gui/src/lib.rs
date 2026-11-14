@@ -2,6 +2,7 @@ mod about_dialog;
 mod alignment_gutter;
 mod app;
 mod autoscroll;
+mod bottom_controls;
 mod char_diff;
 mod config;
 mod dialog_window;

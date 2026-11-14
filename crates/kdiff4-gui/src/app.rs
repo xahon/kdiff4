@@ -8,6 +8,7 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, OpenFiles, RequestId, Response};
 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
+use crate::bottom_controls::{bottom_switch, conflict_label, SwitchPopup};
 use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
 use crate::document_tabs;
@@ -18,7 +19,7 @@ use crate::folding::{self, Folds};
 use crate::fonts::{self, FontScan};
 use crate::icons::{self, Icon};
 use crate::language::{self, Language, LanguageState};
-use crate::mirror::{DeltaOutcome, Mirror};
+use crate::mirror::{ConflictCounts, DeltaOutcome, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
 use crate::overview;
 use crate::panes::{self, PaneAction, PaneOptions, PaneState};
@@ -2536,7 +2537,8 @@ Shortcut: {}", link.display()),
     fn show_status(&self, ui: &mut egui::Ui) -> StatusPicks {
         let output = self.tab.mirror.as_ref().and_then(Mirror::output);
         let indentation = output.map(|output| (self.output_indentation(output.lines()), self.tab.indentation_override.is_some()));
-        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation)
+        let conflicts = self.tab.mirror.as_ref().and_then(Mirror::conflict_counts);
+        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts)
     }
 
     /// egui sets the window theme on the first frame, before the window has focus, and Windows then keeps the old title bar colors until focus changes. Sending the theme again once the window has focus repaints the title bar.
@@ -2882,8 +2884,10 @@ struct StatusPicks {
     indentation: Option<Option<Indentation>>,
 }
 
-/// The message at the left and the language, line ending, and indentation selectors at the right.
-fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>) -> StatusPicks {
+/// The message at the left and the Bottom Controls at the right.
+fn status_bar(
+    ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>, conflicts: Option<ConflictCounts>,
+) -> StatusPicks {
     let mut picks = StatusPicks::default();
     egui::Panel::bottom("status_bar").show(ui, |ui| {
         let (text, color) = match status {
@@ -2898,6 +2902,9 @@ fn status_bar(ui: &mut egui::Ui, status: Option<&Status>, language: &Language, e
             }
             if let Some((current, overridden)) = indentation {
                 picks.indentation = indentation_selector(ui, current, overridden);
+            }
+            if let Some(conflicts) = conflicts {
+                conflict_label(ui, conflicts);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
@@ -2916,25 +2923,20 @@ fn indentation_selector(ui: &mut egui::Ui, current: Indentation, overridden: boo
     };
     let mut updated = current.clone();
     let mut restore = false;
-    egui::ComboBox::from_id_salt("output_indentation_selector")
-        .width(84.0)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .selected_text(format!("{} {kind}", current.size))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut updated.spaces, false, "Tabs");
-            ui.selectable_value(&mut updated.spaces, true, "Spaces");
-            ui.horizontal(|ui| {
-                let label = ui.label("Tab size");
-                ui.add(egui::DragValue::new(&mut updated.size).range(1..=config::MAX_TAB_SIZE)).labelled_by(label.id);
-            });
-            ui.separator();
-            restore = ui.add_enabled(overridden, egui::Button::new("Restore defaults")).clicked();
-            if restore {
-                ui.close();
-            }
-        })
-        .response
-        .on_hover_text("Change indentation for this merge output");
+    let popup = SwitchPopup { title: None, close_behavior: egui::PopupCloseBehavior::CloseOnClickOutside, max_height: None };
+    bottom_switch(ui, "Change indentation for this merge output", format!("{} {kind}", current.size).into(), ["4 spaces"], None, popup, |ui| {
+        ui.selectable_value(&mut updated.spaces, false, "Tabs");
+        ui.selectable_value(&mut updated.spaces, true, "Spaces");
+        ui.horizontal(|ui| {
+            let label = ui.label("Tab size");
+            ui.add(egui::DragValue::new(&mut updated.size).range(1..=config::MAX_TAB_SIZE)).labelled_by(label.id);
+        });
+        ui.separator();
+        restore = ui.add_enabled(overridden, egui::Button::new("Restore defaults")).clicked();
+        if restore {
+            ui.close();
+        }
+    });
     if restore {
         Some(None)
     } else {
@@ -4582,7 +4584,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None);
+            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None, None);
         });
         harness.run();
         let selector = harness.get_by_label("Language of the documents").rect();
@@ -4607,7 +4609,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), Some(&eol), None);
+            status_bar(ui, None, &Language::plain_text(), Some(&eol), None, None);
         });
         harness.run();
         harness
@@ -4623,11 +4625,102 @@ mod tests {
         assert!(language.left() - eol.right() < 20.0, "and right beside it, not {} away", language.left() - eol.right());
     }
 
+
+    #[test]
+    fn bottom_switches_fit_their_values_and_title_their_popups() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 240.0))
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, eol| {
+                let picks = status_bar(ui, None, &Language::plain_text(), Some(eol), Some((Indentation { spaces: true, size: 4 }, false)), None);
+                if let Some(picked) = picks.eol {
+                    *eol = EolChoice::Style(picked);
+                }
+            }, EolChoice::Style(EolStyle::Lf));
+        let eol = harness.get_by_value("LF").rect();
+        let indentation = harness.get_by_value("4 spaces").rect();
+        let language = harness.get_by_value("Plain text").rect();
+        assert!(eol.width() < indentation.width() && indentation.width() < language.width() && language.width() < 150.0);
+        assert_eq!(indentation.height(), eol.height());
+        assert_eq!(language.height(), eol.height());
+
+        harness.get_by_value("LF").click();
+        harness.run();
+        assert!(harness.get_by_label("Line Endings").rect().top() < harness.get_by_label("CRLF").rect().top());
+        harness.get_by_label("CRLF").click();
+        harness.run();
+        assert_eq!(*harness.state(), EolChoice::Style(EolStyle::CrLf));
+        assert_eq!(harness.get_by_value("CRLF").rect(), eol);
+        assert!(harness.query_by_label("Line Endings").is_none());
+
+        harness.get_by_value("Plain text").click();
+        harness.run();
+        assert!(harness.get_by_label("Language").rect().bottom() < language.top());
+    }
+
     #[test]
     fn a_line_ending_conflict_is_named_in_the_status_bar() {
         use egui_kittest::kittest::Queryable;
         let harness = eol_status_bar(EolChoice::Conflict);
         harness.get_by_label(eol::CONFLICT_HINT);
+    }
+
+
+    #[test]
+    fn the_conflict_label_updates_its_count_and_color_with_the_merge() {
+        use egui_kittest::kittest::Queryable;
+        use kdiff4_protocol::{Choice, MergeUpdate, RegionMerge};
+
+        let (mut app, _host, _) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        let region = snapshot.comparison.regions[0].clone();
+        let resolved = snapshot.merge[0].clone();
+        let unresolved = RegionMerge { choice: Choice::Unresolved, edited: false, output_lines: 0 };
+        snapshot.merge[0] = unresolved.clone();
+        snapshot.output.as_mut().unwrap().text = "x\n".to_string();
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).with_theme(egui::Theme::Light)
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app: &mut KdiffApp| { app.show_status(ui); }, app);
+        let color = |harness: &egui_kittest::Harness<'_, KdiffApp>, label: &str| harness.output().shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == label => Some(text.galley.job.sections[0].format.color),
+            _ => None,
+        }).unwrap();
+        let bounds = harness.get_by_label("1 / 1").rect();
+        assert!(bounds.right() <= harness.get_by_value("4 tabs").rect().left());
+        let red = color(&harness, "1 / 1");
+        assert!(red.r() > red.g() && red.r() > red.b());
+        apply_change(harness.state_mut(), Change::OutputEdited {
+            range: 0..0,
+            text: "b\n".to_string(),
+            modified: true,
+            merge: MergeUpdate { at: 0, removed: 1, regions: vec![region.clone()], merge: vec![resolved] },
+        });
+        harness.step();
+        let green = color(&harness, "0 / 1");
+        assert!(green.g() > green.r() && green.g() > green.b());
+        apply_change(harness.state_mut(), Change::OutputEdited {
+            range: 0..2,
+            text: String::new(),
+            modified: true,
+            merge: MergeUpdate { at: 0, removed: 1, regions: vec![region], merge: vec![unresolved] },
+        });
+        harness.step();
+        assert_eq!(color(&harness, "1 / 1"), red);
+
+        let mut snapshot = resolved_snapshot();
+        snapshot.comparison.regions[0].status = kdiff4_protocol::engine::RegionStatus::Diff(kdiff4_protocol::engine::HunkChange::Unchanged);
+        harness.state_mut().tab.mirror = Some(Mirror::from_snapshot(snapshot.clone(), false));
+        harness.step();
+        assert_eq!(color(&harness, "0 / 0"), green);
+
+        snapshot.output = None;
+        snapshot.merge.clear();
+        harness.state_mut().tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        harness.step();
+        assert!(harness.query_by_label("1 / 1").is_none());
+        assert!(harness.query_by_label("0 / 0").is_none());
     }
 
     #[test]
@@ -4636,7 +4729,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(|ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), None, None);
+            status_bar(ui, None, &Language::plain_text(), None, None, None);
         });
         harness.run();
         assert!(harness.query_by_label(eol::SELECTOR_HINT).is_none());
