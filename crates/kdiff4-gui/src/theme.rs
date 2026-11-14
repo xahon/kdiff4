@@ -8,6 +8,16 @@ use crate::config::{ThemeChoice, ThemeColors, ViewConfig};
 const FILL_SHARE: u16 = 20;
 /// The same for the stronger fill of active gutter blocks and char-diff backgrounds.
 const ACTIVE_SHARE: u16 = 50;
+pub const UI_ACCENT_BRIGHTNESS: u8 = 10;
+
+
+pub const fn ui_accent(background: Color32) -> Color32 {
+    Color32::from_rgb(
+        background.r().saturating_add(UI_ACCENT_BRIGHTNESS),
+        background.g().saturating_add(UI_ACCENT_BRIGHTNESS),
+        background.b().saturating_add(UI_ACCENT_BRIGHTNESS),
+    )
+}
 
 /// The colors of one document: its pane header, which also fills its gutter blocks, and the block border; `gutter_active` fills the blocks of the current region and the char-diff backgrounds. The red of a character or block that differs from every other document has a set too. All three come from one color, `gutter_border`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +50,8 @@ const fn mix(over: u8, under: u8, share: u16) -> u8 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
     pub window_bg: Color32,
+    pub bottom_switch_tint: Color32,
+    pub bottom_switch_outline: Color32,
     pub pane_bg: Color32,
     pub pane_border: Color32,
     pub pane_header_bg: Color32,
@@ -64,9 +76,13 @@ pub struct Palette {
 
 const LIGHT_PANE_BG: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
 const DARK_PANE_BG: Color32 = Color32::from_rgb(0x12, 0x14, 0x17);
+const LIGHT_WINDOW_BG: Color32 = Color32::from_rgb(0xEC, 0xEE, 0xF1);
+const DARK_WINDOW_BG: Color32 = Color32::from_rgb(0x1E, 0x21, 0x26);
 
 pub const LIGHT: Palette = Palette {
-    window_bg: Color32::from_rgb(0xEC, 0xEE, 0xF1),
+    window_bg: LIGHT_WINDOW_BG,
+    bottom_switch_tint: ui_accent(LIGHT_WINDOW_BG),
+    bottom_switch_outline: Color32::from_rgb(0x9A, 0xA2, 0xAE),
     pane_bg: LIGHT_PANE_BG,
     pane_border: Color32::from_rgb(0x9A, 0xA2, 0xAE),
     pane_header_bg: Color32::from_rgb(0xDE, 0xE3, 0xE9),
@@ -92,7 +108,9 @@ pub const LIGHT: Palette = Palette {
 };
 
 pub const DARK: Palette = Palette {
-    window_bg: Color32::from_rgb(0x1E, 0x21, 0x26),
+    window_bg: DARK_WINDOW_BG,
+    bottom_switch_tint: ui_accent(DARK_WINDOW_BG),
+    bottom_switch_outline: Color32::from_rgb(0x63, 0x6C, 0x79),
     pane_bg: DARK_PANE_BG,
     pane_border: Color32::from_rgb(0x55, 0x5C, 0x67),
     pane_header_bg: Color32::from_rgb(0x2A, 0x2F, 0x36),
@@ -172,6 +190,12 @@ pub fn customized(theme: Theme, colors: &ThemeColors) -> Palette {
     if let Some([r, g, b]) = colors.ui_text {
         palette.text = Color32::from_rgb(r, g, b);
     }
+    if let Some([r, g, b]) = colors.bottom_switch_tint {
+        palette.bottom_switch_tint = Color32::from_rgb(r, g, b);
+    }
+    if let Some([r, g, b]) = colors.bottom_switch_outline {
+        palette.bottom_switch_outline = Color32::from_rgb(r, g, b);
+    }
     if let Some([r, g, b]) = colors.pane_text {
         palette.pane_text = Color32::from_rgb(r, g, b);
     }
@@ -226,6 +250,13 @@ pub fn configure_style(style: &mut Style, palette: &Palette, view: &ViewConfig) 
     }
     visuals.widgets.noninteractive.bg_stroke.color = palette.pane_border;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.pane_border);
+    let accent = ui_accent(palette.window_bg);
+    visuals.widgets.inactive.bg_fill = accent;
+    visuals.widgets.inactive.weak_bg_fill = accent;
+    for widget in [&mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
+        widget.bg_fill = accent;
+        widget.weak_bg_fill = accent;
+    }
     visuals.weak_text_color = Some(palette.weak_text);
     let radius = CornerRadius::same(view.corner_radius.clone());
     visuals.window_corner_radius = radius.clone();
@@ -467,6 +498,20 @@ mod tests {
             ..ThemeColors::default()
         };
         assert_eq!(customized(Theme::Light, &colors).pane_text, Color32::from_rgb(4, 5, 6));
+    }
+
+    #[test]
+    fn default_bottom_switches_and_widget_fills_share_the_accent_color() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let palette = palette(theme);
+            let mut style = Style::default();
+            configure_style(&mut style, palette, &ViewConfig::default());
+            let accent = ui_accent(palette.window_bg);
+            assert_eq!(palette.bottom_switch_tint, accent);
+            assert_eq!(style.visuals.widgets.inactive.weak_bg_fill, accent);
+            assert_eq!(style.visuals.widgets.hovered.weak_bg_fill, accent);
+            assert_eq!(style.visuals.widgets.open.weak_bg_fill, accent);
+        }
     }
 
     #[test]

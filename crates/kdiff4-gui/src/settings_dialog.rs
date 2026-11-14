@@ -448,9 +448,10 @@ impl SettingsDialog {
             );
             ui.end_row();
 
-            ui.label("Corner radius:");
+            let label = ui.label("Corner radius:");
             ui.add(DragValue::new(&mut self.draft.corner_radius).range(0..=MAX_CORNER_RADIUS).speed(0.1).suffix(" px"))
-                .on_hover_text("Rounding of widgets, menus, dialogs, panes and the window frame.");
+                .labelled_by(label.id)
+                .on_hover_text("Shared rounding for panes, buttons, tabs, menus, dialogs, and the window frame.");
             ui.end_row();
         });
         ui.add_space(4.0);
@@ -633,6 +634,20 @@ mod tests {
         assert_eq!(dialog.draft(), &view);
         assert_eq!(dialog.changed_comparison(), None);
     }
+
+    #[test]
+    fn appearance_exposes_the_shared_corner_radius() {
+        use egui_kittest::kittest::Queryable;
+
+        let view = ViewConfig { corner_radius: 7, ..ViewConfig::default() };
+        let mut dialog = SettingsDialog::new(&view, None);
+        dialog.tab = Tab::Appearance;
+        let harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).with_accessibility_check(false)
+            .build_ui_state(|ui, dialog: &mut SettingsDialog| { dialog.show(ui, Some(&[])); }, dialog);
+        let control = harness.get_by_role_and_label(egui::Role::SpinButton, "Corner radius:");
+        assert!(control.rect().is_positive());
+    }
+
 
     #[test]
     fn comparison_changes_are_reported_and_reset() {

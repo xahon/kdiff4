@@ -2113,7 +2113,7 @@ Shortcut: {}", link.display()),
         let is_merge = self.is_merge();
         let savable = is_merge && self.tab.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
         let has_session = self.tab.mirror.is_some();
-        egui::Panel::top("menu_bar").show(ui, |ui| {
+        egui::Panel::top("menu_bar").show_separator_line(false).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     let shortcuts = format!("{} / {}", ui.ctx().format_shortcut(&OPEN_SHORTCUT), ui.ctx().format_shortcut(&OPEN_TAB_SHORTCUT));
@@ -2346,7 +2346,9 @@ Shortcut: {}", link.display()),
         let mut independent_toggled = false;
         let ignore_whitespace_on = self.ignores_whitespace();
         let mut ignore_whitespace_toggled = false;
-        egui::Panel::top("toolbar").show(ui, |ui| {
+        let mut frame = egui::Frame::side_top_panel(ui.style());
+        frame.inner_margin.bottom *= 2;
+        egui::Panel::top("toolbar").show_separator_line(false).frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let response = toolbar_toggle(ui, VOID_TOGGLE_LABEL, on, is_merge, icons::SHOW_VOID).on_hover_text(VOID_TOGGLE_HINT);
                 if is_merge && response.clicked() {
@@ -2871,40 +2873,38 @@ fn indentation_selector(ui: &mut egui::Ui, current: Indentation, overridden: boo
 }
 
 
-/// The size of a toolbar button: room for the icon above the label, plus the button padding.
+/// Room for the icon and label side by side, plus the button padding.
 fn toolbar_button_size(label_size: egui::Vec2, padding: egui::Vec2) -> egui::Vec2 {
-    egui::vec2(label_size.x.max(TOOLBAR_ICON_SIZE), TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + label_size.y) + padding * 2.0
+    egui::vec2(TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + label_size.x, label_size.y.max(TOOLBAR_ICON_SIZE)) + padding * 2.0
 }
 
-/// A bordered toolbar button with its icon centered above the label; filled while `on`.
+/// A bordered toolbar button with its icon to the left of the label.
 fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, image: Icon) -> egui::Response {
     let palette = theme::palette_of(ui);
     let color = if enabled { palette.text } else { palette.weak_text.gamma_multiply(0.5) };
     let galley = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Button.resolve(ui.style()), color);
     let padding = ui.spacing().button_padding;
     let (rect, response) = ui.allocate_exact_size(toolbar_button_size(galley.size(), padding), egui::Sense::click());
-    let visuals = ui.visuals();
     let fill = if on {
-        visuals.selection.bg_fill
-    } else if enabled && response.hovered() {
-        visuals.widgets.hovered.weak_bg_fill
+        ui.visuals().selection.bg_fill
     } else {
-        visuals.widgets.inactive.weak_bg_fill
+        theme::ui_accent(palette.window_bg)
     };
+    let outline = if enabled && (response.hovered() || response.has_focus()) { palette.text } else { palette.pane_border };
     ui.painter().rect(
         rect,
         theme::corner_radius_of(ui),
         fill,
-        egui::Stroke::new(1.0, palette.pane_border),
+        egui::Stroke::new(1.0, outline),
         egui::StrokeKind::Inside,
     );
     let icon = egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.top() + padding.y + TOOLBAR_ICON_SIZE / 2.0),
+        egui::pos2(rect.left() + padding.x + TOOLBAR_ICON_SIZE / 2.0, rect.center().y),
         egui::vec2(TOOLBAR_ICON_SIZE, TOOLBAR_ICON_SIZE),
     );
     image.image().tint(color).paint_at(ui, icon);
     ui.painter()
-        .galley(egui::pos2(rect.center().x - galley.size().x / 2.0, icon.bottom() + TOOLBAR_ICON_GAP), galley, color);
+        .galley(egui::pos2(icon.right() + TOOLBAR_ICON_GAP, rect.center().y - galley.size().y / 2.0), galley, color);
     response
 }
 
@@ -4257,13 +4257,43 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_buttons_fit_the_icon_above_the_label() {
+    fn toolbar_buttons_fit_the_icon_beside_the_label() {
         let padding = egui::vec2(4.0, 1.0);
         let wide = toolbar_button_size(egui::vec2(60.0, 14.0), padding);
-        assert_eq!(wide, egui::vec2(60.0 + 8.0, TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + 14.0 + 2.0));
-        let narrow = toolbar_button_size(egui::vec2(5.0, 14.0), padding);
-        assert_eq!(narrow.x, TOOLBAR_ICON_SIZE + 8.0);
+        assert_eq!(wide, egui::vec2(TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + 60.0 + 8.0, TOOLBAR_ICON_SIZE + 2.0));
+        let tall = toolbar_button_size(egui::vec2(5.0, 24.0), padding);
+        assert_eq!(tall, egui::vec2(TOOLBAR_ICON_SIZE + TOOLBAR_ICON_GAP + 5.0 + 8.0, 24.0 + 2.0));
     }
+
+    #[test]
+    fn toolbar_buttons_draw_a_brighter_background_with_the_icon_first() {
+        use egui::epaint::Shape;
+
+        for mode in [egui::Theme::Light, egui::Theme::Dark] {
+            let harness = egui_kittest::Harness::builder().with_theme(mode).with_accessibility_check(false)
+                .with_context_setup(egui_extras::install_image_loaders)
+                .build_ui(|ui| { toolbar_toggle(ui, "Overview", false, true, icons::OVERVIEW); });
+            let palette = theme::palette(mode);
+            let shapes = &harness.output().shapes;
+            let background = shapes.iter().find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.stroke.color == palette.pane_border => Some(rect),
+                _ => None,
+            }).unwrap();
+            let icon = shapes.iter().find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.brush.is_some() => Some(rect.rect),
+                _ => None,
+            }).unwrap();
+            let label = shapes.iter().find_map(|shape| match &shape.shape {
+                Shape::Text(text) if text.galley.job.text == "Overview" => Some(egui::Rect::from_min_size(text.pos, text.galley.size())),
+                _ => None,
+            }).unwrap();
+            assert_eq!(background.fill, theme::ui_accent(palette.window_bg));
+            assert!(background.rect.contains_rect(icon.union(label)));
+            assert!(icon.right() < label.left());
+            assert_eq!(icon.center().y, label.center().y);
+        }
+    }
+
 
     /// What the status bar drew for a message in a window 500 wide: the selector's height and right edge, and the message's right edge.
     fn status_bar_layout(text: Option<&str>) -> (f32, f32, f32) {

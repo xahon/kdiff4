@@ -231,6 +231,10 @@ pub struct ThemeColors {
     /// Text of menus, dialogs, buttons and labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_text: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_switch_tint: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_switch_outline: Option<[u8; 3]>,
     /// Text in the panes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane_text: Option<[u8; 3]>,
@@ -485,6 +489,8 @@ last_dir = \"x\"
             theme: ThemeChoice::System,
             light_colors: ThemeColors {
                 ui_text: Some([1, 2, 3]),
+                bottom_switch_tint: Some([220, 230, 240]),
+                bottom_switch_outline: Some([150, 160, 170]),
                 pane_text: None,
                 document_a: Some([4, 5, 6]),
                 document_b: None,
@@ -494,6 +500,8 @@ last_dir = \"x\"
             },
             dark_colors: ThemeColors {
                 ui_text: None,
+                bottom_switch_tint: Some([30, 40, 50]),
+                bottom_switch_outline: None,
                 pane_text: Some([250, 251, 252]),
                 document_a: None,
                 document_b: Some([13, 14, 15]),
