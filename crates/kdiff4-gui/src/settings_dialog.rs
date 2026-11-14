@@ -466,6 +466,21 @@ impl SettingsDialog {
         });
         ui.add_space(4.0);
         ui.label(RichText::new(format!("Colors are kept per theme; these are the {} theme's.", theme_name(theme))).weak());
+        section(ui, "success_blink_appearance", "Success Blink", |ui| {
+            let blink = &mut self.draft.success_blink;
+            ui.label("");
+            ui.checkbox(&mut blink.enabled, "Enable Success Blink");
+            ui.end_row();
+            let label = ui.label("Blink color:");
+            ui.color_edit_button_srgb(&mut blink.color).labelled_by(label.id);
+            ui.end_row();
+            let label = ui.label("Peak alpha:");
+            ui.add(DragValue::new(&mut blink.alpha).range(0..=u8::MAX)).labelled_by(label.id);
+            ui.end_row();
+            let label = ui.label("Animation time:");
+            ui.add(DragValue::new(&mut blink.duration_ms).range(1..=u16::MAX).suffix(" ms")).labelled_by(label.id);
+            ui.end_row();
+        });
     }
 
     fn comparison_tab(&mut self, ui: &mut Ui) {
@@ -652,13 +667,23 @@ mod tests {
         let view = ViewConfig { corner_radius: 7, ..ViewConfig::default() };
         let mut dialog = SettingsDialog::new(&view, None);
         dialog.tab = Tab::Appearance;
-        let harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).with_accessibility_check(false)
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).with_accessibility_check(false)
             .build_ui_state(|ui, dialog: &mut SettingsDialog| { dialog.show(ui, Some(&[])); }, dialog);
         let control = harness.get_by_role_and_label(egui::Role::SpinButton, "Corner radius:");
         assert!(control.rect().is_positive());
         harness.get_by_label("Bottom Controls");
         harness.get_by_label("Bottom Switch tint:");
         harness.get_by_label("Bottom Switch outline:");
+        harness.get_by_label("Success Blink");
+        harness.get_by_label("Blink color:");
+        harness.get_by_role_and_label(egui::Role::CheckBox, "Enable Success Blink").click();
+        harness.get_by_role_and_label(egui::Role::SpinButton, "Peak alpha:").set_value_accesskit(128.0);
+        harness.get_by_role_and_label(egui::Role::SpinButton, "Animation time:").set_value_accesskit(350.0);
+        harness.run();
+        let blink = harness.state().draft().success_blink;
+        assert!(!blink.enabled);
+        assert_eq!(blink.alpha, 128);
+        assert_eq!(blink.duration_ms, 350);
     }
 
 

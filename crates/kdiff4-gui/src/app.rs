@@ -235,6 +235,7 @@ pub struct KdiffApp {
     close_confirmation: Option<CloseConfirmation>,
     reveal_tab: bool,
     exiting: bool,
+    success_blink_started_at: Option<f64>,
     config_path: Option<PathBuf>,
     config: GuiConfig,
     /// False when the config file failed to load, so the broken file is not overwritten.
@@ -375,6 +376,7 @@ impl KdiffApp {
             close_confirmation: None,
             reveal_tab: true,
             exiting: false,
+            success_blink_started_at: None,
             config_path,
             config,
             config_writable,
@@ -874,7 +876,7 @@ Shortcut: {}", link.display()),
     fn drain_messages(&mut self, ctx: &egui::Context, foreground: bool) {
         if foreground {
             for response in std::mem::take(&mut self.tab.deferred_responses) {
-                self.handle_response(response.id, response.result);
+                self.handle_response(ctx, response.id, response.result);
             }
         }
         while !self.tab.engine_stopped {
@@ -1006,7 +1008,7 @@ Shortcut: {}", link.display()),
                     self.tab.output_folds_stale |= mirror.set_fold_ranges(found);
                 }
             }
-            HostMessage::Response(Response { id, result }) => self.handle_response(id, result),
+            HostMessage::Response(Response { id, result }) => self.handle_response(ctx, id, result),
         }
     }
 
@@ -1155,13 +1157,17 @@ Shortcut: {}", link.display()),
         self.tab.panes.reveal_caret = true;
     }
 
-    fn handle_response(&mut self, id: RequestId, result: Result<(), kdiff4_protocol::ProtocolError>) {
+    fn handle_response(&mut self, ctx: &egui::Context, id: RequestId, result: Result<(), kdiff4_protocol::ProtocolError>) {
         let kind = match self.tab.pending.remove(&id) {
             Some(kind) => kind,
             None => return,
         };
         let error = match result {
             Ok(()) => {
+                if kind == Pending::Save && self.view().success_blink.enabled {
+                    self.success_blink_started_at = Some(ctx.input(|input| input.time));
+                    ctx.request_repaint();
+                }
                 self.tab.status = match kind {
                     Pending::Save => self.tab.mirror.as_ref().and_then(Mirror::output).and_then(|output| output.path.clone()).map(|path| {
                         log::info!("saved {}", path.display());
@@ -2541,6 +2547,31 @@ Shortcut: {}", link.display()),
         status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts)
     }
 
+
+    fn paint_success_blink(&mut self, ctx: &egui::Context) {
+        let Some(started_at) = self.success_blink_started_at else { return };
+        let settings = self.view().success_blink;
+        let duration = f64::from(settings.duration_ms) / 1000.0;
+        let elapsed = ctx.input(|input| input.time) - started_at;
+        if !settings.enabled || elapsed >= duration {
+            self.success_blink_started_at = None;
+            return;
+        }
+
+        // Apply smoothstep to each half so the tint eases through the peak as well as the endpoints.
+        let progress = (elapsed / duration).clamp(0.0, 1.0);
+        let phase = 1.0 - (2.0 * progress - 1.0).abs();
+        let opacity = phase * phase * (3.0 - 2.0 * phase);
+        let [r, g, b] = settings.color;
+        let alpha = (f64::from(settings.alpha) * opacity).round() as u8;
+        let bounds = ctx.viewport_rect();
+        let mut painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("success_blink")));
+        painter.set_clip_rect(bounds);
+        painter.rect_filled(bounds, 0, egui::Color32::from_rgba_unmultiplied(r, g, b, alpha));
+        ctx.request_repaint();
+    }
+
+
     /// egui sets the window theme on the first frame, before the window has focus, and Windows then keeps the old title bar colors until focus changes. Sending the theme again once the window has focus repaints the title bar.
     fn refresh_title_bar(&mut self, ctx: &egui::Context) {
         if self.title_bar_refreshed || !ctx.input(|input| input.viewport().focused.unwrap_or(false)) {
@@ -2816,6 +2847,7 @@ impl eframe::App for KdiffApp {
         self.update_window_frame(frame);
         self.refresh_title_bar(&ctx);
         self.update_window_title(&ctx);
+        self.paint_success_blink(&ctx);
     }
 }
 
@@ -3261,7 +3293,7 @@ mod tests {
         let opened = second_host.recv().unwrap();
         assert_eq!(opened.command, Command::Open(files));
         app.handle_message(&ctx, HostMessage::Event(Event::Snapshot(resolved_snapshot())));
-        app.handle_response(opened.id, Ok(()));
+        app.handle_response(&ctx, opened.id, Ok(()));
 
         app.cycle_tab(&ctx, false);
         assert_eq!(app.tab.id, 0);
@@ -3284,7 +3316,7 @@ mod tests {
         apply_change(&mut app, Change::OutputSaved(output));
         let save = RequestId(10);
         app.tab.pending.insert(save.clone(), Pending::Save);
-        app.handle_response(save, Ok(()));
+        app.handle_response(&ctx, save, Ok(()));
         assert_eq!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
         app.close_tab(&ctx, 0, false);
         assert_eq!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
@@ -3294,6 +3326,63 @@ mod tests {
         app.exit(&ctx, false);
         assert!(result.try_recv().unwrap());
         assert!(app.exiting);
+    }
+
+
+    #[test]
+    fn a_confirmed_save_eases_the_configured_tint_in_and_out() {
+        let (mut app, host, ctx) = app_with_session();
+        let mut view = ViewConfig::default();
+        view.success_blink = config::SuccessBlinkConfig { enabled: true, color: [64, 128, 192], alpha: 160, duration_ms: 400 };
+        app.apply_view(&ctx, &view);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(960.0, 640.0))
+            .with_accessibility_check(false).with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app: &mut KdiffApp| {
+                app.drain_messages(ui.ctx(), true);
+                eframe::App::ui(app, ui, &mut frame);
+            }, app);
+        let blink_alpha = |harness: &egui_kittest::Harness<'_, KdiffApp>| harness.output().shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect) if rect.fill.a() > 0 && rect.fill.a() < 255
+                && rect.rect == egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0)) => {
+                assert_eq!(rect.fill, egui::Color32::from_rgba_unmultiplied(64, 128, 192, rect.fill.a()));
+                Some(rect.fill.a())
+            }
+            _ => None,
+        });
+        let save = harness.state_mut().send(Command::Save, Pending::Save).unwrap();
+        harness.step();
+        assert_eq!(blink_alpha(&harness), None);
+        host.send(HostMessage::Response(Response {
+            id: save,
+            result: Err(kdiff4_protocol::ProtocolError { kind: ErrorKind::InvalidRequest, message: "Save failed".to_string() }),
+        })).unwrap();
+        harness.step();
+        assert_eq!(blink_alpha(&harness), None);
+
+        let path = PathBuf::from("merged.txt");
+        let save = harness.state_mut().send(Command::SaveAs(path.clone()), Pending::Save).unwrap();
+        host.send(HostMessage::Event(Event::Delta(kdiff4_protocol::Delta {
+            revision: kdiff4_protocol::Revision(2),
+            cause: Some(save.clone()),
+            change: Change::OutputSaved(path),
+        }))).unwrap();
+        host.send(HostMessage::Response(Response { id: save, result: Ok(()) })).unwrap();
+        for (time, alpha) in [(1.0, None), (1.05, Some(25)), (1.1, Some(80)), (1.15, Some(135)), (1.2, Some(160)),
+            (1.25, Some(135)), (1.3, Some(80)), (1.35, Some(25)), (1.4, None)] {
+            harness.input_mut().time = Some(time);
+            harness.step();
+            assert_eq!(blink_alpha(&harness), alpha, "time {time}");
+        }
+
+        harness.state_mut().applied_view.as_mut().unwrap().success_blink.enabled = false;
+        let save = harness.state_mut().send(Command::Save, Pending::Save).unwrap();
+        host.send(HostMessage::Response(Response { id: save, result: Ok(()) })).unwrap();
+        harness.input_mut().time = Some(2.0);
+        harness.step();
+        harness.input_mut().time = Some(2.2);
+        harness.step();
+        assert_eq!(blink_alpha(&harness), None);
     }
 
 
@@ -3900,9 +3989,9 @@ mod tests {
 
     #[test]
     fn the_status_says_the_files_were_reloaded() {
-        let (mut app, _host, _ctx) = app_with_session();
+        let (mut app, _host, ctx) = app_with_session();
         let id = app.send(Command::Reload { confirmed: false }, Pending::Reload).unwrap();
-        app.handle_response(id, Ok(()));
+        app.handle_response(&ctx, id, Ok(()));
         assert!(app.tab.status.as_ref().is_some_and(|status| !status.is_error && status.text.starts_with("Reloaded.")));
     }
 
@@ -4137,14 +4226,14 @@ mod tests {
 
     #[test]
     fn the_status_says_when_alignments_wait_for_apply() {
-        let (mut app, host, _ctx) = app_with_session();
+        let (mut app, host, ctx) = app_with_session();
         set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], true);
         let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
-        app.handle_response(id, Ok(()));
+        app.handle_response(&ctx, id, Ok(()));
         assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(ALIGNMENTS_CHANGED_HINT));
         set_marks(&mut app, vec![mark(Document::A, 1, 0..1)], false);
         let id = app.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit).unwrap();
-        app.handle_response(id, Ok(()));
+        app.handle_response(&ctx, id, Ok(()));
         assert!(app.tab.status.is_none());
         let id = app
             .send(
@@ -4156,6 +4245,7 @@ mod tests {
             )
             .unwrap();
         app.handle_response(
+            &ctx,
             id,
             Err(kdiff4_protocol::ProtocolError {
                 kind: ErrorKind::InvalidRequest,

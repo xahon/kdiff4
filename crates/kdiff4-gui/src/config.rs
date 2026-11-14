@@ -138,6 +138,7 @@ pub struct ViewConfig {
     /// The parser Heuristics Alignment finds entities with.
     pub heuristic_extractor: Extractor,
     pub theme: ThemeChoice,
+    pub success_blink: SuccessBlinkConfig,
     pub light_colors: ThemeColors,
     pub dark_colors: ThemeColors,
     pub whitespace: WhitespaceConfig,
@@ -173,6 +174,7 @@ impl Default for ViewConfig {
             alignment_stops: true,
             heuristic_extractor: Extractor::TreeSitter,
             theme: ThemeChoice::Light,
+            success_blink: SuccessBlinkConfig::default(),
             light_colors: ThemeColors::default(),
             dark_colors: ThemeColors::default(),
             whitespace: WhitespaceConfig::default(),
@@ -192,6 +194,7 @@ impl ViewConfig {
         self.corner_radius = self.corner_radius.min(MAX_CORNER_RADIUS);
         self.jump_context_lines = self.jump_context_lines.min(MAX_JUMP_CONTEXT_LINES);
         self.smooth_scroll_ms = self.smooth_scroll_ms.clamp(MIN_SMOOTH_SCROLL_MS, MAX_SMOOTH_SCROLL_MS);
+        self.success_blink.duration_ms = self.success_blink.duration_ms.max(1);
         self.scroll_step_lines = self.scroll_step_lines.clamp(MIN_SCROLL_STEP_LINES, MAX_SCROLL_STEP_LINES);
         self.drag_scroll_lines_per_second = self.drag_scroll_lines_per_second.clamp(MIN_AUTOSCROLL_LINES_PER_SECOND, MAX_AUTOSCROLL_LINES_PER_SECOND);
         self.middle_scroll_lines_per_second = self.middle_scroll_lines_per_second.clamp(MIN_AUTOSCROLL_LINES_PER_SECOND, MAX_AUTOSCROLL_LINES_PER_SECOND);
@@ -213,6 +216,24 @@ impl ViewConfig {
         if dark { &mut self.dark_colors } else { &mut self.light_colors }
     }
 }
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SuccessBlinkConfig {
+    pub enabled: bool,
+    pub color: [u8; 3],
+    pub alpha: u8,
+    pub duration_ms: u16,
+}
+
+
+impl Default for SuccessBlinkConfig {
+    fn default() -> Self {
+        Self { enabled: true, color: [163, 255, 177], alpha: 45, duration_ms: 300 }
+    }
+}
+
 
 /// The theme the GUI uses; `System` follows the operating system.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +508,7 @@ last_dir = \"x\"
             alignment_stops: false,
             heuristic_extractor: Extractor::TreeSitter,
             theme: ThemeChoice::System,
+            success_blink: SuccessBlinkConfig { enabled: false, color: [20, 150, 25], alpha: 120, duration_ms: 750 },
             light_colors: ThemeColors {
                 ui_text: Some([1, 2, 3]),
                 bottom_switch_tint: Some([220, 230, 240]),
@@ -562,6 +584,18 @@ show_overview_strip = false
         let path = dir.join("gui.toml");
         fs::write(&path, "future_key = 3\n[recent]\n").unwrap();
         assert_eq!(load(&path).unwrap(), GuiConfig::default());
+    }
+
+
+    #[test]
+    fn success_blink_uses_the_new_defaults_for_missing_values() {
+        let dir = temp_dir("success-blink");
+        let path = dir.join("gui.toml");
+        fs::write(&path, "[view.success_blink]\nenabled = false\n").unwrap();
+        let blink = load(&path).unwrap().view.success_blink;
+        assert!(!blink.enabled);
+        assert_eq!(blink.alpha, 45);
+        assert_eq!(blink.duration_ms, 300);
     }
 
     #[test]
