@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use egui::{Align, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
+use egui::{Align, Button, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
 use kdiff4_protocol::{AlignmentMark, Document, EolStyle};
 
 use crate::alignment_gutter::PaneMarks;
@@ -12,6 +12,7 @@ use crate::find::FindState;
 use crate::folding::Folds;
 use crate::minimap;
 use crate::mirror::Mirror;
+use crate::open_dialog::path_row_height;
 use crate::overview;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
@@ -743,7 +744,8 @@ fn header(
                 ui.label(RichText::new(label).color(palette.weak_text));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Browse...").clicked() {
+                let height = path_row_height(ui);
+                if ui.add(Button::new("Browse...").min_size(vec2(0.0, height))).clicked() {
                     actions.push(PaneAction::Browse(document.clone()));
                 }
                 if let Some(eol) = eol {
@@ -755,7 +757,7 @@ fn header(
                     *field = path.map(|path| path.display().to_string()).unwrap_or_default();
                 }
                 let hint = if document == Document::D { "unnamed, kept in memory until saved" } else { "" };
-                let response = ui.add(TextEdit::singleline(field).id(field_id).desired_width(ui.available_width()).hint_text(hint));
+                let response = ui.add(TextEdit::singleline(field).id(field_id).desired_width(ui.available_width()).hint_text(hint).min_size(vec2(0.0, height)));
                 if response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
                     actions.push(PaneAction::CommitPath(document.clone(), field.clone()));
                 }
@@ -802,6 +804,8 @@ mod tests {
             let harness = header_harness(Some(style));
             let label = harness.get_by_label(name).rect();
             let browse = harness.get_by_label("Browse...").rect();
+            let field = harness.get_by_role(egui::Role::TextInput).rect();
+            assert_eq!(browse.y_range(), field.y_range());
             assert!(label.right() <= browse.left(), "{name} sits left of Browse");
             assert!(label.left() > 250.0, "{name} sits at the right end, next to Browse, not at {}", label.left());
         }

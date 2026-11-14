@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
 use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
-use egui::{Align, Color32, Id, Label, Layout, Margin, Rect, RichText, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetText, pos2, vec2};
+use egui::{Align, Button, Color32, Id, Label, Layout, Margin, Rect, RichText, TextEdit, TextStyle, TextWrapMode, Ui, UiBuilder, WidgetText, pos2, vec2};
 use kdiff4_protocol::{Document, Labels, OpenFiles};
 
 use crate::{GuiError, config, theme};
@@ -81,7 +81,7 @@ impl OpenForm {
     pub fn show(&mut self, ui: &mut Ui, tab: Option<usize>, error: Option<&str>, cancelable: bool) -> Option<FormAction> {
         let mut action = None;
         ui.set_width(ui.available_width().min(FORM_MAX_WIDTH));
-        let height = ui.spacing().interact_size.y;
+        let height = path_row_height(ui);
         let label_width = Document::ALL
             .into_iter()
             .map(|document| {
@@ -98,11 +98,11 @@ impl OpenForm {
                     ui.label(label(document))
                 }).inner;
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Browse...").clicked() {
+                    if ui.add(Button::new("Browse...").min_size(vec2(0.0, height))).clicked() {
                         action = Some(FormAction::Browse(document));
                     }
                     let width = ui.available_width().max(MIN_FIELD_WIDTH);
-                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).id(field_id(tab, document)).desired_width(width)).labelled_by(label.id);
+                    ui.add(TextEdit::singleline(&mut self.paths[index(document)]).id(field_id(tab, document)).desired_width(width).min_size(vec2(0.0, height))).labelled_by(label.id);
                 });
             });
         }
@@ -123,6 +123,15 @@ impl OpenForm {
         });
         action
     }
+}
+
+
+/// Enough height for a single line and its frame in either control of a path row.
+pub fn path_row_height(ui: &Ui) -> f32 {
+    let spacing = ui.spacing();
+    let padding = Margin::from(spacing.button_padding).sum().y;
+    let text = ui.text_style_height(&TextStyle::Body) + spacing.extra_text_line_spacing.max(0.0);
+    spacing.interact_size.y.max((text + padding).ceil())
 }
 
 
@@ -675,6 +684,25 @@ mod tests {
         for rect in &rects[1..] {
             assert_eq!(rect.left(), rects[0].left(), "{rects:?}");
             assert_eq!(rect.right(), rects[0].right(), "{rects:?}");
+        }
+    }
+
+
+    #[test]
+    fn browse_buttons_match_the_open_form_path_fields() {
+        use egui_kittest::kittest::Queryable;
+
+        let harness = egui_kittest::Harness::builder().build_ui_state(|ui, form| {
+            form.show(ui, Some(0), None, false);
+        }, OpenForm::default());
+        let mut fields: Vec<_> = harness.query_all_by_role(egui::Role::TextInput).map(|node| node.rect()).collect();
+        let mut buttons: Vec<_> = harness.query_all_by_label("Browse...").map(|node| node.rect()).collect();
+        fields.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        buttons.sort_by(|a, b| a.top().total_cmp(&b.top()));
+        assert_eq!(fields.len(), 4);
+        assert_eq!(buttons.len(), 4);
+        for (field, button) in fields.into_iter().zip(buttons) {
+            assert_eq!(field.y_range(), button.y_range());
         }
     }
 
