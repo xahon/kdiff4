@@ -10,6 +10,7 @@ use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
 use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
+use crate::document_tabs;
 use crate::editing::{self, Cursor, EditKey, Indentation, Lines, Motion, Position};
 use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
@@ -52,6 +53,8 @@ const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CO
 const REOPEN_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
 const LEFT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft);
 const RIGHT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight);
+const MOVE_TAB_LEFT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT.plus(Modifiers::SHIFT), Key::ArrowLeft);
+const MOVE_TAB_RIGHT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT.plus(Modifiers::SHIFT), Key::ArrowRight);
 const NEXT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
 const PREVIOUS_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
@@ -218,6 +221,8 @@ pub struct KdiffApp {
     tab: DocumentTab,
     background: Vec<DocumentTab>,
     closed_tabs: Vec<ClosedTab>,
+    tab_order: document_tabs::TabOrder,
+    tab_drag: Option<document_tabs::TabDrag>,
     next_tab_id: usize,
     new_client: Box<dyn Fn() -> std::io::Result<Client>>,
     incoming: Option<Receiver<OpenRequest>>,
@@ -356,6 +361,8 @@ impl KdiffApp {
             tab: DocumentTab::new(ctx, 0, client),
             background: Vec::new(),
             closed_tabs: Vec::new(),
+            tab_order: document_tabs::TabOrder::new(0),
+            tab_drag: None,
             next_tab_id: 1,
             new_client: Box::new(new_client),
             incoming: None,
@@ -434,6 +441,8 @@ impl KdiffApp {
     fn activate_new_tab(&mut self, ctx: &egui::Context) -> bool {
         match self.new_tab(ctx) {
             Ok(tab) => {
+                self.tab_drag = None;
+                self.tab_order.push(tab.id);
                 self.background.push(std::mem::replace(&mut self.tab, tab));
                 self.tab_activated(ctx);
                 true
@@ -462,18 +471,21 @@ impl KdiffApp {
         }
     }
 
-    fn tab_ids(&self) -> Vec<usize> {
-        let mut ids: Vec<_> = self.background.iter().map(|tab| tab.id).collect();
-        ids.push(self.tab.id);
-        ids.sort_unstable();
-        ids
-    }
-
     fn cycle_tab(&mut self, ctx: &egui::Context, forward: bool) {
-        let ids = self.tab_ids();
-        let current = ids.binary_search(&self.tab.id).expect("Tabs: active tab is missing");
+        let ids: Vec<_> = self.tab_order.open_ids().collect();
+        let current = ids.iter().position(|&id| id == self.tab.id).expect("Tabs: active tab is missing");
         let next = if forward { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
         self.activate_tab(ctx, ids[next]);
+    }
+
+    fn move_active_tab(&mut self, ctx: &egui::Context, right: bool) {
+        let mut ids: Vec<_> = self.tab_order.open_ids().collect();
+        let from = ids.iter().position(|&id| id == self.tab.id).expect("Tabs: active tab is missing");
+        let to = if right { (from + 1).min(ids.len() - 1) } else { from.saturating_sub(1) };
+        ids.swap(from, to);
+        self.tab_order.set_open_order(ids);
+        self.reveal_tab = true;
+        ctx.request_repaint();
     }
 
     fn close_tab(&mut self, ctx: &egui::Context, id: usize, discard: bool) {
@@ -496,10 +508,10 @@ impl KdiffApp {
         let mut closed = if let Some(index) = index {
             self.background.swap_remove(index)
         } else {
-            let index = self.background.iter().enumerate()
-                .min_by_key(|(_, tab)| (tab.id < id, tab.id.abs_diff(id)))
-                .map(|(index, _)| index)
+            let next = self.tab_order.open_ids().skip_while(|&tab| tab != id).nth(1)
+                .or_else(|| self.tab_order.open_ids().rev().nth(1))
                 .expect("Tabs: no replacement tab");
+            let index = self.background.iter().position(|tab| tab.id == next).expect("Tabs: replacement tab is missing");
             let replacement = self.background.swap_remove(index);
             let closed = std::mem::replace(&mut self.tab, replacement);
             self.tab_activated(ctx);
@@ -508,6 +520,8 @@ impl KdiffApp {
         closed.finish();
         let files = closed.reopen_files();
         self.closed_tabs.push(ClosedTab { id, form: closed.form, files });
+        self.tab_drag = None;
+        self.tab_order.close(ctx, id);
     }
 
     fn reopen_tab(&mut self, ctx: &egui::Context) {
@@ -521,6 +535,8 @@ impl KdiffApp {
         };
         let mut tab = DocumentTab::new(ctx, closed.id, client);
         let closed = self.closed_tabs.pop().expect("Tabs: no closed tab to reopen");
+        self.tab_drag = None;
+        self.tab_order.reopen(closed.id);
         tab.form = closed.form;
         self.background.push(std::mem::replace(&mut self.tab, tab));
         if let Some(files) = closed.files {
@@ -2542,48 +2558,98 @@ Shortcut: {}", link.display()),
     }
 
     fn show_tabs(&mut self, ui: &mut egui::Ui) {
-        if self.tab.is_blank() && self.background.is_empty() {
+        let sliding = self.tab_order.is_sliding(ui.ctx());
+        if sliding {
+            ui.ctx().request_repaint();
+        }
+        if !sliding && self.tab.is_blank() && self.background.is_empty() {
             return;
         }
+        let enabled = !self.tab_switch_blocked();
+        let can_drag = enabled && !sliding && !self.background.is_empty();
+        if !can_drag || self.tab_drag.is_some() && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.tab_drag = None;
+        }
         let active = self.tab.id;
-        let reveal = std::mem::take(&mut self.reveal_tab);
+        let reveal = !sliding && self.tab_drag.is_none() && std::mem::take(&mut self.reveal_tab);
+        let mut ids: Vec<_> = self.tab_order.open_ids().collect();
+        let mut drag = self.tab_drag;
+        let mut dropped = false;
         let mut activate = None;
         let mut close = None;
-        egui::Panel::top("document_tabs").show(ui, |ui| {
-            ui.add_enabled_ui(!self.tab_switch_blocked(), |ui| {
+        let mut selected_rect = None;
+        let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 0 });
+        let strip = egui::Panel::top("document_tabs").show_separator_line(false).frame(frame).show(ui, |ui| {
+            ui.add_enabled_ui(enabled, |ui| {
                 egui::ScrollArea::horizontal().show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let mut tabs: Vec<_> = std::iter::once(&self.tab).chain(&self.background).collect();
-                        tabs.sort_unstable_by_key(|tab| tab.id);
-                        for tab in tabs {
-                            let id = tab.id;
+                        let rects = self.tab_order.allocate(ui);
+                        let (pointer, held, released) = ui.input(|input| (input.pointer.latest_pos(), input.pointer.primary_down(), input.pointer.button_released(egui::PointerButton::Primary)));
+                        if can_drag && drag.is_none() && held {
+                            drag = document_tabs::TabDrag::start(ui, &ids, &rects);
+                            activate = drag.map(|drag| drag.id);
+                        }
+                        let mut floating = None;
+                        if let (Some(mut current), Some(pointer)) = (drag, pointer) {
+                            if held || released {
+                                current.follow(&rects, pointer.x);
+                                ids.retain(|&id| id != current.id);
+                                ids.insert(current.slot, current.id);
+                                drag = Some(current);
+                                dropped = released;
+                                if !dropped {
+                                    document_tabs::TabDrag::scroll(ui, &rects, pointer.x);
+                                    floating = Some((current.slot, current.floating_rect(rects[current.slot], pointer.x, ui.clip_rect())));
+                                }
+                            }
+                        }
+                        if !held || pointer.is_none() {
+                            drag = None;
+                        }
+                        let mut draw = |slot: usize, floating_rect: Option<egui::Rect>| {
+                            let id = ids[slot];
+                            let rect = self.tab_order.position(ui, id, slot, &rects, floating_rect);
+                            let tab = if id == active { &self.tab } else {
+                                self.background.iter().find(|tab| tab.id == id).expect("Tabs: missing background tab")
+                            };
                             let path = tab.title_path();
                             let name = path.as_deref().and_then(Path::file_name).map_or("Open".into(), |name| name.to_string_lossy());
                             let label = if tab.is_modified() { format!("● {name}") } else { name.into_owned() };
-                            ui.push_id(id, |ui| {
-                                let response = ui.scope(|ui| {
-                                    ui.set_max_width(220.0);
-                                    ui.add(egui::Button::selectable(id == active, label).truncate())
-                                }).inner.on_hover_text(path.as_deref().map_or("Open files".into(), |path| path.to_string_lossy()));
-                                if reveal && id == active {
-                                    response.scroll_to_me(None);
-                                }
-                                if response.clicked() {
-                                    activate = Some(id);
-                                }
-                                if !self.background.is_empty()
-                                    && ui.add_enabled(!tab.is_saving(), egui::Button::new("×")).on_hover_text("Close tab").clicked()
-                                {
-                                    close = Some(id);
-                                }
-                            });
-                            ui.separator();
+                            let hint = path.as_deref().map_or("Open files".into(), |path| path.to_string_lossy());
+                            let close_enabled = (!self.background.is_empty()).then(|| !tab.is_saving());
+                            let selected = drag.map_or(active, |drag| drag.id) == id;
+                            if selected {
+                                selected_rect = Some((rect, ui.clip_rect()));
+                            }
+                            let (response, closed) = document_tabs::panel(ui, rect, id, &label, &hint, selected, close_enabled, can_drag, floating_rect.is_some());
+                            if reveal && drag.is_none() && id == active {
+                                ui.scroll_to_rect(rects[slot], None);
+                            }
+                            if response.clicked() {
+                                activate = Some(id);
+                            }
+                            if closed {
+                                close = Some(id);
+                            }
+                        };
+                        for slot in 0..ids.len() {
+                            if floating.is_none_or(|(dragged_slot, _)| dragged_slot != slot) {
+                                draw(slot, None);
+                            }
+                        }
+                        if let Some((slot, rect)) = floating {
+                            draw(slot, Some(rect));
                         }
                     });
                 });
             });
         });
+        document_tabs::paint_separator(ui, strip.response.rect, selected_rect);
         let ctx = ui.ctx();
+        self.tab_drag = drag;
+        if dropped {
+            self.tab_order.set_open_order(ids);
+        }
         if let Some(id) = close {
             self.close_tab(ctx, id, false);
         } else if let Some(id) = activate {
@@ -2613,7 +2679,7 @@ Shortcut: {}", link.display()),
     }
 
     fn handle_tab_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.tab_switch_blocked() {
+        if self.tab_switch_blocked() || self.tab_drag.is_some() {
             return;
         }
         let consume = |shortcut: &KeyboardShortcut| ctx.input_mut(|input| {
@@ -2624,7 +2690,11 @@ Shortcut: {}", link.display()),
             ));
             input.events.len() != count
         });
-        if consume(&PREVIOUS_TAB_SHORTCUT) || consume(&LEFT_TAB_SHORTCUT) {
+        if consume(&MOVE_TAB_LEFT_SHORTCUT) {
+            self.move_active_tab(ctx, false);
+        } else if consume(&MOVE_TAB_RIGHT_SHORTCUT) {
+            self.move_active_tab(ctx, true);
+        } else if consume(&PREVIOUS_TAB_SHORTCUT) || consume(&LEFT_TAB_SHORTCUT) {
             self.cycle_tab(ctx, false);
         } else if consume(&NEXT_TAB_SHORTCUT) || consume(&RIGHT_TAB_SHORTCUT) {
             self.cycle_tab(ctx, true);
@@ -2673,6 +2743,9 @@ impl eframe::App for KdiffApp {
         if std::mem::take(&mut self.close_tab_requested) {
             self.close_tab(&ctx, self.tab.id, false);
         }
+        if self.tab.mirror.is_some() {
+            self.show_toolbar(ui);
+        }
         self.show_tabs(ui);
         if self.close_confirmation.is_none() && self.updater.update_window.is_none() && self.tab.eol_prompt.is_none() {
             self.handle_shortcuts(&ctx);
@@ -2684,9 +2757,6 @@ impl eframe::App for KdiffApp {
         self.unfold_around_caret();
         self.request_fold_ranges();
         self.refresh_find();
-        if self.tab.mirror.is_some() {
-            self.show_toolbar(ui);
-        }
         let aligned = self.view().align_output;
         if let Some(mirror) = self.tab.mirror.as_mut() {
             mirror.set_aligned(aligned);
@@ -3114,6 +3184,13 @@ mod tests {
     }
 
 
+    impl KdiffApp {
+        fn tab_ids(&self) -> Vec<usize> {
+            self.tab_order.open_ids().collect()
+        }
+    }
+
+
     #[test]
     fn tab_shortcuts_switch_close_and_reopen_in_place() {
         let (mut app, _host, ctx) = app_with_session();
@@ -3319,6 +3396,7 @@ mod tests {
         assert!(app.activate_new_tab(&ctx));
         app.tab.form.set_path(Document::A, Path::new("second.txt"));
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(640.0, 190.0))
+            .with_context_setup(egui_extras::install_image_loaders)
             .build_ui_state(|ui, app| app.show_tabs(ui), app);
         harness.get_by_label("A.txt").click();
         harness.run();
@@ -3326,10 +3404,209 @@ mod tests {
         harness.get_by_label("second.txt").click();
         harness.run();
         assert_eq!(harness.state().tab.id, 1);
-        harness.state_mut().close_tab(&ctx, 1, false);
+        harness.get_by_label("Close A.txt").click();
         harness.run();
+        assert_eq!(harness.state().tab.id, 1);
+        assert_eq!(harness.state().tab_ids(), [1]);
+        assert!(harness.query_by_label("Close second.txt").is_none());
+    }
+
+
+    #[test]
+    fn the_tab_strip_is_below_the_toolbar() {
+        use egui_kittest::kittest::Queryable;
+
+        let (app, _host, _) = app_with_session();
+        let mut frame = eframe::Frame::_new_kittest();
+        let harness = egui_kittest::Harness::builder().with_size(egui::vec2(960.0, 640.0))
+            .with_accessibility_check(false).with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app| eframe::App::ui(app, ui, &mut frame), app);
+        let button = harness.output().shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == OVERVIEW_TOGGLE_LABEL => Some(text.visual_bounding_rect()),
+            _ => None,
+        }).unwrap();
+        let tab = harness.get_by_role_and_label(egui::Role::Tab, "A.txt").rect();
+        assert!(button.bottom() <= tab.top());
+        let menu = harness.get_by_label("File").rect();
+        assert!(menu.bottom() <= button.top());
+        assert!(!harness.output().shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::LineSegment { points: [left, right], .. }
+                if left.y == right.y && left.y >= menu.bottom() && left.y < button.top() && right.x - left.x > 900.0)));
+        let button_bounds = harness.output().shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Rect(rect) if rect.stroke.width == 1.0 && rect.rect.contains_rect(button) => Some(rect.rect),
+            _ => None,
+        }).unwrap();
+        assert_eq!(tab.top() - button_bounds.bottom(), 8.0);
+        let mut segments = harness.output().shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::LineSegment { points: [left, right], .. } if left.y == right.y => Some((*left, *right)),
+            _ => None,
+        });
+        assert!(!segments.clone().any(|(left, right)| left.y > button_bounds.bottom() && left.y < tab.top() && right.x - left.x > 900.0));
+        assert!(segments.clone().any(|(left, right)| left.x < tab.left() && right.x == tab.left() && (left.y - tab.bottom()).abs() < 1.0));
+        assert!(segments.clone().any(|(left, right)| left.x == tab.right() && right.x > tab.right() && (left.y - tab.bottom()).abs() < 1.0));
+        assert!(!segments.any(|(left, right)| left.x < tab.center().x && right.x > tab.center().x && (left.y - tab.bottom()).abs() < 1.0));
+    }
+
+
+    #[test]
+    fn dragging_a_tab_activates_it_and_moves_the_gap_at_each_midpoint() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        for name in ["second.txt", "third.txt"] {
+            assert!(app.activate_new_tab(&ctx));
+            app.tab.form.set_path(Document::A, Path::new(name));
+        }
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(640.0, 190.0)).with_step_dt(0.01)
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app| app.show_tabs(ui), app);
+        let first = harness.get_by_label("A.txt").rect();
+        let second = harness.get_by_label("second.txt").rect();
+        let third = harness.get_by_label("third.txt").rect();
+        let before_midpoint = egui::pos2(second.center().x - 1.0, first.center().y);
+        let after_midpoint = egui::pos2(second.center().x + 1.0, first.center().y);
+        harness.hover_at(first.center());
+        harness.drag_at(first.center());
+        harness.hover_at(before_midpoint);
+        harness.step();
         assert_eq!(harness.state().tab.id, 0);
-        assert!(harness.query_by_label("×").is_none());
+        assert!(harness.query_by_label("Close A.txt").is_none());
+        assert_eq!(harness.get_by_label("second.txt").rect(), second);
+        assert!(harness.output().shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Text(text) if text.galley.job.text == "A.txt" && text.pos.x > first.center().x)));
+        assert!(!harness.output().shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::epaint::Shape::Rect(rect) if rect.rect == first)));
+
+        harness.hover_at(after_midpoint);
+        harness.step();
+        assert_eq!(harness.get_by_label("second.txt").rect(), second);
+        harness.run_steps(5);
+        let midway = harness.get_by_label("second.txt").rect().left();
+        assert!((midway - (first.left() + second.left()) / 2.0).abs() < 1.0);
+        harness.run_steps(5);
+        assert_eq!(harness.get_by_label("second.txt").rect(), first);
+        assert_eq!(harness.get_by_label("third.txt").rect(), third);
+        assert_eq!(harness.state().tab_ids(), [0, 1, 2]);
+
+        harness.hover_at(egui::pos2(first.center().x - 1.0, first.center().y));
+        harness.run_steps(11);
+        assert_eq!(harness.get_by_label("second.txt").rect(), second);
+
+        let destination = egui::pos2(third.center().x + 1.0, first.center().y);
+        harness.hover_at(destination);
+        harness.run_steps(11);
+        assert_eq!(harness.get_by_label("third.txt").rect(), second);
+        let drop_start = harness.get_by_label("A.txt").rect().left();
+        harness.drop_at(destination);
+        harness.step();
+        assert_eq!(harness.state().tab_ids(), [1, 2, 0]);
+        assert!((harness.get_by_label("A.txt").rect().left() - drop_start).abs() < 0.2);
+        harness.run_steps(5);
+        assert!((harness.get_by_label("A.txt").rect().left() - (drop_start + third.left()) / 2.0).abs() < 1.0);
+        harness.run_steps(5);
+        assert_eq!(harness.get_by_label("A.txt").rect(), third);
+        assert!(harness.query_by_label("Close A.txt").is_some());
+
+        harness.hover_at(third.center());
+        harness.drag_at(third.center());
+        harness.hover_at(first.center() - egui::vec2(1.0, 0.0));
+        harness.run_steps(11);
+        assert_eq!(harness.get_by_label("second.txt").rect(), second);
+        harness.key_press(Key::Escape);
+        harness.run_steps(12);
+        assert_eq!(harness.get_by_label("second.txt").rect(), first);
+        assert_eq!(harness.state().tab_ids(), [1, 2, 0]);
+    }
+
+
+    #[test]
+    fn dragging_near_the_edge_scrolls_to_offscreen_tabs() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        for name in ["second.txt", "third.txt", "fourth.txt"] {
+            assert!(app.activate_new_tab(&ctx));
+            app.tab.form.set_path(Document::A, Path::new(name));
+        }
+        app.activate_tab(&ctx, 0);
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(340.0, 190.0)).with_step_dt(0.02)
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app| app.show_tabs(ui), app);
+        let first = harness.get_by_label("A.txt").rect().center();
+        let edge = egui::pos2(331.0, first.y);
+        harness.hover_at(first);
+        harness.drag_at(first);
+        harness.hover_at(edge);
+        harness.run_steps(60);
+        harness.drop_at(edge);
+        harness.run_steps(10);
+        assert_eq!(harness.state().tab_ids(), [1, 2, 3, 0]);
+        assert!(harness.get_by_label("A.txt").rect().center().x < 340.0);
+    }
+
+
+    #[test]
+    fn tab_navigation_close_and_reopen_follow_the_reordered_strip() {
+        let (mut app, _host, ctx) = app_with_session();
+        for name in ["second.txt", "third.txt"] {
+            assert!(app.activate_new_tab(&ctx));
+            app.tab.form.set_path(Document::A, Path::new(name));
+        }
+        press(&mut app, &ctx, Key::ArrowLeft, Modifiers::ALT.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab_ids(), [0, 2, 1]);
+        press(&mut app, &ctx, Key::ArrowRight, Modifiers::ALT);
+        assert_eq!(app.tab.id, 1);
+        press(&mut app, &ctx, Key::ArrowLeft, Modifiers::ALT);
+        assert_eq!(app.tab.id, 2);
+        press(&mut app, &ctx, Key::W, Modifiers::COMMAND);
+        assert_eq!(app.tab.id, 1);
+        assert_eq!(app.tab_ids(), [0, 1]);
+        press(&mut app, &ctx, Key::T, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert_eq!(app.tab.id, 2);
+        assert_eq!(app.tab_ids(), [0, 2, 1]);
+        press(&mut app, &ctx, Key::ArrowRight, Modifiers::ALT);
+        press(&mut app, &ctx, Key::W, Modifiers::COMMAND);
+        assert_eq!(app.tab.id, 2);
+        assert_eq!(app.tab_ids(), [0, 2]);
+    }
+
+
+    #[test]
+    fn closing_a_middle_tab_slides_only_the_tabs_to_its_right() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, ctx) = app_with_session();
+        for name in ["second.txt", "third.txt", "fourth.txt"] {
+            assert!(app.activate_new_tab(&ctx));
+            app.tab.form.set_path(Document::A, Path::new(name));
+        }
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(760.0, 190.0)).with_step_dt(0.01)
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app| app.show_tabs(ui), app);
+        let left = harness.get_by_label("A.txt").rect();
+        let target = harness.get_by_label("second.txt").rect();
+        let third = harness.get_by_label("third.txt").rect();
+        let fourth = harness.get_by_label("fourth.txt").rect();
+        let shift = third.left() - target.left();
+        harness.get_by_label("Close second.txt").click();
+        for _ in 0..5 {
+            harness.step();
+            if harness.state().tab_ids() == [0, 2, 3] {
+                break;
+            }
+        }
+        assert_eq!(harness.state().tab_ids(), [0, 2, 3]);
+        harness.run_steps(5);
+        assert!(harness.query_by_label("second.txt").is_none());
+        assert_eq!(harness.get_by_label("A.txt").rect(), left);
+        for (name, start) in [("third.txt", third), ("fourth.txt", fourth)] {
+            let midway = harness.get_by_label(name).rect();
+            assert!((start.left() - midway.left() - shift * 0.5).abs() < 1.0);
+            assert_eq!(midway.size(), start.size());
+        }
+        harness.run_steps(5);
+        assert_eq!(harness.get_by_label("third.txt").rect(), target);
+        assert_eq!(harness.get_by_label("fourth.txt").rect(), third);
     }
 
 
@@ -4375,6 +4652,7 @@ mod tests {
         app.apply_view(&ctx, &app.config.view.clone());
         let mut second = DocumentTab::new(&ctx, 1, kdiff4_protocol::in_process().0);
         second.mirror = Some(resolved_mirror());
+        app.tab_order.push(second.id);
         app.background.push(second);
 
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 240.0)).build_ui_state(

@@ -5,6 +5,7 @@ mod autoscroll;
 mod char_diff;
 mod config;
 mod dialog_window;
+mod document_tabs;
 mod editing;
 mod eol;
 mod find;
