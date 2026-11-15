@@ -269,7 +269,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Command palette**: the floating field at the top center of the main window, opened with Ctrl+Shift+A, that lists every UI command, filters them by what is typed and runs the picked one.
 - **Keyboard Shortcuts window**: the dialog window F1 (Help → Keyboard Shortcuts...) opens, listing every UI command that has a shortcut and the keys of the panes, grouped by menu, with a filter field.
 - **Open window**: a standalone window where A, B, C and D are chosen. The form is left-aligned and vertically centered. The window fits its initial height to the form contents. It runs in the launcher process and submits a launch request when the user clicks Run.
-- **Window placement**: the main window's monitor, normal size and position, and maximized and minimized state. The GUI saves it on close in `gui.toml`. A prefill request restores and focuses the main window.
+- **Window placement**: the main window's monitor, normal size and position, and maximized and minimized state. The GUI saves it on close in `gui.toml`. The main window starts small and, with no placement saved, takes a default normal size and maximizes when its first comparison arrives; the small starting size is never saved. A prefill request restores and focuses the main window.
 - **Settings dialog**: the window where GUI config is edited, with a live preview.
 - **Dialog window**: a modal dialog shown as a separate native window (an egui viewport) over the main window; see Dialogs.
 - **About window**: Help → About Kdiff4, showing the package version, build commit, target, profile, and Cargo features, with clipboard copy, a GitHub link, and a manual update check button.

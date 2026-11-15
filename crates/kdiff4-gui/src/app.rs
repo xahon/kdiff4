@@ -166,6 +166,8 @@ pub struct KdiffApp {
     /// False when the config file failed to load, so the broken file is not overwritten.
     config_writable: bool,
     window_enlarged: bool,
+    /// Whether the window was told to leave its starting size and has not been seen doing so yet.
+    window_settling: bool,
     restore_window_state: bool,
     window_placement_changed: bool,
     activate_window: bool,
@@ -309,6 +311,7 @@ impl KdiffApp {
             config,
             config_writable,
             window_enlarged: false,
+            window_settling: false,
             restore_window_state: false,
             window_placement_changed: false,
             activate_window: false,
@@ -597,6 +600,24 @@ impl KdiffApp {
     }
 
 
+    /// Records where the main window is. Until the window got its working size it still has the small one it starts with, which is not the user's choice and is not recorded. The window reports that size for a frame or more after it was told to grow.
+    fn record_window_placement(&mut self, viewport: &egui::ViewportInfo, pixels_per_point: f32, monitor: Option<[i32; 2]>) {
+        if !self.window_enlarged {
+            return;
+        }
+        if self.window_settling {
+            let starting = viewport.inner_rect.is_none_or(|rect| (rect.size() - egui::Vec2::from(INITIAL_WINDOW_SIZE)).abs().max_elem() < 1.0);
+            if starting && viewport.maximized != Some(true) {
+                return;
+            }
+            self.window_settling = false;
+        }
+        let previous = self.config.window.clone();
+        crate::window_placement::WindowPlacement::record(&mut self.config.window, viewport, pixels_per_point, monitor);
+        self.window_placement_changed |= self.config.window != previous;
+    }
+
+
     fn update_window_state(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if std::mem::take(&mut self.restore_window_state) {
             if let Some(saved) = &self.config.window {
@@ -612,9 +633,8 @@ impl KdiffApp {
                 let pos = monitor.position();
                 [pos.x, pos.y]
             });
-            let previous = self.config.window.clone();
-            ctx.input(|input| crate::window_placement::WindowPlacement::record(&mut self.config.window, input.viewport(), input.pixels_per_point, monitor));
-            self.window_placement_changed |= self.config.window != previous;
+            let (viewport, pixels_per_point) = ctx.input(|input| (input.viewport().clone(), input.pixels_per_point));
+            self.record_window_placement(&viewport, pixels_per_point, monitor);
         }
         if self.activate_window {
             if ctx.input(|input| input.viewport().minimized == Some(true)) {
@@ -858,8 +878,11 @@ Shortcut: {}", link.display()),
                 }
                 self.tab.error = None;
                 if !self.window_enlarged {
+                    let monitor_size = ctx.input(|input| input.viewport().monitor_size);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(crate::window_placement::default_size(monitor_size)));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
                     self.window_enlarged = true;
+                    self.window_settling = true;
                 }
             }
             HostMessage::Event(Event::Delta(delta)) => {
@@ -3364,6 +3387,45 @@ mod tests {
         assert!(harness.query_by_label("Run").is_none());
         assert!(harness.query_by_label("Opening files…").is_some());
         assert_eq!(host.recv().unwrap().command, Command::Open(files));
+    }
+
+
+    #[test]
+    fn the_small_starting_window_is_not_recorded_as_the_placement() {
+        let (mut app, _host, _ctx) = app_with_session();
+        let starting = egui::Rect::from_min_size(egui::pos2(208.0, 208.0), INITIAL_WINDOW_SIZE.into());
+        let viewport = egui::ViewportInfo { outer_rect: Some(starting), inner_rect: Some(starting), ..Default::default() };
+        app.record_window_placement(&viewport, 1.0, Some([0, 0]));
+        assert_eq!(app.config.window, None);
+        assert!(!app.window_placement_changed);
+        app.window_enlarged = true;
+        app.window_settling = true;
+        app.record_window_placement(&viewport, 1.0, Some([0, 0]));
+        assert_eq!(app.config.window, None, "the window still reports its starting size right after it was told to grow");
+        let maximized = egui::ViewportInfo { maximized: Some(true), inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920.0, 1040.0))), ..Default::default() };
+        app.record_window_placement(&maximized, 1.0, Some([0, 0]));
+        assert_eq!(app.config.window, None);
+        assert!(!app.window_settling);
+        let working = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1200.0, 800.0));
+        let viewport = egui::ViewportInfo { outer_rect: Some(working), inner_rect: Some(working), ..Default::default() };
+        app.record_window_placement(&viewport, 1.0, Some([0, 0]));
+        assert_eq!(app.config.window.as_ref().map(|saved| saved.size), Some([1200.0, 800.0]));
+        assert!(app.window_placement_changed);
+    }
+
+
+    #[test]
+    fn the_first_comparison_gives_the_window_a_normal_size_before_maximizing_it_once() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.mirror = None;
+        let mut input = egui::RawInput::default();
+        input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().monitor_size = Some(egui::vec2(1000.0, 600.0));
+        let mut output = ctx.run_logic(&input, |ctx| app.handle_message(ctx, HostMessage::Event(Event::Snapshot(resolved_snapshot()))));
+        let commands = output.viewport_commands.remove(&egui::ViewportId::ROOT).unwrap();
+        assert_eq!(commands, [egui::ViewportCommand::InnerSize(egui::vec2(800.0, 480.0)), egui::ViewportCommand::Maximized(true)]);
+        assert!(app.window_enlarged && app.window_settling);
+        let mut output = ctx.run_logic(&input, |ctx| app.handle_message(ctx, HostMessage::Event(Event::Snapshot(resolved_snapshot()))));
+        assert!(output.viewport_commands.remove(&egui::ViewportId::ROOT).is_none_or(|commands| commands.is_empty()));
     }
 
 

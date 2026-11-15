@@ -1,6 +1,10 @@
 use egui::{Pos2, Vec2, ViewportInfo};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_SIZE: Vec2 = Vec2::new(1200.0, 800.0);
+/// The most of a monitor the default size takes, per axis.
+const DEFAULT_MONITOR_SHARE: f32 = 0.8;
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowPlacement {
@@ -54,6 +58,15 @@ impl WindowPlacement {
 }
 
 
+/// The normal size the main window gets when no placement is saved: what it returns to when the user restores it from maximized.
+pub fn default_size(monitor_size: Option<Vec2>) -> Vec2 {
+    let fitting = monitor_size
+        .filter(|size| size.is_finite() && size.min_elem() > 0.0)
+        .map_or(DEFAULT_SIZE, |size| DEFAULT_SIZE.min(size * DEFAULT_MONITOR_SHARE));
+    fitting.max(Vec2::splat(64.0))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +89,15 @@ mod tests {
         viewport.inner_rect = None;
         WindowPlacement::record(&mut saved, &viewport, 1.0, None);
         assert_eq!(saved, Some(WindowPlacement { position: Some([540, 120]), monitor: Some([0, 0]), maximized: true, minimized: true, ..expected }));
+    }
+
+    #[test]
+    fn the_default_size_fits_the_monitor_and_survives_a_missing_or_broken_one() {
+        assert_eq!(default_size(Some(vec2(1920.0, 1080.0))), vec2(1200.0, 800.0));
+        assert_eq!(default_size(Some(vec2(1000.0, 600.0))), vec2(800.0, 480.0));
+        assert_eq!(default_size(None), vec2(1200.0, 800.0));
+        assert_eq!(default_size(Some(vec2(0.0, f32::NAN))), vec2(1200.0, 800.0));
+        assert_eq!(default_size(Some(vec2(50.0, 50.0))), vec2(64.0, 64.0));
     }
 
     #[test]
