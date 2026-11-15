@@ -46,8 +46,8 @@ const MARK_LINES_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::C
 const MARK_FUNCTION_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
 const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
 const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
-const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
-const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::H);
+const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::J);
+const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::J);
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
@@ -62,7 +62,7 @@ const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COM
 const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
-const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
+const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::M);
 const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
 const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
 /// egui can't tell the numeric keypad's minus and plus from the main ones, so both fold and unfold.
@@ -700,7 +700,7 @@ impl KdiffApp {
     /// Applies the theme, fonts and styles; reloads the font only when the family changed.
     fn apply_view(&mut self, ctx: &egui::Context, view: &ViewConfig) {
         if self.applied_view.as_ref().is_none_or(|applied| applied.theme != view.theme) {
-            ctx.set_theme(theme::preference(view.theme.clone()));
+            theme::apply_choice(ctx, view.theme.clone());
             self.title_bar_refreshed = false;
         }
         let family_changed = self.applied_view.as_ref().is_none_or(|applied| applied.font_family != view.font_family);
@@ -2286,13 +2286,13 @@ Shortcut: {}", link.display()),
                     let mut minimap = self.view().show_minimap;
                     let item = egui::Checkbox::new(&mut minimap, MINIMAP_TOGGLE_LABEL);
                     let shortcut = ui.ctx().format_shortcut(&MINIMAP_SHORTCUT);
-                    if ui.add(item).on_hover_text(format!("{MINIMAP_TOGGLE_HINT} ({shortcut})")).clicked() {
+                    if ui.add(item).on_hover_text(hint_with_shortcut(MINIMAP_TOGGLE_HINT, &shortcut)).clicked() {
                         self.toggle_minimap();
                     }
                     let mut independent = self.view().independent_scroll;
                     let item = egui::Checkbox::new(&mut independent, INDEPENDENT_SCROLL_TOGGLE_LABEL);
                     let shortcut = ui.ctx().format_shortcut(&INDEPENDENT_SCROLL_SHORTCUT);
-                    if ui.add(item).on_hover_text(format!("{INDEPENDENT_SCROLL_TOGGLE_HINT} ({shortcut})")).clicked() {
+                    if ui.add(item).on_hover_text(hint_with_shortcut(INDEPENDENT_SCROLL_TOGGLE_HINT, &shortcut)).clicked() {
                         self.toggle_independent_scroll();
                     }
                     ui.separator();
@@ -2317,7 +2317,7 @@ Shortcut: {}", link.display()),
                     let mut ignore_whitespace = self.ignores_whitespace();
                     let item = egui::Checkbox::new(&mut ignore_whitespace, IGNORE_WHITESPACE_TOGGLE_LABEL);
                     let shortcut = ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT);
-                    if ui.add_enabled(has_session, item).on_hover_text(format!("{IGNORE_WHITESPACE_TOGGLE_HINT} ({shortcut})")).clicked() {
+                    if ui.add_enabled(has_session, item).on_hover_text(hint_with_shortcut(IGNORE_WHITESPACE_TOGGLE_HINT, &shortcut)).clicked() {
                         self.toggle_ignore_whitespace();
                     }
                 });
@@ -2384,19 +2384,19 @@ Shortcut: {}", link.display()),
                     overview_toggled = true;
                 }
                 if toolbar_toggle(ui, MINIMAP_TOGGLE_LABEL, minimap_on, true, icons::MINIMAP)
-                    .on_hover_text(MINIMAP_TOGGLE_HINT)
+                    .on_hover_text(hint_with_shortcut(MINIMAP_TOGGLE_HINT, &ui.ctx().format_shortcut(&MINIMAP_SHORTCUT)))
                     .clicked()
                 {
                     minimap_toggled = true;
                 }
                 if toolbar_toggle(ui, INDEPENDENT_SCROLL_TOGGLE_LABEL, independent_on, true, icons::INDEPENDENT_SCROLL)
-                    .on_hover_text(INDEPENDENT_SCROLL_TOGGLE_HINT)
+                    .on_hover_text(hint_with_shortcut(INDEPENDENT_SCROLL_TOGGLE_HINT, &ui.ctx().format_shortcut(&INDEPENDENT_SCROLL_SHORTCUT)))
                     .clicked()
                 {
                     independent_toggled = true;
                 }
                 if toolbar_toggle(ui, IGNORE_WHITESPACE_TOGGLE_LABEL, ignore_whitespace_on, true, icons::IGNORE_WHITESPACE)
-                    .on_hover_text(IGNORE_WHITESPACE_TOGGLE_HINT)
+                    .on_hover_text(hint_with_shortcut(IGNORE_WHITESPACE_TOGGLE_HINT, &ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT)))
                     .clicked()
                 {
                     ignore_whitespace_toggled = true;
@@ -2446,7 +2446,7 @@ Shortcut: {}", link.display()),
         self.save_config(false);
     }
 
-    /// Shows or hides the minimap, from the toolbar, the View menu or Ctrl+G. Saved at once, and followed by an open settings dialog.
+    /// Shows or hides the minimap, from the toolbar, the View menu or Ctrl+M. Saved at once, and followed by an open settings dialog.
     fn toggle_minimap(&mut self) {
         let on = !self.view().show_minimap;
         self.config.view.show_minimap = on;
@@ -2974,6 +2974,12 @@ fn indentation_selector(ui: &mut egui::Ui, current: Indentation, overridden: boo
     } else {
         (updated != current).then_some(Some(updated))
     }
+}
+
+
+/// A toggle's hint followed by its shortcut, for the tooltips of the View menu and the toolbar.
+fn hint_with_shortcut(hint: &str, shortcut: &str) -> String {
+    format!("{hint} ({shortcut})")
 }
 
 
@@ -3996,11 +4002,29 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_h_opens_heuristics_alignment_with_the_saved_options_and_asks_for_matches() {
+    fn ctrl_m_toggles_the_minimap() {
+        let (mut app, _host, ctx) = app_with_session();
+        let shown = app.view().show_minimap;
+        press(&mut app, &ctx, Key::M, Modifiers::COMMAND);
+        assert_eq!(app.view().show_minimap, !shown);
+        press(&mut app, &ctx, Key::G, Modifiers::COMMAND);
+        assert_eq!(app.view().show_minimap, !shown, "Ctrl+G no longer toggles it");
+    }
+
+    #[test]
+    fn a_toggle_hint_ends_with_its_shortcut() {
+        let ctx = egui::Context::default();
+        let hint = hint_with_shortcut(MINIMAP_TOGGLE_HINT, &ctx.format_shortcut(&MINIMAP_SHORTCUT));
+        assert!(hint.starts_with(MINIMAP_TOGGLE_HINT));
+        assert!(hint.ends_with("+M)"), "{hint}");
+    }
+
+    #[test]
+    fn ctrl_j_opens_heuristics_alignment_with_the_saved_options_and_asks_for_matches() {
         let (mut app, host, ctx) = app_with_session();
         app.config.heuristics.types = true;
         app.config.heuristics.signature_similarity = 90;
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND);
         assert!(app.tab.heuristics.is_some());
         let language = app.tab.language.current().name().to_string();
         let options = HeuristicOptions {
@@ -4023,33 +4047,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_alt_h_needs_the_caret_inside_an_applied_alignment() {
+    fn ctrl_alt_j_needs_the_caret_inside_an_applied_alignment() {
         let (mut app, _host, ctx) = app_with_session();
         let hint = "Put the caret inside an applied alignment to align inside it";
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND.plus(Modifiers::ALT));
         assert!(app.tab.heuristics.is_none());
         assert_eq!(app.tab.status.as_ref().map(|status| (status.text.as_str(), status.is_error)), Some((hint, true)));
         app.tab.status = None;
         set_marks(&mut app, vec![mark(Document::A, 1, 0..2), mark(Document::B, 1, 0..2)], true);
         caret_at(&mut app, Document::A, 1);
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND.plus(Modifiers::ALT));
         assert!(app.tab.heuristics.is_none(), "a pending alignment does not count");
         assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(hint));
         app.tab.status = None;
         set_marks(&mut app, vec![applied(Document::A, 1, 0..1), applied(Document::B, 1, 0..1)], false);
         caret_at(&mut app, Document::A, 1);
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND.plus(Modifiers::ALT));
         assert!(app.tab.heuristics.is_none(), "the caret is outside it");
         assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some(hint));
     }
 
     #[test]
-    fn ctrl_alt_h_opens_the_window_inside_the_innermost_alignment_and_sends_it_with_both_commands() {
+    fn ctrl_alt_j_opens_the_window_inside_the_innermost_alignment_and_sends_it_with_both_commands() {
         let (mut app, host, ctx) = app_with_session();
         let marks = vec![applied(Document::A, 1, 0..10), applied(Document::B, 1, 0..10), applied(Document::A, 2, 2..5), applied(Document::B, 2, 3..6)];
         set_marks(&mut app, marks, false);
         caret_at(&mut app, Document::B, 4);
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND.plus(Modifiers::ALT));
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND.plus(Modifiers::ALT));
         assert_eq!(app.tab.heuristics.as_ref().and_then(|dialog| dialog.within()), Some(2));
         app.apply_heuristics(vec![vec![2..3, 3..4]], Some(2));
         let language = app.tab.language.current().name().to_string();
@@ -4083,7 +4107,7 @@ mod tests {
     #[test]
     fn a_heuristic_proposal_fills_the_window_only_when_it_answers_the_window() {
         let (mut app, _host, ctx) = app_with_session();
-        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        press(&mut app, &ctx, Key::J, Modifiers::COMMAND);
         let id = app.tab.pending.iter().find(|(_, kind)| **kind == Pending::HeuristicPropose).map(|(id, _)| id.clone()).unwrap();
         let proposal = |cause| kdiff4_protocol::HeuristicProposal {
             cause,

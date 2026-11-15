@@ -223,6 +223,13 @@ pub fn preference(choice: ThemeChoice) -> ThemePreference {
     }
 }
 
+/// Sets the theme the user chose. Where the system's theme is unknown, following it gives the light theme.
+pub fn apply_choice(ctx: &egui::Context, choice: ThemeChoice) {
+    ctx.options_mut(|options| options.fallback_theme = Theme::Light);
+    ctx.set_theme(preference(choice));
+}
+
+
 /// Styles both themes and stores their palettes, so switching themes later needs no other change.
 pub fn apply_style(ctx: &egui::Context, view: &ViewConfig) {
     for theme in [Theme::Light, Theme::Dark] {
@@ -558,5 +565,16 @@ mod tests {
         assert_eq!(preference(ThemeChoice::Light), ThemePreference::Light);
         assert_eq!(preference(ThemeChoice::Dark), ThemePreference::Dark);
         assert_eq!(preference(ThemeChoice::System), ThemePreference::System);
+    }
+
+    #[test]
+    fn the_default_theme_follows_the_system_and_is_light_where_the_system_has_none() {
+        assert_eq!(ViewConfig::default().theme, ThemeChoice::System);
+        assert_eq!(ThemeChoice::default(), ThemeChoice::System);
+        let ctx = egui::Context::default();
+        apply_choice(&ctx, ThemeChoice::System);
+        assert_eq!(ctx.theme(), Theme::Light);
+        apply_choice(&ctx, ThemeChoice::Dark);
+        assert_eq!(ctx.theme(), Theme::Dark);
     }
 }

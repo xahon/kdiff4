@@ -173,7 +173,7 @@ impl Default for ViewConfig {
             inset_arrow_gap: DEFAULT_INSET_ARROW_GAP,
             alignment_stops: true,
             heuristic_extractor: Extractor::TreeSitter,
-            theme: ThemeChoice::Light,
+            theme: ThemeChoice::System,
             success_blink: SuccessBlinkConfig::default(),
             light_colors: ThemeColors::default(),
             dark_colors: ThemeColors::default(),
@@ -239,9 +239,9 @@ impl Default for SuccessBlinkConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeChoice {
-    #[default]
     Light,
     Dark,
+    #[default]
     System,
 }
 

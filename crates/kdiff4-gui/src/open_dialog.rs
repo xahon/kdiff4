@@ -158,7 +158,7 @@ pub fn run_window(
             }
         });
         let (config_path, settings) = loaded.map_or_else(|| (None, config::GuiConfig::default()), |(path, settings)| (Some(path), settings));
-        cc.egui_ctx.set_theme(theme::preference(settings.view.theme.clone()));
+        theme::apply_choice(&cc.egui_ctx, settings.view.theme.clone());
         theme::apply_style(&cc.egui_ctx, &settings.view);
         let mut updater = Updater::default();
         if check_for_updates {

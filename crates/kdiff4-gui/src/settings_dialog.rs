@@ -838,7 +838,7 @@ mod tests {
         view.whitespace.render = false;
         let mut dialog = SettingsDialog::new(&view, None);
         dialog.reset_to_defaults();
-        assert_eq!(dialog.draft().theme, ThemeChoice::Light);
+        assert_eq!(dialog.draft().theme, ThemeChoice::System);
         assert_eq!(dialog.draft().dark_colors.pane_text, None);
         assert_eq!(dialog.draft().dark_colors.document_b, None);
         assert_eq!(dialog.draft().light_colors.red, None);
