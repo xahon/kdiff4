@@ -18,6 +18,7 @@ use crate::eol::{self, EolAnswer};
 use crate::find::{self, FindEvent};
 use crate::folding::{self, Folds};
 use crate::fonts::{self, FontScan};
+use crate::go_to_line::{self, GoToLineEvent};
 use crate::icons::{self, Icon};
 use crate::language::{self, Language, LanguageState};
 use crate::mirror::{ConflictCounts, DeltaOutcome, Mirror};
@@ -32,7 +33,7 @@ use crate::shortcuts_dialog::{self, ShortcutsDialog};
 use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
 use crate::theme;
-use crate::ui_commands::{self, Group, UiCommand, hint_with_shortcut, OPEN_SHORTCUT, OPEN_TAB_SHORTCUT, RELOAD_SHORTCUT, SAVE_SHORTCUT, SAVE_AS_SHORTCUT, UNDO_SHORTCUT, REDO_SHORTCUT, MARK_LINES_SHORTCUT, MARK_FUNCTION_SHORTCUT, APPLY_ALIGNMENTS_SHORTCUT, CLEAR_ALIGNMENTS_SHORTCUT, HEURISTICS_SHORTCUT, HEURISTICS_INSIDE_SHORTCUT, EXIT_SHORTCUT, CLOSE_TAB_SHORTCUT, REOPEN_TAB_SHORTCUT, LEFT_TAB_SHORTCUT, RIGHT_TAB_SHORTCUT, MOVE_TAB_LEFT_SHORTCUT, MOVE_TAB_RIGHT_SHORTCUT, NEXT_TAB_SHORTCUT, PREVIOUS_TAB_SHORTCUT, SETTINGS_SHORTCUT, FIND_SHORTCUT, FIND_NEXT_SHORTCUT, FIND_PREVIOUS_SHORTCUT, MINIMAP_SHORTCUT, IGNORE_WHITESPACE_SHORTCUT, INDEPENDENT_SCROLL_SHORTCUT, FOLD_SHORTCUT, UNFOLD_SHORTCUT, FOLD_ALL_SHORTCUT, UNFOLD_ALL_SHORTCUT, KEYBOARD_SHORTCUTS_SHORTCUT, COMMAND_PALETTE_SHORTCUT, CHOOSE_SHORTCUTS, NAVIGATION_SHORTCUTS, VOID_TOGGLE_LABEL, VOID_TOGGLE_HINT, MINIMAP_TOGGLE_LABEL, MINIMAP_TOGGLE_HINT, OVERVIEW_TOGGLE_LABEL, OVERVIEW_TOGGLE_HINT, IGNORE_WHITESPACE_TOGGLE_LABEL, IGNORE_WHITESPACE_TOGGLE_HINT, INDEPENDENT_SCROLL_TOGGLE_LABEL, INDEPENDENT_SCROLL_TOGGLE_HINT};
+use crate::ui_commands::{self, Group, UiCommand, hint_with_shortcut, OPEN_SHORTCUT, OPEN_TAB_SHORTCUT, RELOAD_SHORTCUT, SAVE_SHORTCUT, SAVE_AS_SHORTCUT, UNDO_SHORTCUT, REDO_SHORTCUT, MARK_LINES_SHORTCUT, MARK_FUNCTION_SHORTCUT, APPLY_ALIGNMENTS_SHORTCUT, CLEAR_ALIGNMENTS_SHORTCUT, HEURISTICS_SHORTCUT, HEURISTICS_INSIDE_SHORTCUT, EXIT_SHORTCUT, CLOSE_TAB_SHORTCUT, REOPEN_TAB_SHORTCUT, LEFT_TAB_SHORTCUT, RIGHT_TAB_SHORTCUT, MOVE_TAB_LEFT_SHORTCUT, MOVE_TAB_RIGHT_SHORTCUT, NEXT_TAB_SHORTCUT, PREVIOUS_TAB_SHORTCUT, SETTINGS_SHORTCUT, FIND_SHORTCUT, FIND_NEXT_SHORTCUT, FIND_PREVIOUS_SHORTCUT, GO_TO_LINE_SHORTCUT, MINIMAP_SHORTCUT, IGNORE_WHITESPACE_SHORTCUT, INDEPENDENT_SCROLL_SHORTCUT, FOLD_SHORTCUT, UNFOLD_SHORTCUT, FOLD_ALL_SHORTCUT, UNFOLD_ALL_SHORTCUT, KEYBOARD_SHORTCUTS_SHORTCUT, COMMAND_PALETTE_SHORTCUT, CHOOSE_SHORTCUTS, NAVIGATION_SHORTCUTS, VOID_TOGGLE_LABEL, VOID_TOGGLE_HINT, MINIMAP_TOGGLE_LABEL, MINIMAP_TOGGLE_HINT, OVERVIEW_TOGGLE_LABEL, OVERVIEW_TOGGLE_HINT, IGNORE_WHITESPACE_TOGGLE_LABEL, IGNORE_WHITESPACE_TOGGLE_HINT, INDEPENDENT_SCROLL_TOGGLE_LABEL, INDEPENDENT_SCROLL_TOGGLE_HINT};
 use crate::heuristics_dialog::{self, HeuristicsAction, HeuristicsDialog};
 use crate::inset_dialog::{self, InsetAnswer};
 use crate::updater::{UpdateWindow, Updater};
@@ -41,6 +42,8 @@ use crate::window_frame;
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 /// Distance of the find bar from the top right corner of the panes.
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
+/// How far below the top of the find bar the Go to Line bar starts while both are open.
+const FIND_BAR_STEP: f32 = 36.0;
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
@@ -1281,6 +1284,35 @@ Shortcut: {}", link.display()),
         self.tab.panes.find.focus = true;
     }
 
+    /// Shows the Go to Line bar with the keyboard and an empty field.
+    fn open_go_to_line(&mut self) {
+        let bar = &mut self.tab.panes.go_to_line;
+        bar.open = true;
+        bar.focus = true;
+        bar.text.clear();
+    }
+
+    /// The lines of the pane Go to Line acts on: the one with the caret, or the first.
+    fn go_to_line_count(&self) -> usize {
+        let mirror = self.tab.mirror.as_ref();
+        self.find_target()
+            .and_then(|document| lines_of(mirror?, document))
+            .map_or(0, |lines| lines.count())
+    }
+
+    fn handle_go_to_line_event(&mut self, ctx: &egui::Context, event: GoToLineEvent) {
+        self.tab.panes.go_to_line.open = false;
+        let GoToLineEvent::Go(position) = event else { return };
+        let Some(document) = self.find_target() else { return };
+        let lines = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document.clone()));
+        let Some(lines) = lines else { return };
+        let cursor = Cursor::at(editing::clamp(lines, position));
+        self.tab.panes.set_caret(document, cursor, None);
+        self.tab.panes.strip_focused = false;
+        self.tab.panes.reveal_caret = true;
+        ctx.request_repaint();
+    }
+
     /// Finds the matches in the searched pane again if needed, and follows the selection.
     fn refresh_find(&mut self) {
         if !self.tab.panes.find.open {
@@ -2058,6 +2090,9 @@ Shortcut: {}", link.display()),
             if ctx.input_mut(|input| input.consume_shortcut(&FIND_SHORTCUT)) {
                 self.open_find();
             }
+            if ctx.input_mut(|input| input.consume_shortcut(&GO_TO_LINE_SHORTCUT)) {
+                self.open_go_to_line();
+            }
             if ctx.input_mut(|input| input.consume_shortcut(&RELOAD_SHORTCUT)) {
                 self.reload();
             }
@@ -2237,7 +2272,7 @@ Shortcut: {}", link.display()),
         let mut state = CommandState { enabled: true, checked: None, disabled_hint: None };
         match command {
             UiCommand::Open | UiCommand::Exit | UiCommand::Settings | UiCommand::About | UiCommand::CheckForUpdates => {}
-            UiCommand::Reload | UiCommand::Find | UiCommand::FindNext | UiCommand::FindPrevious | UiCommand::Navigate(_) => state.enabled = has_session,
+            UiCommand::Reload | UiCommand::Find | UiCommand::FindNext | UiCommand::FindPrevious | UiCommand::GoToLine | UiCommand::Navigate(_) => state.enabled = has_session,
             UiCommand::SwapSides => state.enabled = has_session && !self.is_opening(),
             UiCommand::CopyPath | UiCommand::CopyFileName | UiCommand::RevealFile => {
                 state.enabled = self.caret_document_with_path().is_some();
@@ -2308,6 +2343,7 @@ Shortcut: {}", link.display()),
             UiCommand::Find => self.open_find(),
             UiCommand::FindNext => self.find_step(ctx, true),
             UiCommand::FindPrevious => self.find_step(ctx, false),
+            UiCommand::GoToLine => self.open_go_to_line(),
             UiCommand::ChooseHere(document) => self.choose_current(document),
             UiCommand::ChooseEverywhere(document) => self.choose_everywhere(document),
             UiCommand::ChooseForUnresolved(document) => self.choose_for_unresolved(document),
@@ -2841,6 +2877,7 @@ impl eframe::App for KdiffApp {
         let mut form_action = None;
         let mut pane_actions = Vec::new();
         let mut find_events = Vec::new();
+        let mut go_to_line_event = None;
         let mut eol_pick = None;
         let palette_top = ui.available_rect_before_wrap().center_top() + egui::vec2(0.0, FIND_BAR_MARGIN.y);
         match self.tab.mirror.as_ref() {
@@ -2866,6 +2903,11 @@ impl eframe::App for KdiffApp {
                 if self.tab.panes.find.open {
                     find_events = find::show_bar(&ctx, self.tab.id, find_corner, &mut self.tab.panes.find);
                 }
+                if self.tab.panes.go_to_line.open {
+                    let corner = if self.tab.panes.find.open { find_corner + egui::vec2(0.0, FIND_BAR_STEP) } else { find_corner };
+                    let line_count = self.go_to_line_count();
+                    go_to_line_event = go_to_line::show_bar(&ctx, self.tab.id, corner, &mut self.tab.panes.go_to_line, line_count);
+                }
             }
         }
         for action in pane_actions {
@@ -2873,6 +2915,9 @@ impl eframe::App for KdiffApp {
         }
         for event in find_events {
             self.handle_find_event(&ctx, event);
+        }
+        if let Some(event) = go_to_line_event {
+            self.handle_go_to_line_event(&ctx, event);
         }
         if let Some(action) = form_action {
             self.handle_form_action(action);
@@ -5264,6 +5309,42 @@ mod tests {
         assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 1))));
         press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
         assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 1))), "wraps to the last match");
+    }
+
+    #[test]
+    fn ctrl_g_opens_go_to_line_with_an_empty_field() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.panes.go_to_line.text = "7".to_string();
+        press(&mut app, &ctx, Key::G, Modifiers::COMMAND);
+        let bar = &app.tab.panes.go_to_line;
+        assert!(bar.open && bar.focus && bar.text.is_empty());
+        app.tab.mirror = None;
+        app.tab.panes.go_to_line.open = false;
+        press(&mut app, &ctx, Key::G, Modifiers::COMMAND);
+        assert!(!app.tab.panes.go_to_line.open, "nothing to go to without a session");
+    }
+
+    #[test]
+    fn go_to_line_puts_the_caret_in_the_pane_that_has_it_and_closes() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.panes.set_caret(Document::D, Cursor::at(at(0, 0)), None);
+        app.run_command(&ctx, UiCommand::GoToLine);
+        assert_eq!(app.go_to_line_count(), lines_of(app.tab.mirror.as_ref().unwrap(), Document::D).unwrap().count());
+        app.handle_go_to_line_event(&ctx, GoToLineEvent::Go(at(1, 99)));
+        assert_eq!(selected(&app), Some((Document::D, at(1, 1), at(1, 1))), "the column stops at the end of the line");
+        assert!(!app.tab.panes.go_to_line.open);
+        assert!(app.tab.panes.reveal_caret);
+    }
+
+    #[test]
+    fn go_to_line_without_a_caret_goes_in_the_first_pane_and_escape_only_closes() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.run_command(&ctx, UiCommand::GoToLine);
+        app.handle_go_to_line_event(&ctx, GoToLineEvent::Close);
+        assert!(!app.tab.panes.go_to_line.open);
+        assert_eq!(selected(&app), None);
+        app.handle_go_to_line_event(&ctx, GoToLineEvent::Go(at(1, 0)));
+        assert_eq!(selected(&app), Some((Document::A, at(1, 0), at(1, 0))));
     }
 
     #[test]

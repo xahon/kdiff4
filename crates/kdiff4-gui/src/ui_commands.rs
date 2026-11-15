@@ -27,6 +27,7 @@ pub const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers:
 pub const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
 pub const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 pub const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
+pub const GO_TO_LINE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
 pub const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::M);
 pub const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
 pub const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
@@ -144,6 +145,7 @@ pub enum UiCommand {
     Find,
     FindNext,
     FindPrevious,
+    GoToLine,
     ChooseHere(Document),
     ChooseEverywhere(Document),
     ChooseForUnresolved(Document),
@@ -227,6 +229,7 @@ impl UiCommand {
             UiCommand::Find => CommandInfo::new(Group::Edit, "Find...", &[FIND_SHORTCUT]),
             UiCommand::FindNext => CommandInfo::new(Group::Edit, "Find Next", &[FIND_NEXT_SHORTCUT]),
             UiCommand::FindPrevious => CommandInfo::new(Group::Edit, "Find Previous", &[FIND_PREVIOUS_SHORTCUT]),
+            UiCommand::GoToLine => CommandInfo::new(Group::Edit, "Go to Line...", &[GO_TO_LINE_SHORTCUT]).hint("Go to a line, or a line and a column, of the pane with the caret"),
             UiCommand::ChooseHere(document) => CommandInfo::new(Group::Merge, format!("Choose {} Here", document.letter()), &choose_shortcut(document, false)),
             UiCommand::ChooseEverywhere(document) => CommandInfo::new(Group::Merge, format!("Choose {} Everywhere", document.letter()), &choose_shortcut(document, true)),
             UiCommand::ChooseForUnresolved(document) => CommandInfo::new(Group::Merge, format!("Choose {} for All Unresolved", document.letter()), &[]),
@@ -304,7 +307,7 @@ pub fn menu_items(menu: Group, c_choosable: bool, has_start_menu: bool) -> Vec<O
             Some(UiCommand::ReopenTab),
             Some(UiCommand::Exit),
         ],
-        Group::Edit => vec![Some(UiCommand::Undo), Some(UiCommand::Redo), None, Some(UiCommand::Find), Some(UiCommand::FindNext), Some(UiCommand::FindPrevious)],
+        Group::Edit => vec![Some(UiCommand::Undo), Some(UiCommand::Redo), None, Some(UiCommand::Find), Some(UiCommand::FindNext), Some(UiCommand::FindPrevious), None, Some(UiCommand::GoToLine)],
         Group::Merge => {
             let mut items: Vec<Option<UiCommand>> = documents.iter().map(|document| Some(UiCommand::ChooseHere(document.clone()))).collect();
             items.push(None);
@@ -439,9 +442,8 @@ mod tests {
             .into_iter()
             .flat_map(|command| command.info().shortcuts)
             .collect();
-        for key in [Key::H, Key::G] {
-            assert!(!taken.contains(&KeyboardShortcut::new(Modifiers::COMMAND, key)), "{key:?}");
-        }
+        assert!(!taken.contains(&KeyboardShortcut::new(Modifiers::COMMAND, Key::H)));
+        assert_eq!(UiCommand::GoToLine.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::G)]);
         assert_eq!(UiCommand::Heuristics.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::J)]);
         assert_eq!(UiCommand::ToggleMinimap.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::M)]);
     }

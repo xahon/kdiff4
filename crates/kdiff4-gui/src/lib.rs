@@ -12,6 +12,7 @@ mod editing;
 mod eol;
 mod find;
 mod folding;
+mod go_to_line;
 mod fonts;
 mod heuristics_dialog;
 mod icons;

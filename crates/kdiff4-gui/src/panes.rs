@@ -10,6 +10,7 @@ use crate::editing::{Cursor, Lines, Position};
 use crate::eol;
 use crate::find::FindState;
 use crate::folding::Folds;
+use crate::go_to_line::GoToLineState;
 use crate::minimap;
 use crate::mirror::Mirror;
 use crate::open_dialog::path_row_height;
@@ -123,6 +124,7 @@ pub struct PaneState {
     pub viewports: [Option<Viewport>; 4],
     /// The find bar and its matches in the pane with the caret.
     pub find: FindState,
+    pub go_to_line: GoToLineState,
 }
 
 impl Default for PaneState {
@@ -144,6 +146,7 @@ impl Default for PaneState {
             scroll_leader: None,
             viewports: [None; 4],
             find: FindState::default(),
+            go_to_line: GoToLineState::default(),
         }
     }
 }
