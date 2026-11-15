@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use egui::{Align, Button, Color32, CursorIcon, Key, Layout, RichText, Sense, Stroke, TextEdit, Ui, vec2};
+use egui::{Align, Align2, Button, Color32, CursorIcon, FontId, Key, Layout, Response, RichText, Sense, Stroke, StrokeKind, TextEdit, TextStyle, Ui, UiBuilder, WidgetInfo, pos2, vec2};
 use kdiff4_protocol::{AlignmentMark, Document, EolStyle};
 
 use crate::alignment_gutter::PaneMarks;
@@ -14,6 +14,7 @@ use crate::minimap;
 use crate::mirror::Mirror;
 use crate::open_dialog::path_row_height;
 use crate::overview;
+use crate::paths;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
 use crate::text_view::{self, Caret, CharRuns, FindHits, MarginKind, MenuAction, MergeView, PointerAction, ViewStyle, Viewport, Wheel};
@@ -27,6 +28,8 @@ pub const DEFAULT_MERGE_FRACTION: f32 = 0.5;
 const MOVED_BY_PANE: f32 = 0.5;
 /// Longest frame a scroll animation steps by, so a stall doesn't skip it.
 const MAX_SCROLL_STEP: f32 = 0.1;
+/// The space egui's text field keeps left and right of its text.
+const PATH_FIELD_MARGIN: f32 = 4.0;
 
 /// What the user did in the panes; the app turns these into caret moves and commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +77,11 @@ pub enum PaneAction {
     /// Enter in a header path field, with the field's text.
     CommitPath(Document, String),
     Browse(Document),
+    /// Copy the path of a document to the clipboard, from the context menu of its header.
+    CopyPath(Document),
+    CopyFileName(Document),
+    /// Show the file of a document in the system's file manager.
+    Reveal(Document),
     /// The overview strip took a press; Up and Down now switch between its lines.
     FocusStrip,
     /// Fold or unfold the range whose header is this line.
@@ -555,6 +563,7 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
                 column,
                 style,
                 text.document.clone(),
+                role(text.document.clone(), count),
                 text.label.as_deref(),
                 Some(&text.path),
                 text.eol.clone(),
@@ -591,6 +600,7 @@ fn output_pane(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &mut 
             ui,
             style,
             Document::D,
+            role(Document::D, mirror.documents().len()),
             None,
             output.path.as_deref(),
             None,
@@ -653,6 +663,7 @@ fn pane(
     ui: &mut Ui,
     style: &ViewStyle<'_>,
     document: Document,
+    role: Option<&str>,
     label: Option<&str>,
     path: Option<&Path>,
     eol: Option<EolStyle>,
@@ -671,7 +682,7 @@ fn pane(
     let radius = theme::corner_radius_of(ui);
     theme::pane_frame(palette, radius)
         .show(ui, |ui| {
-            header(ui, palette, radius, document.clone(), label, path, eol, modified, state, actions);
+            header(ui, palette, radius, document.clone(), role, label, path, eol, modified, state, actions);
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
@@ -745,12 +756,55 @@ fn pane(
         .inner
 }
 
-/// Letter, label, editable path and Browse button. The field shows the document's path unless the user is editing it.
+/// What a document is in a comparison of `sources` source documents, as its header names it: git's names for a three-way merge, and the sides of a two-way comparison.
+pub fn role(document: Document, sources: usize) -> Option<&'static str> {
+    match (document, sources) {
+        (Document::D, _) => Some("Output"),
+        (Document::A, 3) => Some("Base"),
+        (Document::B, 3) => Some("Local"),
+        (Document::C, 3) => Some("Remote"),
+        (Document::A, 2) => Some("Left"),
+        (Document::B, 2) => Some("Right"),
+        _ => None,
+    }
+}
+
+/// The context menu of a header, on one of its widgets: what to do with the document's path. Disabled while the document has none.
+fn path_menu(response: &Response, document: Document, path: Option<&Path>, actions: &mut Vec<PaneAction>) {
+    response.context_menu(|ui| {
+        let items = [("Copy Path", PaneAction::CopyPath(document.clone())), ("Copy File Name", PaneAction::CopyFileName(document.clone())), (paths::REVEAL_LABEL, PaneAction::Reveal(document.clone()))];
+        for (label, action) in items {
+            if ui.add_enabled(path.is_some(), Button::new(label)).clicked() {
+                actions.push(action);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// A path field without the focus whose path doesn't fit: the end of the path, drawn like the field. It takes the focus under the field's id, so the next frame shows the field itself with the whole path.
+fn elided_path_field(ui: &mut Ui, id: egui::Id, shown: &str, full: &str, font_id: FontId, size: egui::Vec2) -> Response {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let response = ui.interact(rect, id, Sense::click());
+    if response.clicked() {
+        response.request_focus();
+    }
+    response.widget_info(|| WidgetInfo::text_edit(ui.is_enabled(), full, full, ""));
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        ui.painter().rect(rect, visuals.corner_radius, ui.visuals().text_edit_bg_color(), visuals.bg_stroke, StrokeKind::Inside);
+        ui.painter().text(pos2(rect.left() + PATH_FIELD_MARGIN, rect.center().y), Align2::LEFT_CENTER, shown, font_id, visuals.text_color());
+    }
+    response.on_hover_cursor(CursorIcon::Text).on_hover_text(full)
+}
+
+/// Letter, role, label, editable path and Browse button. The field shows the document's path unless the user is editing it; a path too long for it shows its end, so the file name stays readable.
 fn header(
     ui: &mut Ui,
     palette: &Palette,
     radius: u8,
     document: Document,
+    role: Option<&str>,
     label: Option<&str>,
     path: Option<&Path>,
     eol: Option<EolStyle>,
@@ -760,14 +814,16 @@ fn header(
 ) {
     theme::pane_header_frame(palette, document.clone(), radius).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
+        let background = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| ui.horizontal(|ui| {
             let letter = if modified { format!("{}*", document.letter()) } else { document.letter().to_string() };
             let letter_response = ui.label(RichText::new(letter).strong().color(palette.text));
+            path_menu(&letter_response, document.clone(), path, actions);
             if modified {
                 letter_response.on_hover_text("Modified since it was loaded or saved");
             }
-            if let Some(label) = label {
-                ui.label(RichText::new(label).color(palette.weak_text));
+            for text in [role, label].into_iter().flatten() {
+                let response = ui.label(RichText::new(text).color(palette.weak_text));
+                path_menu(&response, document.clone(), path, actions);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let height = path_row_height(ui);
@@ -779,16 +835,26 @@ fn header(
                 }
                 let field_id = ui.make_persistent_id(("path_field", document.letter()));
                 let field = &mut state.path_fields[document_index(document.clone())];
-                if !ui.memory(|memory| memory.has_focus(field_id)) {
+                let focused = ui.memory(|memory| memory.has_focus(field_id));
+                if !focused {
                     *field = path.map(|path| path.display().to_string()).unwrap_or_default();
                 }
-                let hint = if document == Document::D { "unnamed, kept in memory until saved" } else { "" };
-                let response = ui.add(TextEdit::singleline(field).id(field_id).desired_width(ui.available_width()).hint_text(hint).min_size(vec2(0.0, height)));
+                let width = ui.available_width();
+                let font_id = TextStyle::Body.resolve(ui.style());
+                let shown = if focused { field.clone() } else { paths::elide_start(field, width - 2.0 * PATH_FIELD_MARGIN, |c| ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, c))) };
+                let response = if shown == *field {
+                    let hint = if document == Document::D { "unnamed, kept in memory until saved" } else { "" };
+                    ui.add(TextEdit::singleline(field).id(field_id).desired_width(width).hint_text(hint).min_size(vec2(0.0, height)))
+                } else {
+                    elided_path_field(ui, field_id, &shown, field, font_id, vec2(width, height))
+                };
+                path_menu(&response, document.clone(), path, actions);
                 if response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
                     actions.push(PaneAction::CommitPath(document.clone(), field.clone()));
                 }
             });
-        });
+        }));
+        path_menu(&background.response, document.clone(), path, actions);
     });
     let separator_y = ui.cursor().top();
     ui.painter().hline(ui.max_rect().x_range(), separator_y, Stroke::new(1.0, palette.pane_border));
@@ -817,10 +883,80 @@ mod tests {
             theme::apply_style(ui.ctx(), &crate::config::ViewConfig::default());
             let palette = theme::palette_of(ui);
             let mut actions = Vec::new();
-            header(ui, &palette, 4, Document::A, None, Some(Path::new("a.txt")), eol.clone(), false, &mut state, &mut actions);
+            header(ui, &palette, 4, Document::A, None, None, Some(Path::new("a.txt")), eol.clone(), false, &mut state, &mut actions);
         });
         harness.run();
         harness
+    }
+
+    const LONG_PATH: &str = "C:/a directory/with a rather long name/and another one inside it/that goes on for a while/file.txt";
+
+    /// The header of A as the base of a three-way merge, over a path that doesn't fit its field; the state collects the actions.
+    fn long_path_harness() -> egui_kittest::Harness<'static, (PaneState, Vec<PaneAction>)> {
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).with_accessibility_check(false).build_ui_state(
+            |ui, (state, actions): &mut (PaneState, Vec<PaneAction>)| {
+                theme::apply_style(ui.ctx(), &crate::config::ViewConfig::default());
+                let palette = theme::palette_of(ui);
+                header(ui, &palette, 4, Document::A, role(Document::A, 3), None, Some(Path::new(LONG_PATH)), None, false, state, actions);
+            },
+            (PaneState::default(), Vec::new()),
+        );
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn roles_follow_git_in_a_three_way_merge_and_the_sides_in_a_two_way_comparison() {
+        assert_eq!([Document::A, Document::B, Document::C, Document::D].map(|document| role(document, 3)), [Some("Base"), Some("Local"), Some("Remote"), Some("Output")]);
+        assert_eq!([Document::A, Document::B, Document::D].map(|document| role(document, 2)), [Some("Left"), Some("Right"), Some("Output")]);
+        assert_eq!(role(Document::C, 2), None);
+        assert_eq!(role(Document::A, 0), None);
+    }
+
+    #[test]
+    fn the_header_names_the_role_of_its_document() {
+        use egui_kittest::kittest::Queryable;
+        let harness = long_path_harness();
+        let letter = harness.get_by_label("A").rect();
+        let role = harness.get_by_label("Base").rect();
+        assert!(letter.right() <= role.left());
+        assert!(header_harness(None).query_by_label("Base").is_none(), "no role, no label");
+    }
+
+    #[test]
+    fn a_path_too_long_for_its_field_is_whole_again_once_the_field_has_the_focus() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = long_path_harness();
+        let field = harness.get_by_role(egui::Role::TextInput);
+        assert!(!field.is_focused());
+        let rect = field.rect();
+        field.click();
+        harness.run();
+        let field = harness.get_by_role(egui::Role::TextInput);
+        assert!(field.is_focused(), "the click went on to the field");
+        assert_eq!(field.rect().x_range(), rect.x_range(), "the field stands where the end of the path was shown");
+        assert_eq!(harness.state().0.path_fields[0], LONG_PATH);
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().1, [PaneAction::CommitPath(Document::A, LONG_PATH.to_string())]);
+    }
+
+    #[test]
+    fn the_context_menu_of_a_header_copies_and_reveals_the_path() {
+        use egui_kittest::kittest::Queryable;
+        let items = [("Copy Path", PaneAction::CopyPath(Document::A)), ("Copy File Name", PaneAction::CopyFileName(Document::A)), (paths::REVEAL_LABEL, PaneAction::Reveal(Document::A))];
+        for (target, (item, action)) in ["Base", "A", "Base"].into_iter().zip(items) {
+            let mut harness = long_path_harness();
+            harness.get_by_label(target).click_secondary();
+            harness.run();
+            harness.get_by_label(item).click();
+            harness.run();
+            assert_eq!(harness.state().1, [action], "{item} from {target}");
+        }
+        let mut harness = long_path_harness();
+        harness.get_by_role(egui::Role::TextInput).click_secondary();
+        harness.run();
+        harness.get_by_label("Copy Path");
     }
 
     #[test]

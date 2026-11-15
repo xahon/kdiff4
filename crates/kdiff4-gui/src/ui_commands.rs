@@ -130,6 +130,10 @@ impl Group {
 pub enum UiCommand {
     Open,
     Reload,
+    SwapSides,
+    CopyPath,
+    CopyFileName,
+    RevealFile,
     Save,
     SaveAs,
     CloseTab,
@@ -209,6 +213,10 @@ impl UiCommand {
         match self {
             UiCommand::Open => CommandInfo::new(Group::File, "Open...", &[OPEN_SHORTCUT, OPEN_TAB_SHORTCUT]),
             UiCommand::Reload => CommandInfo::new(Group::File, "Reload", &[RELOAD_SHORTCUT]),
+            UiCommand::SwapSides => CommandInfo::new(Group::File, "Swap Sides", &[]).hint("Exchange A and B, or B and C when three documents are compared, and compare again"),
+            UiCommand::CopyPath => CommandInfo::new(Group::File, "Copy Path", &[]).hint("Copy the path of the document in the pane with the caret"),
+            UiCommand::CopyFileName => CommandInfo::new(Group::File, "Copy File Name", &[]).hint("Copy the file name of the document in the pane with the caret"),
+            UiCommand::RevealFile => CommandInfo::new(Group::File, crate::paths::REVEAL_LABEL, &[]).hint("Show the file of the pane with the caret in the file manager"),
             UiCommand::Save => CommandInfo::new(Group::File, "Save", &[SAVE_SHORTCUT]),
             UiCommand::SaveAs => CommandInfo::new(Group::File, "Save As...", &[SAVE_AS_SHORTCUT]),
             UiCommand::CloseTab => CommandInfo::new(Group::File, "Close Tab", &[CLOSE_TAB_SHORTCUT]),
@@ -288,6 +296,7 @@ pub fn menu_items(menu: Group, c_choosable: bool, has_start_menu: bool) -> Vec<O
         Group::File => vec![
             Some(UiCommand::Open),
             Some(UiCommand::Reload),
+            Some(UiCommand::SwapSides),
             Some(UiCommand::Save),
             Some(UiCommand::SaveAs),
             None,
@@ -350,11 +359,14 @@ pub fn menu_items(menu: Group, c_choosable: bool, has_start_menu: bool) -> Vec<O
 }
 
 
-/// Every UI command, grouped as the Keyboard Shortcuts window and the command palette list them: the menus top to bottom, then what only the toolbar or the tabs offer.
+/// Every UI command, grouped as the Keyboard Shortcuts window and the command palette list them: the menus top to bottom, then what only the pane headers, the toolbar or the tabs offer.
 pub fn all(has_start_menu: bool) -> Vec<UiCommand> {
     let mut commands: Vec<UiCommand> = Vec::new();
     for menu in Group::MENUS {
         commands.extend(menu_items(menu, true, has_start_menu).into_iter().flatten());
+        if menu == Group::File {
+            commands.extend([UiCommand::CopyPath, UiCommand::CopyFileName, UiCommand::RevealFile]);
+        }
         if menu == Group::View {
             commands.push(UiCommand::ToggleOverviewStrip);
         }
@@ -403,7 +415,7 @@ mod tests {
             assert!(!label.is_empty());
             assert!(commands[..index].iter().all(|other| other.info().label != label), "{label} names two commands");
         }
-        for command in [UiCommand::ToggleOverviewStrip, UiCommand::NextTab, UiCommand::ChooseEverywhere(Document::C), UiCommand::AddToStartMenu, UiCommand::CommandPalette] {
+        for command in [UiCommand::SwapSides, UiCommand::CopyPath, UiCommand::CopyFileName, UiCommand::RevealFile, UiCommand::ToggleOverviewStrip, UiCommand::NextTab, UiCommand::ChooseEverywhere(Document::C), UiCommand::AddToStartMenu, UiCommand::CommandPalette] {
             assert!(commands.contains(&command), "{command:?}");
         }
         assert!(!all(false).contains(&UiCommand::AddToStartMenu));

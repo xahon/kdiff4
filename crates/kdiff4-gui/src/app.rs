@@ -1473,7 +1473,69 @@ Shortcut: {}", link.display()),
                     self.change_path(document, Some(path));
                 }
             }
+            PaneAction::CopyPath(document) => self.copy_path(ctx, document, false),
+            PaneAction::CopyFileName(document) => self.copy_path(ctx, document, true),
+            PaneAction::Reveal(document) => self.reveal(document),
         }
+    }
+
+    fn path_of(&self, document: Document) -> Option<PathBuf> {
+        let mirror = self.tab.mirror.as_ref()?;
+        match document {
+            Document::D => mirror.output().and_then(|output| output.path.clone()),
+            source => mirror.document(source).map(|text| text.path.clone()),
+        }
+    }
+
+    /// The document whose pane has the caret, if it has a path: what Copy Path and the like act on outside a header.
+    fn caret_document_with_path(&self) -> Option<Document> {
+        self.tab.panes.caret
+            .as_ref()
+            .map(|(document, _)| document.clone())
+            .filter(|document| self.path_of(document.clone()).is_some())
+    }
+
+    fn copy_path(&self, ctx: &egui::Context, document: Document, name_only: bool) {
+        let Some(path) = self.path_of(document) else { return };
+        let text = match name_only {
+            true => path.file_name().map(|name| name.to_string_lossy().into_owned()),
+            false => Some(path.display().to_string()),
+        };
+        if let Some(text) = text {
+            ctx.copy_text(text);
+        }
+    }
+
+    fn reveal(&mut self, document: Document) {
+        let Some(path) = self.path_of(document) else { return };
+        if let Err(error) = paths::reveal_command(&path).spawn() {
+            self.report_error(format!("Cannot show {} in the file manager: {error}", path.display()));
+        }
+    }
+
+    /// The files of this tab with the sides exchanged: A and B, or B and C when three documents are compared. Labels move with their files.
+    fn swapped_files(&self) -> Option<OpenFiles> {
+        let mut files = self.tab.reopen_files()?;
+        match files.c.as_mut() {
+            Some(c) => {
+                std::mem::swap(&mut files.b, c);
+                std::mem::swap(&mut files.labels.b, &mut files.labels.c);
+            }
+            None => {
+                std::mem::swap(&mut files.a, &mut files.b);
+                std::mem::swap(&mut files.labels.a, &mut files.labels.b);
+            }
+        }
+        Some(files)
+    }
+
+    fn swap_sides(&mut self) {
+        let Some(files) = self.swapped_files() else { return };
+        if self.tab.may_discard_work() && !open_dialog::confirm_swap_sides() {
+            return;
+        }
+        self.tab.form.set_files(&files);
+        self.open_files(files);
     }
 
     fn reload(&mut self) {
@@ -2176,6 +2238,11 @@ Shortcut: {}", link.display()),
         match command {
             UiCommand::Open | UiCommand::Exit | UiCommand::Settings | UiCommand::About | UiCommand::CheckForUpdates => {}
             UiCommand::Reload | UiCommand::Find | UiCommand::FindNext | UiCommand::FindPrevious | UiCommand::Navigate(_) => state.enabled = has_session,
+            UiCommand::SwapSides => state.enabled = has_session && !self.is_opening(),
+            UiCommand::CopyPath | UiCommand::CopyFileName | UiCommand::RevealFile => {
+                state.enabled = self.caret_document_with_path().is_some();
+                state.disabled_hint = Some("Put the caret in the pane of a document that has a path");
+            }
             UiCommand::MarkLines | UiCommand::MarkFunction | UiCommand::MarkAnchor | UiCommand::Heuristics | UiCommand::HeuristicsInside => state.enabled = has_session,
             UiCommand::Fold | UiCommand::Unfold | UiCommand::FoldAll | UiCommand::UnfoldAll => state.enabled = has_session,
             UiCommand::Save | UiCommand::SaveAs => {
@@ -2219,6 +2286,15 @@ Shortcut: {}", link.display()),
         match command {
             UiCommand::Open => self.open_form(),
             UiCommand::Reload => self.reload(),
+            UiCommand::SwapSides => self.swap_sides(),
+            UiCommand::CopyPath | UiCommand::CopyFileName | UiCommand::RevealFile => {
+                if let Some(document) = self.caret_document_with_path() {
+                    match command {
+                        UiCommand::RevealFile => self.reveal(document),
+                        command => self.copy_path(ctx, document, command == UiCommand::CopyFileName),
+                    }
+                }
+            }
             UiCommand::Save => self.save(),
             UiCommand::SaveAs => self.save_as(),
             UiCommand::CloseTab => {
@@ -3994,6 +4070,87 @@ mod tests {
         let (mut app, host, ctx) = app_with_session();
         press(&mut app, &ctx, Key::F5, Modifiers::NONE);
         assert_eq!(sent(app, host), [Command::Reload { confirmed: false }]);
+    }
+
+    #[test]
+    fn swapping_sides_opens_a_and_b_the_other_way_round_with_their_labels() {
+        let (mut app, host, ctx) = app_with_session();
+        let files = app.tab.reopen_files().unwrap();
+        assert!(files.c.is_none());
+        app.run_command(&ctx, UiCommand::SwapSides);
+        let swapped = OpenFiles {
+            a: files.b.clone(),
+            b: files.a.clone(),
+            labels: kdiff4_protocol::Labels { a: files.labels.b.clone(), b: files.labels.a.clone(), c: None },
+            ..files
+        };
+        assert_eq!(sent(app, host), [Command::Open(swapped)]);
+    }
+
+    #[test]
+    fn swapping_sides_of_three_documents_keeps_the_base() {
+        let (mut app, _host, _ctx) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        let mut c = snapshot.documents[1].clone();
+        c.document = Document::C;
+        c.path = PathBuf::from("c.txt");
+        c.label = Some("theirs".to_string());
+        snapshot.documents.push(c);
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        let files = app.tab.reopen_files().unwrap();
+        let swapped = app.swapped_files().unwrap();
+        assert_eq!(swapped.a, files.a);
+        assert_eq!((swapped.b.clone(), swapped.c.clone()), (PathBuf::from("c.txt"), Some(files.b.clone())));
+        assert_eq!((swapped.labels.a, swapped.labels.b, swapped.labels.c), (files.labels.a, Some("theirs".to_string()), files.labels.b));
+        assert_eq!(swapped.output, files.output);
+    }
+
+    #[test]
+    fn swapping_sides_needs_a_session() {
+        let (mut app, host, ctx) = app_with_session();
+        app.tab.mirror = None;
+        assert!(!app.command_state(UiCommand::SwapSides).enabled);
+        app.run_command(&ctx, UiCommand::SwapSides);
+        assert_eq!(sent(app, host), []);
+    }
+
+    #[test]
+    fn the_path_commands_copy_from_the_pane_with_the_caret() {
+        let (mut app, _host, ctx) = app_with_session();
+        for command in [UiCommand::CopyPath, UiCommand::CopyFileName, UiCommand::RevealFile] {
+            assert!(!app.command_state(command).enabled, "{command:?} needs a caret");
+        }
+        let path = app.path_of(Document::B).unwrap();
+        app.tab.panes.caret = Some((Document::B, Cursor::default()));
+        assert!(app.command_state(UiCommand::RevealFile).enabled);
+        let copied = |app: &mut KdiffApp, run: &dyn Fn(&mut KdiffApp, &egui::Context)| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| run(app, ui.ctx()));
+            output.textures_delta.clear();
+            output
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(copied(&mut app, &|app, ctx| app.run_command(ctx, UiCommand::CopyPath)), Some(path.display().to_string()));
+        assert_eq!(copied(&mut app, &|app, ctx| app.run_command(ctx, UiCommand::CopyFileName)), path.file_name().map(|name| name.to_string_lossy().into_owned()));
+        assert_eq!(copied(&mut app, &|app, ctx| app.handle_pane_action(ctx, PaneAction::CopyPath(Document::A))), app.path_of(Document::A).map(|path| path.display().to_string()), "a header copies its own path, wherever the caret is");
+    }
+
+    #[test]
+    fn a_document_without_a_path_has_nothing_to_copy() {
+        let (mut app, _host, ctx) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        snapshot.output.as_mut().unwrap().path = None;
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        app.tab.panes.caret = Some((Document::D, Cursor::default()));
+        assert!(!app.command_state(UiCommand::CopyPath).enabled);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.handle_pane_action(ui.ctx(), PaneAction::CopyPath(Document::D)));
+        output.textures_delta.clear();
+        assert!(output.platform_output.commands.is_empty());
     }
 
     #[test]
