@@ -16,7 +16,7 @@ use crate::open_dialog::path_row_height;
 use crate::overview;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
-use crate::text_view::{self, Caret, CharRuns, FindHits, MarginKind, MenuAction, PointerAction, ViewStyle, Viewport, Wheel};
+use crate::text_view::{self, Caret, CharRuns, FindHits, MarginKind, MenuAction, MergeView, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
 const SPLITTER_HEIGHT: f32 = 0.0;
@@ -52,6 +52,14 @@ pub enum PaneAction {
     SelectRegion(Document, usize),
     /// Copy the selection of the caret to the clipboard.
     Copy,
+    /// Copy the selection of the caret in D, then delete it.
+    Cut,
+    /// Insert the clipboard at the caret in D.
+    Paste,
+    Undo,
+    Redo,
+    /// Toggle the document in this region, from a context menu or an Accept Button.
+    Choose(usize, Document),
     /// Mark the selection in a source pane for alignment.
     MarkSelection(Document),
     /// Mark an anchor in a source pane before this line, which may be one past the last.
@@ -230,6 +238,8 @@ pub struct PaneOptions {
     pub alignment_color: Color32,
     /// Pixels between the lines of the arrows of moved hunks.
     pub inset_arrow_gap: u8,
+    /// How many of the source documents can be chosen for D; 0 for a diff.
+    pub choosable: usize,
 }
 
 /// Which scroll offset a pane follows.
@@ -288,12 +298,18 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         whitespace: options.whitespace.clone(),
         alignment_color: None,
         inset_arrow_gap: f32::from(options.inset_arrow_gap),
+        merge: None,
     };
+    let documents = Document::ALL;
+    let merge = Some(&documents[..options.choosable.min(documents.len())])
+        .filter(|choosable| !choosable.is_empty())
+        .map(|choosable| MergeView { regions: mirror.merge(), choosable, own: None });
     let source_style = ViewStyle {
         alignment_color: Some(options.alignment_color),
         ..style(if options.gutters { MarginKind::Gutters } else { MarginKind::Nothing })
     };
-    let output_style = style(MarginKind::Marks);
+    let output_style = ViewStyle { merge, ..style(MarginKind::Marks) };
+    let source_style = ViewStyle { merge, ..source_style };
     let mut actions = Vec::new();
     state.set_independent_scroll(options.independent_scroll, mirror.is_aligned());
     if let Some(region) = state.jump
@@ -531,6 +547,10 @@ fn source_columns(ui: &mut Ui, style: &ViewStyle<'_>, mirror: &Mirror, state: &m
             let shared = state.scroll_of(group.clone()).offset.clone();
             let row_height = text_view::row_height(column);
             let given = folded_offset(rows, shared.clone(), row_height.clone());
+            let style = &ViewStyle {
+                merge: style.merge.map(|merge| MergeView { own: Some(text.document.clone()), ..merge }),
+                ..style.clone()
+            };
             let scroll = pane(
                 column,
                 style,
@@ -691,12 +711,18 @@ fn pane(
                         Some(PointerAction::SelectWord(position)) => actions.push(PaneAction::SelectWord(document.clone(), position)),
                         Some(PointerAction::SelectLine(line)) => actions.push(PaneAction::SelectLine(document.clone(), line)),
                         Some(PointerAction::SelectRegion(region)) => actions.push(PaneAction::SelectRegion(document.clone(), region)),
+                        Some(PointerAction::ChooseRegion(region)) => actions.push(PaneAction::Choose(region, document.clone())),
                         Some(PointerAction::SetMarkLines(number, start, end)) => actions.push(PaneAction::SetAlignmentMarkLines(document.clone(), number, start..end)),
                         Some(PointerAction::ToggleFold(line)) => actions.push(PaneAction::ToggleFold(document.clone(), line)),
                         None => {}
                     }
                     match response.menu {
                         Some(MenuAction::Copy) => actions.push(PaneAction::Copy),
+                        Some(MenuAction::Cut) => actions.push(PaneAction::Cut),
+                        Some(MenuAction::Paste) => actions.push(PaneAction::Paste),
+                        Some(MenuAction::Undo) => actions.push(PaneAction::Undo),
+                        Some(MenuAction::Redo) => actions.push(PaneAction::Redo),
+                        Some(MenuAction::Choose(region, chosen)) => actions.push(PaneAction::Choose(region, chosen)),
                         Some(MenuAction::MarkSelection) => actions.push(PaneAction::MarkSelection(document.clone())),
                         Some(MenuAction::MarkAnchor(position)) => actions.push(PaneAction::MarkAnchor(document.clone(), position)),
                         Some(MenuAction::RemoveMark(number)) => actions.push(PaneAction::RemoveAlignmentMark(document.clone(), number)),

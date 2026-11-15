@@ -11,6 +11,14 @@ use crate::editing::{self, Edit, Lines};
 use crate::folding::Folds;
 use crate::rows::{self, RowMap, Rows};
 
+/// The documents chosen for a region, in order; none while it is unresolved or holds a hand edit.
+pub fn chosen(state: &RegionMerge) -> &[Document] {
+    match &state.choice {
+        Choice::Hunks(documents) if !state.edited => documents,
+        _ => &[],
+    }
+}
+
 /// The client's copy of D.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputMirror {
@@ -327,6 +335,11 @@ impl Mirror {
     /// The revision a choice command is based on, or `None` while local edits are unconfirmed: their deltas may join regions, so region indices aren't known yet.
     pub fn choice_base(&self) -> Option<Revision> {
         (self.pending_edits.is_empty() && !self.awaiting_resync && !self.merge.is_empty()).then(|| self.revision.clone())
+    }
+
+    /// The merge state of every region; empty for a diff.
+    pub fn merge(&self) -> &[RegionMerge] {
+        &self.merge
     }
 
     /// The choice after toggling `document` in region `region`: added at the end, or removed if it is already chosen. An unresolved or hand-edited region starts from no choice, and removing the last chosen hunk makes the region unresolved again.

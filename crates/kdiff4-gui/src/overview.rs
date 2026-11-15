@@ -713,6 +713,7 @@ mod tests {
                     whitespace: WhitespaceConfig::default(),
                     alignment_color: None,
                     inset_arrow_gap: 1.0,
+                    merge: None,
                 };
                 let shown = ui.scope(|ui| show(ui, &test.mirror, &test.panes, &style));
                 test.actions.extend(shown.inner);

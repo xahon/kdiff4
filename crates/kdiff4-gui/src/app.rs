@@ -1443,6 +1443,11 @@ Shortcut: {}", link.display()),
                 }
             }
             PaneAction::Copy => self.copy_selection(ctx),
+            PaneAction::Cut => self.cut_selection(ctx),
+            PaneAction::Paste => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+            PaneAction::Undo => self.undo_redo(ctx, Command::Undo),
+            PaneAction::Redo => self.undo_redo(ctx, Command::Redo),
+            PaneAction::Choose(region, document) => self.choose_in(region, document),
             PaneAction::ToggleFold(document, line) => self.toggle_fold(document, line),
             PaneAction::MarkSelection(_) => self.mark_selected_lines(),
             PaneAction::MarkAnchor(document, position) => self.mark_anchor(document, position),
@@ -1554,12 +1559,7 @@ Shortcut: {}", link.display()),
                 egui::Event::Text(text) if document == Document::D && !text.chars().any(char::is_control) => self.edit_output(EditKey::Insert(text)),
                 egui::Event::Paste(text) if document == Document::D => self.edit_output(EditKey::Insert(text)),
                 egui::Event::Copy => self.copy_selection(ctx),
-                egui::Event::Cut => {
-                    self.copy_selection(ctx);
-                    if document == Document::D && self.tab.panes.caret.is_some_and(|(_, cursor)| cursor.has_selection()) {
-                        self.edit_output(EditKey::Delete);
-                    }
-                }
+                egui::Event::Cut => self.cut_selection(ctx),
                 _ => {}
             }
         }
@@ -1635,6 +1635,14 @@ Shortcut: {}", link.display()),
         }
         if let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) {
             ctx.copy_text(editing::selected_text(lines, cursor));
+        }
+    }
+
+    /// Copies the selection of the caret, and deletes it when it is in D.
+    fn cut_selection(&mut self, ctx: &egui::Context) {
+        self.copy_selection(ctx);
+        if self.tab.panes.caret.is_some_and(|(document, cursor)| document == Document::D && cursor.has_selection()) {
+            self.edit_output(EditKey::Delete);
         }
     }
 
@@ -1714,14 +1722,25 @@ Shortcut: {}", link.display()),
             self.report_error("Put the caret in a region to choose for it".to_string());
             return;
         }
-        let Some(base) = self.tab.mirror.as_ref().and_then(Mirror::choice_base) else { return };
         let Some(region) = self.caret_region() else {
             self.report_error("The caret is not in a region".to_string());
             return;
         };
+        self.choose_in(region, document);
+    }
+
+    /// Toggles `document` in `region`, whatever the caret is in: from a context menu or an Accept Button.
+    fn choose_in(&mut self, region: usize, document: Document) {
         let Some(mirror) = self.tab.mirror.as_ref() else { return };
+        let Some(base) = mirror.choice_base() else { return };
         let Some(choice) = mirror.toggled_choice(region, document) else { return };
         self.send(Command::SetChoice { base, region, choice }, Pending::Choose(Some(region)));
+    }
+
+    /// Whether `document` is chosen for the region with the caret.
+    fn chosen_at_caret(&self, document: Document) -> bool {
+        let state = self.caret_region().zip(self.tab.mirror.as_ref()).and_then(|(region, mirror)| mirror.merge().get(region));
+        state.is_some_and(|state| crate::mirror::chosen(state).contains(&document))
     }
 
     fn choose_for_unresolved(&mut self, document: Document) {
@@ -2293,6 +2312,16 @@ Shortcut: {}", link.display()),
         let mut independent_toggled = false;
         let ignore_whitespace_on = self.ignores_whitespace();
         let mut ignore_whitespace_toggled = false;
+        let mut clicked_command = None;
+        let merge_buttons: Vec<(UiCommand, String, bool, bool, Icon)> = [(Navigation::PreviousConflict, "Prev Conflict", icons::PREVIOUS_CONFLICT), (Navigation::NextConflict, "Next Conflict", icons::NEXT_CONFLICT)]
+            .into_iter()
+            .map(|(to, label, icon)| (UiCommand::Navigate(to), label.to_string(), false, is_merge, icon))
+            .chain(Document::ALL.iter().take(3).map(|document| {
+                let command = UiCommand::ChooseHere(document.clone());
+                let enabled = self.command_state(command.clone()).enabled;
+                (command, document.letter().to_string(), self.chosen_at_caret(document.clone()), enabled, icons::CHOOSE)
+            }))
+            .collect();
         let mut frame = egui::Frame::side_top_panel(ui.style());
         frame.inner_margin.bottom *= 2;
         egui::Panel::top("toolbar").show_separator_line(false).frame(frame).show(ui, |ui| {
@@ -2325,8 +2354,20 @@ Shortcut: {}", link.display()),
                 {
                     ignore_whitespace_toggled = true;
                 }
+                ui.separator();
+                for (command, label, on, enabled, icon) in merge_buttons {
+                    let info = command.info();
+                    let hint = hint_with_shortcut(&info.label, &ui_commands::shortcut_text(ui.ctx(), &info.shortcuts));
+                    let response = toolbar_toggle(ui, &label, on, enabled, icon).on_hover_text(hint);
+                    if enabled && response.clicked() {
+                        clicked_command = Some(command);
+                    }
+                }
             });
         });
+        if let Some(command) = clicked_command {
+            self.run_command(&ui.ctx().clone(), command);
+        }
         if toggled {
             self.toggle_void_space();
         }
@@ -2443,6 +2484,7 @@ Shortcut: {}", link.display()),
             independent_scroll: view.independent_scroll,
             alignment_color: egui::Color32::from_rgba_unmultiplied(view.alignment_color[0], view.alignment_color[1], view.alignment_color[2], view.alignment_color[3]),
             inset_arrow_gap: view.inset_arrow_gap,
+            choosable: self.choosable().len(),
         }
     }
 
@@ -2924,6 +2966,7 @@ fn toolbar_toggle(ui: &mut egui::Ui, label: &str, on: bool, enabled: bool, image
     let galley = ui.painter().layout_no_wrap(label.to_string(), egui::TextStyle::Button.resolve(ui.style()), color);
     let padding = ui.spacing().button_padding;
     let (rect, response) = ui.allocate_exact_size(toolbar_button_size(galley.size(), padding), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, on, label));
     let fill = if on {
         ui.visuals().selection.bg_fill
     } else {
@@ -3996,6 +4039,70 @@ mod tests {
         assert!(!app.command_state(UiCommand::CommandPalette).enabled);
         press(&mut app, &ctx, Key::A, Modifiers::COMMAND.plus(Modifiers::SHIFT));
         assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn a_choice_from_a_pane_toggles_the_document_in_that_region_without_a_caret() {
+        let (mut app, host, ctx) = app_with_session();
+        assert!(app.tab.panes.caret.is_none());
+        app.handle_pane_action(&ctx, PaneAction::Choose(0, Document::A));
+        app.handle_pane_action(&ctx, PaneAction::Choose(1, Document::A));
+        let choices: Vec<(usize, kdiff4_protocol::Choice)> = sent(app, host)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::SetChoice { region, choice, .. } => Some((region, choice)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(choices, [(0, kdiff4_protocol::Choice::Hunks(vec![Document::B, Document::A])), (1, kdiff4_protocol::Choice::Unresolved)]);
+    }
+
+    #[test]
+    fn undo_and_redo_from_the_menu_of_d_are_sent_to_the_engine() {
+        let (mut app, host, ctx) = app_with_session();
+        app.handle_pane_action(&ctx, PaneAction::Undo);
+        app.handle_pane_action(&ctx, PaneAction::Redo);
+        let commands = sent(app, host);
+        assert!(commands.contains(&Command::Undo) && commands.contains(&Command::Redo));
+    }
+
+    #[test]
+    fn paste_from_the_menu_of_d_asks_for_the_clipboard() {
+        let (mut app, _host, ctx) = app_with_session();
+        let mut output = ctx.run_logic(&egui::RawInput::default(), |ctx| app.handle_pane_action(ctx, PaneAction::Paste));
+        assert_eq!(output.viewport_commands.remove(&egui::ViewportId::ROOT).unwrap(), [egui::ViewportCommand::RequestPaste]);
+    }
+
+    #[test]
+    fn the_toolbar_goes_to_conflicts_and_chooses_for_the_region_with_the_caret() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let (mut app, host, _ctx) = app_with_session();
+        app.tab.panes.caret = Some((Document::A, Default::default()));
+        assert!(app.chosen_at_caret(Document::B) && !app.chosen_at_caret(Document::A));
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 200.0)).with_context_setup(egui_extras::install_image_loaders).build_ui_state(|ui, app: &mut KdiffApp| app.show_toolbar(ui), app);
+        harness.run_steps(3);
+        assert_eq!(harness.get_by_label("B").accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
+        assert_eq!(harness.get_by_label("A").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False));
+        assert!(harness.get_by_label("C").accesskit_node().is_disabled(), "the merge has two sources");
+        harness.get_by_label("Next Conflict").click();
+        harness.run_steps(2);
+        harness.get_by_label("A").click();
+        harness.run_steps(2);
+        let commands = sent(harness.into_state(), host);
+        assert!(commands.iter().any(|command| matches!(command, Command::Navigate { to: Navigation::NextConflict, .. })));
+        assert!(commands.iter().any(|command| matches!(command, Command::SetChoice { region: 0, choice: kdiff4_protocol::Choice::Hunks(documents), .. } if *documents == [Document::B, Document::A])));
+    }
+
+    #[test]
+    fn the_merge_buttons_of_the_toolbar_need_a_merge() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let (mut app, _host, _ctx) = app_with_session();
+        app.tab.mirror = None;
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 200.0)).with_context_setup(egui_extras::install_image_loaders).build_ui_state(|ui, app: &mut KdiffApp| app.show_toolbar(ui), app);
+        harness.run_steps(3);
+        for label in ["Prev Conflict", "Next Conflict", "A", "B", "C"] {
+            assert!(harness.get_by_label(label).accesskit_node().is_disabled(), "{label}");
+        }
     }
 
     #[test]

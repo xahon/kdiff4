@@ -4,7 +4,7 @@ use egui::epaint::text::cursor::CCursor;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Align2, Color32, CursorIcon, FontId, Galley, Key, LayerId, Modifiers, Order, Painter, PointerButton, Pos2, Rangef, Rect, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextStyle, Ui, Vec2, pos2, vec2};
 
-use kdiff4_protocol::{AlignmentMark, Document, LineCharRuns};
+use kdiff4_protocol::{AlignmentMark, Document, LineCharRuns, RegionMerge};
 
 use crate::alignment_gutter::{self, PaneMarks, Place};
 use crate::autoscroll::{self, MiddleInput, MiddleScroll};
@@ -13,8 +13,10 @@ use crate::config::WhitespaceConfig;
 use crate::editing::{self, Cursor, Lines, Position};
 use crate::find::Match;
 use crate::folding::{self, Folds};
+use crate::mirror;
 use crate::rows::{Block, Mark, PaneRow, Rows};
 use crate::theme::{DocumentColors, Palette};
+use crate::ui_commands::UiCommand;
 
 /// Extra height of a row above the font's line height, so carets and text don't touch the next row.
 const ROW_PADDING: f32 = 2.0;
@@ -80,6 +82,25 @@ pub struct ViewStyle<'a> {
     pub alignment_color: Option<Color32>,
     /// Pixels between the lines of the arrows of moved hunks.
     pub inset_arrow_gap: f32,
+    /// What the merge lets this pane offer; `None` for a diff.
+    pub merge: Option<MergeView<'a>>,
+}
+
+/// What a merge lets a pane offer: choosing documents for a region, from the context menu and from the Accept Button of its gutter blocks, and, in D, editing from the context menu.
+#[derive(Debug, Clone, Copy)]
+pub struct MergeView<'a> {
+    /// The merge state of every region, which tells what is chosen.
+    pub regions: &'a [RegionMerge],
+    /// The documents that can be chosen, in order.
+    pub choosable: &'a [Document],
+    /// The document of this source pane, which its Accept Buttons choose; `None` in D.
+    pub own: Option<Document>,
+}
+
+impl MergeView<'_> {
+    fn chosen(&self, region: usize) -> &[Document] {
+        self.regions.get(region).map_or(&[], mirror::chosen)
+    }
 }
 
 /// The character-level diff of a source pane's lines; `sources` is how many source documents the rows have.
@@ -152,6 +173,8 @@ pub enum PointerAction {
     SelectLine(usize),
     /// A click on a gutter block of this region: make it current.
     SelectRegion(usize),
+    /// A click on the Accept Button of a gutter block of this region: toggle the pane's document in it.
+    ChooseRegion(usize),
     /// A drag of an edge or anchor of the alignment column ended: the mark with this number now takes the lines from the second to the third (an empty range for an anchor).
     SetMarkLines(u32, usize, usize),
     /// A click on the fold button of the range whose header is this line, or on its Fold Ellipsis: fold or unfold it.
@@ -170,6 +193,14 @@ struct MarkDrag {
 pub enum MenuAction {
     /// Copy the selection of the caret to the clipboard.
     Copy,
+    /// Copy the selection of the caret in D, then delete it.
+    Cut,
+    /// Insert the clipboard at the caret in D.
+    Paste,
+    Undo,
+    Redo,
+    /// Toggle the document in this region.
+    Choose(usize, Document),
     /// Mark the selection of the caret for alignment.
     MarkSelection,
     /// Mark an anchor before this line, one past the last for the end of the text.
@@ -565,11 +596,34 @@ pub fn show(
             });
         }
     }
+    let region_id = ui.make_persistent_id((id_salt, "menu_region"));
+    if style.merge.is_some()
+        && response.secondary_clicked()
+        && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
+    {
+        let region = row_at(pointer.y - output.inner_rect.min.y + scroll.y, row_height, rows.len())
+            .and_then(|row| rows.row(row))
+            .filter(|pane_row| pane_row.block.is_some())
+            .and_then(|pane_row| pane_row.region);
+        ui.data_mut(|data| data.insert_temp(region_id, region));
+    }
     let can_copy = caret.is_some_and(|caret| caret.cursor.has_selection());
     let can_mark_selection = caret.is_some_and(|caret| caret.void_row.is_none());
+    let editable = style.merge.is_some_and(|merge| merge.own.is_none());
     response.context_menu(|ui| {
+        if editable && ui.add_enabled(can_copy, egui::Button::new("Cut")).clicked() {
+            menu = Some(MenuAction::Cut);
+        }
         if ui.add_enabled(can_copy, egui::Button::new("Copy")).clicked() {
             menu = Some(MenuAction::Copy);
+        }
+        if editable {
+            menu = show_edit_menu(ui, caret.is_some()).or(menu);
+        }
+        if let Some(merge) = style.merge {
+            ui.separator();
+            let region = ui.data(|data| data.get_temp::<Option<usize>>(region_id)).flatten();
+            menu = show_choose_menu(ui, merge, region).or(menu);
         }
         let target = ui.data(|data| data.get_temp::<MenuTarget>(target_id)).filter(|_| style.alignment_color.is_some());
         if let Some(target) = target {
@@ -612,6 +666,25 @@ pub fn show(
             ui.data_mut(|data| data.insert_temp(drag_id, None::<MarkDrag>));
         }
     }
+    let accept = style.merge.and_then(|merge| merge.own.filter(|own| style.margin == MarginKind::Gutters && merge.choosable.contains(own)).map(|own| (merge, own)));
+    let first_visible = if row_height > 0.0 { (scroll.y / row_height).floor() as usize } else { 0 };
+    let accept_at = |pointer: Pos2| {
+        accept?;
+        accept_region(rows, margin, style.margin, pointer.x - output.inner_rect.min.x, pointer.y - output.inner_rect.min.y + scroll.y, row_height, first_visible)
+    };
+    if let Some((merge, own)) = accept {
+        let hovered = hover_position.filter(|_| response.hovered() && mark_drag.is_none()).and_then(gutter_at);
+        let left = output.inner_rect.min.x + margin.gutter_left();
+        paint_accept_buttons(&ui.painter_at(output.inner_rect), rows, merge, own, hovered, first_visible, pos2(left, output.inner_rect.min.y - scroll.y), vec2(margin.column, row_height), output.inner_rect.height(), palette.text);
+        if let Some(region) = hover_position.filter(|_| response.hovered() && mark_drag.is_none()).and_then(accept_at) {
+            let text = if merge.chosen(region).contains(&own) {
+                format!("Remove {} from this region of D", own.letter())
+            } else {
+                format!("Choose {} for this region", own.letter())
+            };
+            response.clone().on_hover_text(text);
+        }
+    }
     if mark_drag.is_none() && response.hovered() && hover_position.and_then(grab_at).is_some() {
         ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
     } else if mark_drag.is_none() && response.hovered() && (hover_position.and_then(gutter_at).is_some() || hover_position.and_then(fold_at).is_some()) {
@@ -640,6 +713,7 @@ pub fn show(
     // A press on a gutter selects its region; the rest of that click and drag must not select text.
     let gutter_press_id = ui.make_persistent_id((id_salt, "gutter_press"));
     let gutter_region_pressed = pointer_position.filter(|_| pressed).and_then(gutter_at);
+    let accept_pressed = pointer_position.filter(|_| pressed && mark_drag.is_none()).and_then(accept_at);
     let fold_pressed = pointer_position.filter(|_| pressed && mark_drag.is_none()).and_then(fold_at);
     if pressed {
         ui.data_mut(|data| data.insert_temp(gutter_press_id, gutter_region_pressed.is_some() || fold_pressed.is_some()));
@@ -673,6 +747,7 @@ pub fn show(
     }
     let pointer = match pointer_position {
         _ if mark_drag.is_some() => resized.map(|(number, start, end)| PointerAction::SetMarkLines(number, start, end)),
+        _ if accept_pressed.is_some() => accept_pressed.map(PointerAction::ChooseRegion),
         _ if gutter_region_pressed.is_some() => gutter_region_pressed.map(PointerAction::SelectRegion),
         _ if fold_pressed.is_some() => fold_pressed.map(PointerAction::ToggleFold),
         _ if in_gutter_press => None,
@@ -707,6 +782,44 @@ pub fn show(
         viewport,
         wheel,
     }
+}
+
+/// The editing part of D's context menu, below Cut and Copy: Paste, which needs the caret in D, then Undo and Redo.
+fn show_edit_menu(ui: &mut Ui, has_caret: bool) -> Option<MenuAction> {
+    let mut action = None;
+    if ui
+        .add_enabled(has_caret, egui::Button::new("Paste"))
+        .on_disabled_hover_text("Put the caret in D first")
+        .clicked()
+    {
+        action = Some(MenuAction::Paste);
+    }
+    ui.separator();
+    if ui.button("Undo").clicked() {
+        action = Some(MenuAction::Undo);
+    }
+    if ui.button("Redo").clicked() {
+        action = Some(MenuAction::Redo);
+    }
+    action
+}
+
+/// The merge part of the context menu: one item per document that can be chosen, checked when it is chosen in `region`, the region that differs under the pointer.
+fn show_choose_menu(ui: &mut Ui, merge: MergeView<'_>, region: Option<usize>) -> Option<MenuAction> {
+    let chosen = region.map_or(&[][..], |region| merge.chosen(region));
+    let mut action = None;
+    for document in merge.choosable {
+        let mut checked = chosen.contains(document);
+        let clicked = ui
+            .add_enabled(region.is_some(), egui::Checkbox::new(&mut checked, UiCommand::ChooseHere(document.clone()).info().label))
+            .on_disabled_hover_text("Open the menu on a region that differs")
+            .clicked();
+        if clicked && let Some(region) = region {
+            action = Some(MenuAction::Choose(region, document.clone()));
+            ui.close();
+        }
+    }
+    action
 }
 
 /// The alignment part of the context menu of a source pane: for each mark under the pointer its number and removal, then marking the selection and anchors.
@@ -870,6 +983,40 @@ fn gutter_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, conte
     let pane_row = rows.row(row)?;
     pane_row.block?;
     pane_row.region
+}
+
+/// The region whose Accept Button is under a point, given like for `gutter_region`. The button is on the first row of a gutter block, or on the first row the view shows of a block that starts above it.
+fn accept_region(rows: Rows<'_>, margin: Margin, kind: MarginKind, x: f32, content_y: f32, row_height: f32, first_visible: usize) -> Option<usize> {
+    let region = gutter_region(rows, margin, kind, x, content_y, row_height)?;
+    let row = row_at(content_y, row_height, rows.len())?;
+    (row == first_visible || rows.block_edges(row).0).then_some(region)
+}
+
+/// The Accept Buttons of the gutter blocks the view shows, each a cell of `cell` size in the column that starts at `origin`, the top left of row 0: a check mark where `own` is chosen for the block's region, and an arrow toward D on the block of the `hovered` region.
+fn paint_accept_buttons(painter: &Painter, rows: Rows<'_>, merge: MergeView<'_>, own: Document, hovered: Option<usize>, first_visible: usize, origin: Pos2, cell: Vec2, height: f32, color: Color32) {
+    if cell.y <= 0.0 {
+        return;
+    }
+    let shown = (height / cell.y).ceil() as usize + 1;
+    let stroke = Stroke::new(1.5, color);
+    let unit = cell.min_elem() / 5.0;
+    for row in first_visible..(first_visible + shown).min(rows.len()) {
+        if row != first_visible && !rows.block_edges(row).0 {
+            continue;
+        }
+        let region = rows.row(row).filter(|pane_row| pane_row.block.is_some()).and_then(|pane_row| pane_row.region);
+        let center = Rect::from_min_size(origin + vec2(0.0, row as f32 * cell.y), cell).center();
+        match region {
+            Some(region) if merge.chosen(region).contains(&own) => {
+                painter.add(Shape::line(vec![center + vec2(-unit, 0.0), center + vec2(-unit * 0.25, unit * 0.8), center + vec2(unit, -unit * 0.8)], stroke));
+            }
+            Some(region) if hovered == Some(region) => {
+                painter.line_segment([center + vec2(0.0, -unit), center + vec2(0.0, unit)], stroke);
+                painter.add(Shape::line(vec![center + vec2(-unit * 0.8, unit * 0.2), center + vec2(0.0, unit), center + vec2(unit * 0.8, unit * 0.2)], stroke));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Decimal digits of the largest line number, at least one.
@@ -1390,6 +1537,7 @@ mod tests {
             whitespace: WhitespaceConfig::default(),
             alignment_color: None,
             inset_arrow_gap: 1.0,
+            merge: None,
         }
     }
 
@@ -1610,7 +1758,7 @@ mod tests {
         harness
     }
 
-    fn click(harness: &mut egui_kittest::Harness<'_, FoldTest>, pos: Pos2) {
+    fn click<State>(harness: &mut egui_kittest::Harness<'_, State>, pos: Pos2) {
         harness.hover_at(pos);
         harness.run_steps(2);
         for pressed in [true, false] {
@@ -1654,7 +1802,7 @@ mod tests {
         assert!(matches!(harness.state().pointer, Some(PointerAction::Press { position: Position { line: 2, column: 1 }, .. })));
     }
 
-    fn right_click(harness: &mut egui_kittest::Harness<'_, MenuTest>, pos: Pos2) {
+    fn right_click<State>(harness: &mut egui_kittest::Harness<'_, State>, pos: Pos2) {
         harness.hover_at(pos);
         harness.event(egui::Event::PointerButton {
             pos,
@@ -2138,6 +2286,161 @@ mod tests {
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 36.0, 20.0, 16.0), None, "the text");
         assert_eq!(gutter_region(rows, margin, MarginKind::Gutters, 25.0, 60.0, 16.0), None, "below the last row");
         assert_eq!(gutter_region(rows, margin, MarginKind::Nothing, 25.0, 20.0, 16.0), None);
+    }
+
+    /// Three rows: a plain one of region 0, then a gutter block of two rows of region 1, the second a void.
+    fn block_rows() -> RowMap {
+        let block = Some(Block {
+            index: 0,
+            origin: None,
+            style: None,
+        });
+        RowMap::from_rows(vec![
+            PaneRow {
+                line: Some(0),
+                region: Some(0),
+                ..PaneRow::default()
+            },
+            PaneRow {
+                line: Some(1),
+                region: Some(1),
+                block,
+                ..PaneRow::default()
+            },
+            PaneRow {
+                region: Some(1),
+                block,
+                ..PaneRow::default()
+            },
+        ])
+    }
+
+    #[test]
+    fn the_accept_button_is_on_the_first_row_of_a_block_or_the_first_row_shown_of_it() {
+        let map = block_rows();
+        let rows = Rows::Mapped(&map);
+        let margin = Margin {
+            arrows: 0.0,
+            numbers: 20.0,
+            fold: 0.0,
+            alignment: 0.0,
+            column: 16.0,
+        };
+        assert_eq!(accept_region(rows, margin, MarginKind::Gutters, 25.0, 20.0, 16.0, 0), Some(1), "the first row of the block");
+        assert_eq!(accept_region(rows, margin, MarginKind::Gutters, 25.0, 40.0, 16.0, 0), None, "a later row of the block selects the region");
+        assert_eq!(accept_region(rows, margin, MarginKind::Gutters, 25.0, 40.0, 16.0, 2), Some(1), "the block starts above the view");
+        assert_eq!(accept_region(rows, margin, MarginKind::Gutters, 25.0, 5.0, 16.0, 0), None, "a row without a block");
+        assert_eq!(accept_region(rows, margin, MarginKind::Gutters, 40.0, 20.0, 16.0, 0), None, "the text");
+    }
+
+    /// What a pane of a merge reported: `own` is its document, `None` for D. Region 1 has B chosen.
+    struct MergeTest {
+        own: Option<Document>,
+        caret: Option<Caret>,
+        menu: Option<MenuAction>,
+        pointer: Option<PointerAction>,
+        origin: Pos2,
+        row_height: f32,
+        gutter_left: f32,
+    }
+
+    fn merge_harness(own: Option<Document>, caret: Option<Caret>) -> egui_kittest::Harness<'static, MergeTest> {
+        let test = MergeTest { own, caret, menu: None, pointer: None, origin: Pos2::ZERO, row_height: 0.0, gutter_left: 0.0 };
+        let mut harness = egui_kittest::Harness::builder().with_size(vec2(400.0, 300.0)).with_step_dt(0.01).build_ui_state(
+            |ui, test: &mut MergeTest| {
+                let text = "a\nb\n";
+                let ranges = editing::editor_lines(text);
+                let lines = Lines { text, ranges: &ranges };
+                let unresolved = RegionMerge { choice: kdiff4_protocol::Choice::Unresolved, edited: false, output_lines: 0 };
+                let regions = [unresolved.clone(), RegionMerge { choice: kdiff4_protocol::Choice::Hunks(vec![Document::B]), ..unresolved }];
+                let choosable = [Document::A, Document::B];
+                let style = ViewStyle {
+                    merge: Some(MergeView { regions: &regions, choosable: &choosable, own: test.own }),
+                    ..style(true, MarginKind::Gutters)
+                };
+                test.origin = ui.max_rect().min;
+                test.row_height = row_height(ui);
+                let font_id = TextStyle::Monospace.resolve(ui.style());
+                let char_width = ui.painter().layout_no_wrap("0".to_string(), font_id, PLAIN).size().x;
+                test.gutter_left = margin_widths(&style, lines.count(), char_width, test.row_height, 0).gutter_left();
+                let map = block_rows();
+                let marks = PaneMarks { marks: &[], highest: 0, insets: &[] };
+                let response = show(ui, "pane", lines, Rows::Mapped(&map), None, test.caret, false, None, &style, marks, None, None);
+                test.menu = response.menu.or(test.menu.take());
+                test.pointer = response.pointer.or(test.pointer.take());
+            },
+            test,
+        );
+        harness.run_steps(4);
+        harness
+    }
+
+    fn merge_text(test: &MergeTest, row: usize) -> Pos2 {
+        test.origin + vec2(300.0, (row as f32 + 0.5) * test.row_height)
+    }
+
+    fn merge_gutter(test: &MergeTest, row: usize) -> Pos2 {
+        test.origin + vec2(test.gutter_left + test.row_height / 2.0, (row as f32 + 0.5) * test.row_height)
+    }
+
+    #[test]
+    fn the_menu_of_a_merge_pane_chooses_for_the_region_under_the_pointer() {
+        let mut harness = merge_harness(Some(Document::A), None);
+        let pos = merge_text(harness.state(), 1);
+        right_click(&mut harness, pos);
+        assert!(harness.query_by_label("Cut").is_none(), "a source pane is not edited");
+        assert!(harness.query_by_label("Paste").is_none());
+        assert_eq!(harness.get_by_label("Choose B Here").accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
+        assert_eq!(harness.get_by_label("Choose A Here").accesskit_node().toggled(), Some(egui::accesskit::Toggled::False));
+        harness.get_by_label("Choose A Here").click();
+        harness.run_steps(4);
+        assert_eq!(harness.state().menu, Some(MenuAction::Choose(1, Document::A)));
+    }
+
+    #[test]
+    fn choosing_from_the_menu_needs_a_region_that_differs() {
+        let mut harness = merge_harness(Some(Document::A), None);
+        let pos = merge_text(harness.state(), 0);
+        right_click(&mut harness, pos);
+        assert!(harness.get_by_label("Choose A Here").accesskit_node().is_disabled());
+        assert!(harness.get_by_label("Choose B Here").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn the_menu_of_d_edits_it() {
+        let mut harness = merge_harness(None, None);
+        let pos = merge_text(harness.state(), 1);
+        right_click(&mut harness, pos);
+        assert!(harness.get_by_label("Cut").accesskit_node().is_disabled(), "nothing is selected");
+        assert!(harness.get_by_label("Paste").accesskit_node().is_disabled(), "the caret is elsewhere");
+        harness.get_by_label("Choose A Here");
+        harness.get_by_label("Undo").click();
+        harness.run_steps(4);
+        assert_eq!(harness.state().menu, Some(MenuAction::Undo));
+
+        let mut harness = merge_harness(None, selection(0, 1));
+        let pos = merge_text(harness.state(), 1);
+        right_click(&mut harness, pos);
+        harness.get_by_label("Paste");
+        harness.get_by_label("Cut").click();
+        harness.run_steps(4);
+        assert_eq!(harness.state().menu, Some(MenuAction::Cut));
+    }
+
+    #[test]
+    fn the_accept_button_chooses_the_panes_document_and_the_rest_of_the_block_selects_the_region() {
+        let mut harness = merge_harness(Some(Document::A), None);
+        let button = merge_gutter(harness.state(), 1);
+        click(&mut harness, button);
+        assert_eq!(harness.state().pointer, Some(PointerAction::ChooseRegion(1)));
+        let below = merge_gutter(harness.state(), 2);
+        click(&mut harness, below);
+        assert_eq!(harness.state().pointer, Some(PointerAction::SelectRegion(1)));
+
+        let mut harness = merge_harness(None, None);
+        let button = merge_gutter(harness.state(), 1);
+        click(&mut harness, button);
+        assert_ne!(harness.state().pointer, Some(PointerAction::ChooseRegion(1)), "D has no Accept Buttons");
     }
 
     #[test]
