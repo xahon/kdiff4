@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use kdiff4_protocol::engine::{ComparisonOptions, MergeStatus, RegionStatus};
 use kdiff4_protocol::{
-    Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, EolChoice, EolStyle, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, Response,
+    Alignments, Change, Choice, Client, Command, CurrentRegion, Delta, Document, EolChoice, EolStyle, ErrorKind, Event, HostMessage, Labels, MarkStatus, Navigation, OpenFiles, OutputEdit, OutputReplacement, Response,
     Revision, Snapshot, in_process,
 };
 
@@ -378,6 +378,46 @@ fn edit_save_and_reload_go_through_deltas() {
     let id = client.send(Command::Resync).unwrap();
     let snapshot = expect_snapshot(&client);
     assert_eq!(snapshot.revision, Revision(7));
+    expect_ok(&client, id);
+
+    drop(client);
+    host.join().unwrap();
+}
+
+#[test]
+fn replacements_arrive_as_one_delta_that_one_undo_takes_back() {
+    let dir = temp_dir("replace");
+    let text = "one foo\ntwo\nfoo three\n";
+    let files = OpenFiles {
+        a: write(&dir, "a.txt", text),
+        b: write(&dir, "b.txt", text),
+        c: None,
+        output: Some(dir.join("out.txt")),
+        labels: Labels::default(),
+    };
+    let (mut client, host) = start();
+    let id = client.send(Command::Open(files)).unwrap();
+    let snapshot = expect_snapshot(&client);
+    expect_ok(&client, id);
+
+    let replacements = vec![OutputReplacement { range: 4..7, text: "x".to_string() }, OutputReplacement { range: 12..15, text: "x".to_string() }];
+    let id = client.send(Command::ReplaceInOutput { base: snapshot.revision.clone(), replacements }).unwrap();
+    let delta = expect_delta(&client);
+    assert_eq!((delta.revision.clone(), delta.cause.clone()), (Revision(snapshot.revision.0 + 1), Some(id.clone())));
+    let Change::OutputEdited { range, text: inserted, modified, .. } = delta.change else {
+        panic!("expected an output change");
+    };
+    assert_eq!((range, inserted.as_str(), modified), (4..15, "x\ntwo\nx", true));
+    expect_ok(&client, id);
+
+    let id = client.send(Command::ReplaceInOutput { base: delta.revision.clone(), replacements: Vec::new() }).unwrap();
+    expect_ok(&client, id);
+
+    let id = client.send(Command::Undo).unwrap();
+    let Change::OutputEdited { range, text: restored, modified, .. } = expect_delta(&client).change else {
+        panic!("expected an output change");
+    };
+    assert_eq!((range, restored.as_str(), modified), (4..11, "foo\ntwo\nfoo", false));
     expect_ok(&client, id);
 
     drop(client);

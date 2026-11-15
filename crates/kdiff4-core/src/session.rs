@@ -8,7 +8,7 @@ use kdiff4_protocol::engine::{
 };
 use kdiff4_protocol::{
     Alignments, Change, Choice, Document, DocumentText, EolChoice, EolStyle, HeuristicMatch, HeuristicOptions, HeuristicProposal, LineCharRuns, Navigation, OpenFiles, OutputDocument,
-    OutputEdit, RegionMerge, Revision, Snapshot,
+    OutputEdit, OutputReplacement, RegionMerge, Revision, Snapshot,
 };
 
 use crate::alignment_marks::AlignmentMarks;
@@ -494,8 +494,68 @@ impl Session {
     /// A hand edit of D. The regions it touches become one edited region; several are joined, and `engine` classifies the result.
     pub fn edit_output(&mut self, edit: &OutputEdit, engine: &dyn ComparisonEngine) -> Result<Change, CoreError> {
         self.check_base(&edit.base)?;
+        let (inserted, step) = self.plan_edit(edit.range.clone(), &edit.text, edit.region.clone(), engine)?;
+        Ok(self.apply(edit.range.clone(), inserted, step))
+    }
+
+    /// Makes `replacements` in D as one undo step, each changing the regions like a hand edit of its own. They are in order and apart. `Ok(None)` without replacements; on failure D is unchanged.
+    pub fn replace_in_output(&mut self, base: &Revision, replacements: &[OutputReplacement], engine: &dyn ComparisonEngine) -> Result<Option<Change>, CoreError> {
+        self.check_base(base)?;
+        let old_text = self.output.as_ref().ok_or(CoreError::NotAMerge)?.text.clone();
+        let (Some(first), Some(last)) = (replacements.first(), replacements.last()) else {
+            return Ok(None);
+        };
+        let mut end = 0;
+        for replacement in replacements {
+            let range = replacement.range.clone();
+            if range.start < end {
+                return Err(CoreError::InvalidRange { start: range.start, end: range.end });
+            }
+            end = range.end.max(range.start);
+        }
+        let old_entries = self.merge.entries(0..self.merge.regions().len());
+        let mut at = old_entries.len();
+        let mut untouched_after = old_entries.len();
+        let mut failed = None;
+        // Last to first, so the ranges of the ones still to make stay valid.
+        for replacement in replacements.iter().rev() {
+            let (inserted, step) = match self.plan_edit(replacement.range.clone(), &replacement.text, None, engine) {
+                Ok(planned) => planned,
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+            };
+            at = at.min(step.at);
+            untouched_after = untouched_after.min(self.merge.regions().len().saturating_sub(step.at + step.before.len()));
+            self.merge.splice(step.at, step.before.len(), step.after);
+            if let Some(output) = self.output.as_mut() {
+                output.text.replace_range(replacement.range.clone(), &inserted);
+            }
+        }
+        let new_entries = self.merge.entries(0..self.merge.regions().len());
+        self.merge.splice(0, new_entries.len(), old_entries.clone());
+        let new_text = match self.output.as_mut() {
+            Some(output) => std::mem::replace(&mut output.text, old_text.clone()),
+            None => return Err(CoreError::NotAMerge),
+        };
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        let range = first.range.start..last.range.end;
+        let inserted = new_text[range.start..new_text.len() - (old_text.len() - range.end)].to_string();
+        let step = MergeStep {
+            at,
+            before: old_entries[at..old_entries.len() - untouched_after].to_vec(),
+            after: new_entries[at..new_entries.len() - untouched_after].to_vec(),
+            explicit_final_eol: None,
+        };
+        Ok(Some(self.apply(range, inserted, step)))
+    }
+
+    /// What a hand edit replacing `range` of D with `text` does: the text to insert, with its line ends normalized, and the regions it changes.
+    fn plan_edit(&self, range: Range<usize>, text: &str, target: Option<usize>, engine: &dyn ComparisonEngine) -> Result<(String, MergeStep), CoreError> {
         let output = self.output.as_ref().ok_or(CoreError::NotAMerge)?;
-        let range = edit.range.clone();
         let fits = range.start <= range.end && output.text.is_char_boundary(range.start) && output.text.is_char_boundary(range.end) && range.end <= output.text.len();
         if !fits {
             return Err(CoreError::InvalidRange {
@@ -503,7 +563,7 @@ impl Session {
                 end: range.end,
             });
         }
-        let inserted = text::normalize_to_lf(&edit.text);
+        let inserted = text::normalize_to_lf(text);
         if self.merge.regions().is_empty() {
             let region = self.empty_region();
             let state = RegionState {
@@ -514,8 +574,7 @@ impl Session {
                 },
                 text_len: inserted.len(),
             };
-            return Ok(self.apply(
-                range,
+            return Ok((
                 inserted,
                 MergeStep {
                     at: 0,
@@ -525,7 +584,7 @@ impl Session {
                 },
             ));
         }
-        let touched = match edit.region {
+        let touched = match target {
             Some(region) => self.merge.empty_target(region, range.clone(), &inserted).ok_or(CoreError::InvalidEditTarget { region })?,
             None => self.merge.touched(range.clone(), &inserted, &output.text),
         };
@@ -539,7 +598,7 @@ impl Session {
             let relative = range.start - span.start..range.end - span.start;
             let split = merge::split_stable(region, state, &output.text[span.clone()], relative, &inserted);
             if let Some(after) = split {
-                return Ok(self.apply(range, inserted, MergeStep { at: touched.start, before, after, explicit_final_eol: None }));
+                return Ok((inserted, MergeStep { at: touched.start, before, after, explicit_final_eol: None }));
             }
         }
         let (region, choice) = match before.as_slice() {
@@ -557,8 +616,7 @@ impl Session {
             },
             text_len: region_text.len(),
         };
-        Ok(self.apply(
-            range,
+        Ok((
             inserted,
             MergeStep {
                 at: touched.start,
@@ -1469,6 +1527,78 @@ mod tests {
         let reversed = edit(&session, 2..0, "x");
         assert!(matches!(session.edit_output(&reversed, &BuiltinEngine), Err(CoreError::InvalidRange { .. })));
         assert_eq!(session.snapshot().output.unwrap().text, "é");
+    }
+
+    fn replacement(range: std::ops::Range<usize>, text: &str) -> OutputReplacement {
+        OutputReplacement { range, text: text.to_string() }
+    }
+
+    #[test]
+    fn replacements_are_one_undo_step_and_change_the_regions_like_single_edits() {
+        let lines = (["foo 1", "mid", "foo 2", "end foo"], ["foo 1", "other", "foo 2", "end foo"]);
+        let mut session = merge_of(&temp_dir("replace-all"), &lines.0, &lines.1, &lines.0);
+        let mut single = merge_of(&temp_dir("replace-single"), &lines.0, &lines.1, &lines.0);
+        let before = session.snapshot();
+        let text = before.output.as_ref().unwrap().text.clone();
+        let found: Vec<usize> = text.match_indices("foo").map(|(start, _)| start).collect();
+        assert_eq!(found.len(), 3);
+        let replacements: Vec<OutputReplacement> = found.iter().map(|start| replacement(*start..*start + 3, "quux")).collect();
+        let base = session.revision();
+        let change = session.replace_in_output(&base, &replacements, &BuiltinEngine).unwrap().unwrap();
+        for start in found.iter().rev() {
+            single.edit_output(&edit(&single, *start..*start + 3, "quux"), &BuiltinEngine).unwrap();
+        }
+        let after = session.snapshot();
+        assert_eq!(after.output.as_ref().unwrap().text, text.replace("foo", "quux"));
+        assert_eq!(text_part(&change), (found[0]..found[2] + 3, text[found[0]..found[2] + 3].replace("foo", "quux"), true));
+        assert_eq!((&after.merge, &after.comparison.regions), (&single.snapshot().merge, &single.snapshot().comparison.regions));
+        assert!(after.merge.iter().any(|merge| merge.edited) && after.merge.iter().any(|merge| !merge.edited));
+        assert_eq!(session.revision(), Revision(base.0 + 1));
+        assert_consistent(&session);
+        session.undo().unwrap().unwrap();
+        let undone = session.snapshot();
+        assert_eq!((undone.output.unwrap().text, &undone.merge, &undone.comparison.regions), (text, &before.merge, &before.comparison.regions));
+        assert_eq!(session.undo().unwrap(), None);
+        session.redo().unwrap().unwrap();
+        let redone = session.snapshot();
+        assert_eq!((redone.output.unwrap().text, &redone.merge), (after.output.unwrap().text, &after.merge));
+        assert_consistent(&session);
+    }
+
+    #[test]
+    fn replacements_in_an_empty_merge_and_with_other_line_ends() {
+        let mut session = merge_session(&temp_dir("replace-empty"), "");
+        let base = session.revision();
+        session.replace_in_output(&base, &[replacement(0..0, "a\r\nb")], &BuiltinEngine).unwrap().unwrap();
+        assert_eq!(session.snapshot().output.unwrap().text, "a\nb");
+        let base = session.revision();
+        session.replace_in_output(&base, &[replacement(0..1, "xx"), replacement(2..3, "")], &BuiltinEngine).unwrap().unwrap();
+        assert_eq!(session.snapshot().output.unwrap().text, "xx\n");
+        assert_consistent(&session);
+        session.undo().unwrap().unwrap();
+        assert_eq!(session.snapshot().output.unwrap().text, "a\nb");
+        assert_consistent(&session);
+    }
+
+    #[test]
+    fn bad_replacements_are_refused_and_leave_the_output_alone() {
+        let mut session = merge_of(&temp_dir("replace-invalid"), &["é one", "two"], &["é one", "two"], &["é one", "two"]);
+        let before = session.snapshot();
+        let base = session.revision();
+        assert_eq!(session.replace_in_output(&base, &[], &BuiltinEngine).unwrap(), None);
+        for replacements in [
+            vec![replacement(7..8, "x"), replacement(3..4, "y")],
+            vec![replacement(3..6, "x"), replacement(5..7, "y")],
+            vec![replacement(3..4, "x"), replacement(7..99, "y")],
+            vec![replacement(1..2, "x"), replacement(7..8, "y")],
+            vec![replacement(4..3, "x")],
+        ] {
+            assert!(matches!(session.replace_in_output(&base, &replacements, &BuiltinEngine), Err(CoreError::InvalidRange { .. })), "{replacements:?}");
+            let now = session.snapshot();
+            assert_eq!((now.revision, now.output.unwrap().text, &now.merge), (before.revision.clone(), before.output.clone().unwrap().text, &before.merge));
+        }
+        assert!(matches!(session.replace_in_output(&Revision(0), &[replacement(3..4, "x")], &BuiltinEngine), Err(CoreError::StaleRevision { .. })));
+        assert_eq!(session.undo().unwrap(), None);
     }
 
     #[test]

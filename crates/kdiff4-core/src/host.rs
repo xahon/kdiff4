@@ -140,6 +140,10 @@ fn handle(endpoint: &HostEndpoint, registry: &EngineRegistry, session: &mut Opti
             None => return Ok(()),
         },
         Command::EditOutput(edit) => active(session)?.edit_output(&edit, registry.default_engine())?,
+        Command::ReplaceInOutput { base, replacements } => match active(session)?.replace_in_output(&base, &replacements, registry.default_engine())? {
+            Some(change) => change,
+            None => return Ok(()),
+        },
         Command::SetChoice { base, region, choice } => active(session)?.set_choice(&base, region, choice)?,
         Command::ChooseForUnresolved { base, document } => match active(session)?.choose_for_unresolved(&base, document)? {
             Some(change) => change,

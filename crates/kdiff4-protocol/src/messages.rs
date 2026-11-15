@@ -52,6 +52,11 @@ pub enum Command {
         confirmed: bool,
     },
     EditOutput(OutputEdit),
+    /// Makes several replacements in D's text as one undo step; each changes the regions like an `EditOutput` of its own. `base` is the revision the ranges refer to; the ranges are in order and apart. Does nothing without replacements. On failure D is unchanged.
+    ReplaceInOutput {
+        base: Revision,
+        replacements: Vec<OutputReplacement>,
+    },
     /// Sets the choice of region `region`, dropping its hand edits. `base` is the revision the region index refers to.
     SetChoice {
         base: Revision,
@@ -317,6 +322,13 @@ pub struct OutputEdit {
     pub text: String,
     #[serde(default)]
     pub region: Option<usize>,
+}
+
+/// One replacement of `ReplaceInOutput`: a byte range of D's text and the text to put there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputReplacement {
+    pub range: Range<usize>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
