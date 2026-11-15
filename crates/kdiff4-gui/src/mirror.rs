@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, RegionStatus};
+use kdiff4_protocol::engine::{Comparison, ComparisonOptions, HunkChange, MergeStatus, Region, RegionStatus};
 use kdiff4_protocol::{
     Alignments, Change, Choice, CurrentRegion, Delta, Document, DocumentText, EolChoice, FoldRanges, LineCharRuns, MergeUpdate, OutputEdit, RegionMerge, RequestId, Revision, Snapshot,
 };
@@ -65,6 +65,19 @@ pub enum DeltaOutcome {
 pub struct ConflictCounts {
     pub unresolved: usize,
     pub total: usize,
+}
+
+/// The differences of a comparison without an output, for the bottom bar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DifferenceCounts {
+    /// The place of the current region among the regions that differ, from 1; `None` while the current region is not one of them.
+    pub current: Option<usize>,
+    pub total: usize,
+}
+
+/// Whether a region is a difference: anything but text that is the same in every document.
+fn differs(region: &Region) -> bool {
+    !matches!(region.status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged))
 }
 
 /// The client's copy of the session, built from a snapshot and the deltas after it. D edits are applied here at once and confirmed by the host later.
@@ -322,6 +335,23 @@ impl Mirror {
         self.is_merge().then_some(self.conflicts)
     }
 
+    /// Where the current region is among the regions that differ; `None` for a merge, which counts its conflicts instead.
+    pub fn difference_counts(&self) -> Option<DifferenceCounts> {
+        if self.is_merge() {
+            return None;
+        }
+        let regions = &self.comparison.regions;
+        let total = regions
+            .iter()
+            .filter(|region| differs(region))
+            .count();
+        let current = self
+            .current_region
+            .filter(|index| regions.get(*index).is_some_and(differs))
+            .map(|index| regions[..=index].iter().filter(|region| differs(region)).count());
+        Some(DifferenceCounts { current, total })
+    }
+
     fn refresh_conflicts(&mut self) {
         let mut counts = ConflictCounts::default();
         for (index, state) in self.merge.iter().enumerate() {
@@ -432,7 +462,7 @@ impl Mirror {
             .comparison
             .regions
             .iter()
-            .filter(|region| !matches!(region.status, RegionStatus::Diff(HunkChange::Unchanged) | RegionStatus::Merge(MergeStatus::Unchanged)))
+            .filter(|region| differs(region))
             .count();
         let conflicts = self
             .comparison
@@ -1359,6 +1389,27 @@ mod tests {
         local_edit(&mut mirror, 0..0, "a", 10);
         assert!(mirror.edit_rejected(&RequestId(10)));
         assert!(!mirror.edit_rejected(&RequestId(11)));
+    }
+
+    #[test]
+    fn a_diff_counts_its_differences_and_places_the_current_region_among_them() {
+        let mut snapshot = conflict_mirror_snapshot();
+        snapshot.output = None;
+        snapshot.merge.clear();
+        let unchanged = Region { status: RegionStatus::Diff(HunkChange::Unchanged), ..snapshot.comparison.regions[0].clone() };
+        let changed = snapshot.comparison.regions[0].clone();
+        snapshot.comparison.regions = vec![unchanged.clone(), changed.clone(), unchanged, changed];
+        let counts = |current: Option<usize>| {
+            let mut snapshot = snapshot.clone();
+            snapshot.current_region = current;
+            Mirror::from_snapshot(snapshot, false).difference_counts()
+        };
+        assert_eq!(counts(None), Some(DifferenceCounts { current: None, total: 2 }));
+        assert_eq!(counts(Some(1)), Some(DifferenceCounts { current: Some(1), total: 2 }));
+        assert_eq!(counts(Some(3)), Some(DifferenceCounts { current: Some(2), total: 2 }));
+        assert_eq!(counts(Some(2)), Some(DifferenceCounts { current: None, total: 2 }), "an unchanged region is no difference");
+        assert_eq!(counts(Some(9)), Some(DifferenceCounts { current: None, total: 2 }), "a region that is not there");
+        assert_eq!(conflict_mirror().difference_counts(), None, "a merge counts conflicts");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use egui::{Key, KeyboardShortcut, Modifiers, RichText};
 use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, EolStyle, ErrorKind, Event, HeuristicOptions, HostMessage, InsetChoice, MarkStatus, Navigation, OpenFiles, RequestId, Response};
 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
-use crate::bottom_controls::{bottom_switch, conflict_label, SwitchPopup};
+use crate::bottom_controls::{bottom_switch, conflict_label, difference_label, SwitchPopup};
 use crate::command_palette::{self, PaletteEntry, PaletteEvent, PaletteState};
 use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
@@ -21,7 +21,7 @@ use crate::fonts::{self, FontScan};
 use crate::go_to_line::{self, GoToLineEvent};
 use crate::icons::{self, Icon};
 use crate::language::{self, Language, LanguageState};
-use crate::mirror::{ConflictCounts, DeltaOutcome, Mirror};
+use crate::mirror::{ConflictCounts, DeltaOutcome, DifferenceCounts, Mirror};
 use crate::open_dialog::{self, FormAction, OpenForm};
 use crate::overview;
 use crate::panes::{self, PaneAction, PaneOptions, PaneState};
@@ -2622,7 +2622,8 @@ Shortcut: {}", link.display()),
         let output = self.tab.mirror.as_ref().and_then(Mirror::output);
         let indentation = output.map(|output| (self.output_indentation(output.lines()), self.tab.indentation_override.is_some()));
         let conflicts = self.tab.mirror.as_ref().and_then(Mirror::conflict_counts);
-        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts)
+        let differences = self.tab.mirror.as_ref().and_then(Mirror::difference_counts);
+        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts, differences)
     }
 
 
@@ -3016,7 +3017,7 @@ struct StatusPicks {
 
 /// The message at the left and the Bottom Controls at the right.
 fn status_bar(
-    ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>, conflicts: Option<ConflictCounts>,
+    ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>, conflicts: Option<ConflictCounts>, differences: Option<DifferenceCounts>,
 ) -> StatusPicks {
     let mut picks = StatusPicks::default();
     egui::Panel::bottom("status_bar").show(ui, |ui| {
@@ -3035,6 +3036,9 @@ fn status_bar(
             }
             if let Some(conflicts) = conflicts {
                 conflict_label(ui, conflicts);
+            }
+            if let Some(differences) = differences {
+                difference_label(ui, differences);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
@@ -5050,7 +5054,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None, None);
+            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None, None, None);
         });
         harness.run();
         let selector = harness.get_by_label("Language of the documents").rect();
@@ -5075,7 +5079,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), Some(&eol), None, None);
+            status_bar(ui, None, &Language::plain_text(), Some(&eol), None, None, None);
         });
         harness.run();
         harness
@@ -5099,7 +5103,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 240.0))
             .with_context_setup(egui_extras::install_image_loaders)
             .build_ui_state(|ui, eol| {
-                let picks = status_bar(ui, None, &Language::plain_text(), Some(eol), Some((Indentation { spaces: true, size: 4 }, false)), None);
+                let picks = status_bar(ui, None, &Language::plain_text(), Some(eol), Some((Indentation { spaces: true, size: 4 }, false)), None, None);
                 if let Some(picked) = picks.eol {
                     *eol = EolChoice::Style(picked);
                 }
@@ -5132,6 +5136,27 @@ mod tests {
         harness.get_by_label(eol::CONFLICT_HINT);
     }
 
+
+    #[test]
+    fn a_diff_shows_the_place_of_the_current_difference_instead_of_conflicts() {
+        use egui_kittest::kittest::Queryable;
+
+        let (mut app, _host, _) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        snapshot.output = None;
+        snapshot.merge.clear();
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot.clone(), false));
+        let total = app.tab.mirror.as_ref().unwrap().difference_counts().unwrap().total;
+        assert!(total > 0);
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0))
+            .with_context_setup(egui_extras::install_image_loaders)
+            .build_ui_state(|ui, app: &mut KdiffApp| { app.show_status(ui); }, app);
+        harness.get_by_label(&format!("- / {total}"));
+        snapshot.current_region = Some(0);
+        harness.state_mut().tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        harness.step();
+        harness.get_by_label(&format!("1 / {total}"));
+    }
 
     #[test]
     fn the_conflict_label_updates_its_count_and_color_with_the_merge() {
@@ -5195,7 +5220,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(|ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), None, None, None);
+            status_bar(ui, None, &Language::plain_text(), None, None, None, None);
         });
         harness.run();
         assert!(harness.query_by_label(eol::SELECTOR_HINT).is_none());

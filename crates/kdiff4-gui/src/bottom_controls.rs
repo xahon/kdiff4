@@ -1,7 +1,7 @@
 use egui::{CursorIcon, Image, Popup, PopupCloseBehavior, Rect, RectAlign, Role, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, TextWrapMode, Ui, Vec2, WidgetInfo, WidgetText, pos2, vec2};
 
 use crate::theme;
-use crate::mirror::ConflictCounts;
+use crate::mirror::{ConflictCounts, DifferenceCounts};
 
 
 const HOVER_FADE_SECONDS: f32 = 0.1;
@@ -16,6 +16,14 @@ pub fn conflict_label(ui: &mut Ui, counts: ConflictCounts) {
     };
     let label = egui::RichText::new(format!("{} / {}", counts.unresolved, counts.total)).color(color);
     ui.add(egui::Label::new(label).extend()).on_hover_text("Unresolved conflicts / total conflicts");
+}
+
+
+/// The place of the current difference among all of them, as in `2 / 5`; a dash while the current region is no difference.
+pub fn difference_label(ui: &mut Ui, counts: DifferenceCounts) {
+    let current = counts.current.map_or_else(|| "-".to_string(), |current| current.to_string());
+    let label = egui::RichText::new(format!("{current} / {}", counts.total)).color(theme::palette_of(ui).weak_text);
+    ui.add(egui::Label::new(label).extend()).on_hover_text("Current difference / total differences");
 }
 
 
