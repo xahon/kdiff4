@@ -721,9 +721,7 @@ fn pane(
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
                     let given_x = (!state.independent_scroll).then(|| state.shared_x.clone());
-                    let find = Some(&state.find)
-                        .filter(|find| find.open && find.document == Some(document))
-                        .map(|find| FindHits { matches: &find.matches, current: find.current });
+                    let find = find_hits(&state.find, document.clone());
                     let response = text_view::show(
                         ui,
                         document.letter(),
@@ -793,6 +791,21 @@ fn pane(
         })
         .inner
 }
+
+/// The find matches the pane of `document` shows: those of the searched pane, with the current one, or those of another pane the search covers.
+fn find_hits(find: &FindState, document: Document) -> Option<FindHits<'_>> {
+    if !find.open {
+        return None;
+    }
+    if find.document == Some(document) {
+        return Some(FindHits { matches: &find.matches, current: find.current });
+    }
+    find.others
+        .iter()
+        .find(|pane| pane.document == document)
+        .map(|pane| FindHits { matches: &pane.matches, current: None })
+}
+
 
 /// What a document is in a comparison of `sources` source documents, as its header names it: git's names for a three-way merge, and the sides of a two-way comparison.
 pub fn role(document: Document, sources: usize) -> Option<&'static str> {
@@ -913,6 +926,23 @@ mod tests {
 
     use super::*;
     use crate::rows::RowMap;
+
+    #[test]
+    fn every_searched_pane_shows_its_matches_and_the_searched_one_the_current_match() {
+        let text = "ab ab\n";
+        let ranges = vec![0..5];
+        let lines = crate::editing::Lines { text, ranges: &ranges };
+        let mut find = FindState::default();
+        find.query = "ab".to_string();
+        find.refresh(Document::B, &[(Document::A, lines), (Document::B, lines)]);
+        find.current = Some(1);
+        assert!(find_hits(&find, Document::B).is_none(), "the bar is closed");
+        find.open = true;
+        let hits = |document: Document| find_hits(&find, document).map(|hits| (hits.matches.len(), hits.current));
+        assert_eq!(hits(Document::B), Some((2, Some(1))));
+        assert_eq!(hits(Document::A), Some((2, None)));
+        assert_eq!(hits(Document::C), None);
+    }
 
     /// The header of A over a path, drawn in a window 500 wide.
     fn header_harness(eol: Option<EolStyle>) -> egui_kittest::Harness<'static> {

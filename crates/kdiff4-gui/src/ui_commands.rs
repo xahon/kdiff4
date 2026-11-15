@@ -25,6 +25,7 @@ pub const NEXT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers:
 pub const PREVIOUS_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
 pub const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
 pub const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+pub const REPLACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::H);
 pub const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 pub const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 pub const GO_TO_LINE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
@@ -143,6 +144,7 @@ pub enum UiCommand {
     Undo,
     Redo,
     Find,
+    Replace,
     FindNext,
     FindPrevious,
     GoToLine,
@@ -227,6 +229,7 @@ impl UiCommand {
             UiCommand::Undo => CommandInfo::new(Group::Edit, "Undo", &[UNDO_SHORTCUT]),
             UiCommand::Redo => CommandInfo::new(Group::Edit, "Redo", &[REDO_SHORTCUT]),
             UiCommand::Find => CommandInfo::new(Group::Edit, "Find...", &[FIND_SHORTCUT]),
+            UiCommand::Replace => CommandInfo::new(Group::Edit, "Replace...", &[REPLACE_SHORTCUT]).hint("Find and replace text in the output"),
             UiCommand::FindNext => CommandInfo::new(Group::Edit, "Find Next", &[FIND_NEXT_SHORTCUT]),
             UiCommand::FindPrevious => CommandInfo::new(Group::Edit, "Find Previous", &[FIND_PREVIOUS_SHORTCUT]),
             UiCommand::GoToLine => CommandInfo::new(Group::Edit, "Go to Line...", &[GO_TO_LINE_SHORTCUT]).hint("Go to a line, or a line and a column, of the pane with the caret"),
@@ -307,7 +310,7 @@ pub fn menu_items(menu: Group, c_choosable: bool, has_start_menu: bool) -> Vec<O
             Some(UiCommand::ReopenTab),
             Some(UiCommand::Exit),
         ],
-        Group::Edit => vec![Some(UiCommand::Undo), Some(UiCommand::Redo), None, Some(UiCommand::Find), Some(UiCommand::FindNext), Some(UiCommand::FindPrevious), None, Some(UiCommand::GoToLine)],
+        Group::Edit => vec![Some(UiCommand::Undo), Some(UiCommand::Redo), None, Some(UiCommand::Find), Some(UiCommand::Replace), Some(UiCommand::FindNext), Some(UiCommand::FindPrevious), None, Some(UiCommand::GoToLine)],
         Group::Merge => {
             let mut items: Vec<Option<UiCommand>> = documents.iter().map(|document| Some(UiCommand::ChooseHere(document.clone()))).collect();
             items.push(None);
@@ -437,12 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn heuristics_and_the_minimap_left_the_keys_of_replace_and_go_to_line() {
+    fn replace_and_go_to_line_have_the_keys_heuristics_and_the_minimap_left() {
         let taken: Vec<KeyboardShortcut> = all(true)
             .into_iter()
             .flat_map(|command| command.info().shortcuts)
             .collect();
-        assert!(!taken.contains(&KeyboardShortcut::new(Modifiers::COMMAND, Key::H)));
+        assert_eq!(taken.iter().filter(|shortcut| **shortcut == KeyboardShortcut::new(Modifiers::COMMAND, Key::H)).count(), 1);
+        assert_eq!(UiCommand::Replace.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::H)]);
         assert_eq!(UiCommand::GoToLine.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::G)]);
         assert_eq!(UiCommand::Heuristics.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::J)]);
         assert_eq!(UiCommand::ToggleMinimap.info().shortcuts, [KeyboardShortcut::new(Modifiers::COMMAND, Key::M)]);

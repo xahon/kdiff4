@@ -33,7 +33,7 @@ use crate::shortcuts_dialog::{self, ShortcutsDialog};
 use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
 use crate::theme;
-use crate::ui_commands::{self, Group, UiCommand, hint_with_shortcut, OPEN_SHORTCUT, OPEN_TAB_SHORTCUT, RELOAD_SHORTCUT, SAVE_SHORTCUT, SAVE_AS_SHORTCUT, UNDO_SHORTCUT, REDO_SHORTCUT, MARK_LINES_SHORTCUT, MARK_FUNCTION_SHORTCUT, APPLY_ALIGNMENTS_SHORTCUT, CLEAR_ALIGNMENTS_SHORTCUT, HEURISTICS_SHORTCUT, HEURISTICS_INSIDE_SHORTCUT, EXIT_SHORTCUT, CLOSE_TAB_SHORTCUT, REOPEN_TAB_SHORTCUT, LEFT_TAB_SHORTCUT, RIGHT_TAB_SHORTCUT, MOVE_TAB_LEFT_SHORTCUT, MOVE_TAB_RIGHT_SHORTCUT, NEXT_TAB_SHORTCUT, PREVIOUS_TAB_SHORTCUT, SETTINGS_SHORTCUT, FIND_SHORTCUT, FIND_NEXT_SHORTCUT, FIND_PREVIOUS_SHORTCUT, GO_TO_LINE_SHORTCUT, MINIMAP_SHORTCUT, IGNORE_WHITESPACE_SHORTCUT, INDEPENDENT_SCROLL_SHORTCUT, FOLD_SHORTCUT, UNFOLD_SHORTCUT, FOLD_ALL_SHORTCUT, UNFOLD_ALL_SHORTCUT, KEYBOARD_SHORTCUTS_SHORTCUT, COMMAND_PALETTE_SHORTCUT, CHOOSE_SHORTCUTS, NAVIGATION_SHORTCUTS, VOID_TOGGLE_LABEL, VOID_TOGGLE_HINT, MINIMAP_TOGGLE_LABEL, MINIMAP_TOGGLE_HINT, OVERVIEW_TOGGLE_LABEL, OVERVIEW_TOGGLE_HINT, IGNORE_WHITESPACE_TOGGLE_LABEL, IGNORE_WHITESPACE_TOGGLE_HINT, INDEPENDENT_SCROLL_TOGGLE_LABEL, INDEPENDENT_SCROLL_TOGGLE_HINT};
+use crate::ui_commands::{self, Group, UiCommand, hint_with_shortcut, OPEN_SHORTCUT, OPEN_TAB_SHORTCUT, RELOAD_SHORTCUT, SAVE_SHORTCUT, SAVE_AS_SHORTCUT, UNDO_SHORTCUT, REDO_SHORTCUT, MARK_LINES_SHORTCUT, MARK_FUNCTION_SHORTCUT, APPLY_ALIGNMENTS_SHORTCUT, CLEAR_ALIGNMENTS_SHORTCUT, HEURISTICS_SHORTCUT, HEURISTICS_INSIDE_SHORTCUT, EXIT_SHORTCUT, CLOSE_TAB_SHORTCUT, REOPEN_TAB_SHORTCUT, LEFT_TAB_SHORTCUT, RIGHT_TAB_SHORTCUT, MOVE_TAB_LEFT_SHORTCUT, MOVE_TAB_RIGHT_SHORTCUT, NEXT_TAB_SHORTCUT, PREVIOUS_TAB_SHORTCUT, SETTINGS_SHORTCUT, FIND_SHORTCUT, REPLACE_SHORTCUT, FIND_NEXT_SHORTCUT, FIND_PREVIOUS_SHORTCUT, GO_TO_LINE_SHORTCUT, MINIMAP_SHORTCUT, IGNORE_WHITESPACE_SHORTCUT, INDEPENDENT_SCROLL_SHORTCUT, FOLD_SHORTCUT, UNFOLD_SHORTCUT, FOLD_ALL_SHORTCUT, UNFOLD_ALL_SHORTCUT, KEYBOARD_SHORTCUTS_SHORTCUT, COMMAND_PALETTE_SHORTCUT, CHOOSE_SHORTCUTS, NAVIGATION_SHORTCUTS, VOID_TOGGLE_LABEL, VOID_TOGGLE_HINT, MINIMAP_TOGGLE_LABEL, MINIMAP_TOGGLE_HINT, OVERVIEW_TOGGLE_LABEL, OVERVIEW_TOGGLE_HINT, IGNORE_WHITESPACE_TOGGLE_LABEL, IGNORE_WHITESPACE_TOGGLE_HINT, INDEPENDENT_SCROLL_TOGGLE_LABEL, INDEPENDENT_SCROLL_TOGGLE_HINT};
 use crate::heuristics_dialog::{self, HeuristicsAction, HeuristicsDialog};
 use crate::inset_dialog::{self, InsetAnswer};
 use crate::updater::{UpdateWindow, Updater};
@@ -42,8 +42,8 @@ use crate::window_frame;
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 /// Distance of the find bar from the top right corner of the panes.
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
-/// How far below the top of the find bar the Go to Line bar starts while both are open.
-const FIND_BAR_STEP: f32 = 36.0;
+/// The space between the find bar and the Go to Line bar under it while both are open.
+const FIND_BAR_GAP: f32 = 4.0;
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
@@ -72,6 +72,8 @@ enum Pending {
     Resync,
     /// Undo or redo; its delta moves the caret to the changed text.
     UndoRedo,
+    /// Replace All, with the number of matches it replaces.
+    ReplaceAll(usize),
     /// A choice for one region, which its delta keeps the caret in, or for every unresolved one.
     Choose(Option<usize>),
     ChooseEverywhere(kdiff4_protocol::Revision, Document),
@@ -236,7 +238,7 @@ impl DocumentTab {
     }
 
     fn may_discard_work(&self) -> bool {
-        self.is_modified() || self.pending.values().any(|kind| matches!(kind, Pending::Choose(_) | Pending::ChooseEverywhere(..) | Pending::Edit | Pending::UndoRedo))
+        self.is_modified() || self.pending.values().any(|kind| matches!(kind, Pending::Choose(_) | Pending::ChooseEverywhere(..) | Pending::Edit | Pending::UndoRedo | Pending::ReplaceAll(_)))
     }
 
     fn finish(&mut self) {
@@ -1143,6 +1145,10 @@ Shortcut: {}", link.display()),
                         is_error: false,
                     }),
                     Pending::SetOutputPath => None,
+                    Pending::ReplaceAll(count) => Some(Status {
+                        text: replaced_summary(count),
+                        is_error: false,
+                    }),
                     Pending::AlignmentEdit => self.tab.mirror.as_ref().filter(|mirror| mirror.alignments().changed).map(|_| Status {
                         text: ALIGNMENTS_CHANGED_HINT.to_string(),
                         is_error: false,
@@ -1193,6 +1199,7 @@ Shortcut: {}", link.display()),
             Pending::Choose(_) | Pending::ChooseEverywhere(..) => self.report_error(format!("Cannot choose: {}", error.message)),
             Pending::Resync => self.report_error(format!("Cannot resync with the engine: {}", error.message)),
             Pending::UndoRedo => self.report_error(format!("Cannot undo or redo: {}", error.message)),
+            Pending::ReplaceAll(_) => self.report_error(format!("Cannot replace: {}", error.message)),
             Pending::Navigate(_) | Pending::Navigated => self.report_error(format!("Cannot navigate: {}", error.message)),
             Pending::SelectRegion => self.report_error(format!("Cannot select the region: {}", error.message)),
             Pending::ComparisonOptions => self.report_error(format!("Cannot apply the comparison options: {}", error.message)),
@@ -1282,6 +1289,24 @@ Shortcut: {}", link.display()),
         }
         self.tab.panes.find.open = true;
         self.tab.panes.find.focus = true;
+        self.tab.panes.find.replace_open = false;
+    }
+
+    /// Shows the find bar with its replace row, which searches D.
+    fn open_replace(&mut self) {
+        if !self.is_merge() {
+            return;
+        }
+        self.open_find();
+        self.tab.panes.find.replace_open = true;
+    }
+
+    /// The pane the find bar searches: D while its replace row is shown, else the pane with the caret.
+    fn search_target(&self) -> Option<Document> {
+        if self.tab.panes.find.replace_open && self.is_merge() {
+            return Some(Document::D);
+        }
+        self.find_target()
     }
 
     /// Shows the Go to Line bar with the keyboard and an empty field.
@@ -1313,28 +1338,37 @@ Shortcut: {}", link.display()),
         ctx.request_repaint();
     }
 
-    /// Finds the matches in the searched pane again if needed, and follows the selection.
+    /// Finds the matches in the searched panes again if needed, and follows the selection.
     fn refresh_find(&mut self) {
         if !self.tab.panes.find.open {
             return;
         }
-        let Some(document) = self.find_target() else { return };
-        let Some(lines) = self.tab.mirror.as_ref().and_then(|mirror| lines_of(mirror, document)) else { return };
-        self.tab.panes.find.refresh(document, lines);
+        let Some(document) = self.search_target() else { return };
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
+        let all_panes = self.tab.panes.find.searches_all_panes();
+        let panes: Vec<(Document, Lines<'_>)> = mirror
+            .documents()
+            .iter()
+            .map(|text| text.document)
+            .chain(mirror.is_merge().then_some(Document::D))
+            .filter(|pane| all_panes || *pane == document)
+            .filter_map(|pane| lines_of(mirror, pane).map(|lines| (pane, lines)))
+            .collect();
+        self.tab.panes.find.refresh(document, &panes);
         let selection = self.tab.panes.caret_in(document);
         self.tab.panes.find.follow(selection);
     }
 
-    fn select_match(&mut self, ctx: &egui::Context, document: Document, index: usize) {
-        let Some(found) = self.tab.panes.find.matches.get(index).copied() else { return };
+    /// Selects a match, which makes its pane the searched one.
+    fn select_match(&mut self, ctx: &egui::Context, document: Document, found: find::Match) {
         self.tab.panes.set_caret(document, found.cursor(), None);
         self.tab.panes.strip_focused = false;
         self.tab.panes.reveal_caret = true;
-        self.tab.panes.find.current = Some(index);
+        self.refresh_find();
         ctx.request_repaint();
     }
 
-    /// Goes to the next or previous match in the pane with the caret. With nothing to search for, opens the find bar.
+    /// Goes to the next or previous match from the caret of the searched pane, on into the other panes when all are searched. With nothing to search for, opens the find bar.
     fn find_step(&mut self, ctx: &egui::Context, forward: bool) {
         if self.tab.panes.find.query.is_empty() {
             self.open_find();
@@ -1344,11 +1378,43 @@ Shortcut: {}", link.display()),
         self.refresh_find();
         let Some(document) = self.tab.panes.find.document else { return };
         let cursor = self.tab.panes.caret_in(document).unwrap_or_default();
-        let matches = &self.tab.panes.find.matches;
-        let index = if forward { find::next_after(matches, cursor) } else { find::previous_before(matches, cursor) };
-        if let Some(index) = index {
-            self.select_match(ctx, document, index);
+        if let Some((document, found)) = self.tab.panes.find.step(cursor, forward) {
+            self.select_match(ctx, document, found);
         }
+    }
+
+    /// Replaces the match the selection of D covers with the replacement text, then goes to the next match. Without a selected match it only goes to the next one.
+    fn replace_match(&mut self, ctx: &egui::Context) {
+        self.refresh_find();
+        let find = &self.tab.panes.find;
+        let found = find.current.and_then(|index| find.matches.get(index)).filter(|_| find.document == Some(Document::D));
+        let replaced = match (found, self.tab.mirror.as_ref().and_then(Mirror::output)) {
+            (Some(found), Some(output)) => find::replace_one(output.lines(), found.clone(), &find.query, &find.replacement, find.options).ok().flatten(),
+            _ => None,
+        };
+        match replaced {
+            Some(text) if text.is_empty() => self.edit_output(EditKey::Delete),
+            Some(text) => self.edit_output(EditKey::Insert(text)),
+            None => {}
+        }
+        self.find_step(ctx, true);
+    }
+
+    /// Replaces every match in D with the replacement text, as one undo step of the engine.
+    fn replace_all(&mut self) {
+        let find = &self.tab.panes.find;
+        let Some(mirror) = self.tab.mirror.as_ref() else { return };
+        let (Some(base), Some(output)) = (mirror.navigation_base(), mirror.output()) else { return };
+        let replacements = match find::replace_all(output.lines(), &find.query, &find.replacement, find.options) {
+            Ok(replacements) => replacements,
+            Err(_) => return,
+        };
+        if replacements.is_empty() {
+            self.tab.status = Some(Status { text: replaced_summary(0), is_error: false });
+            return;
+        }
+        let count = replacements.len();
+        self.send(Command::ReplaceInOutput { base, replacements }, Pending::ReplaceAll(count));
     }
 
     fn handle_find_event(&mut self, ctx: &egui::Context, event: FindEvent) {
@@ -1357,12 +1423,14 @@ Shortcut: {}", link.display()),
                 self.refresh_find();
                 let Some(document) = self.tab.panes.find.document else { return };
                 let from = self.tab.panes.caret_in(document).map_or_else(Position::default, |cursor| cursor.range().0);
-                if let Some(index) = find::first_from(&self.tab.panes.find.matches, from) {
-                    self.select_match(ctx, document, index);
+                if let Some((document, found)) = self.tab.panes.find.first(from) {
+                    self.select_match(ctx, document, found);
                 }
             }
             FindEvent::Next => self.find_step(ctx, true),
             FindEvent::Previous => self.find_step(ctx, false),
+            FindEvent::Replace => self.replace_match(ctx),
+            FindEvent::ReplaceAll => self.replace_all(),
             FindEvent::Close => {
                 self.tab.panes.find.open = false;
                 self.tab.panes.find.clear();
@@ -2090,6 +2158,9 @@ Shortcut: {}", link.display()),
             if ctx.input_mut(|input| input.consume_shortcut(&FIND_SHORTCUT)) {
                 self.open_find();
             }
+            if self.is_merge() && ctx.input_mut(|input| input.consume_shortcut(&REPLACE_SHORTCUT)) {
+                self.open_replace();
+            }
             if ctx.input_mut(|input| input.consume_shortcut(&GO_TO_LINE_SHORTCUT)) {
                 self.open_go_to_line();
             }
@@ -2273,6 +2344,10 @@ Shortcut: {}", link.display()),
         match command {
             UiCommand::Open | UiCommand::Exit | UiCommand::Settings | UiCommand::About | UiCommand::CheckForUpdates => {}
             UiCommand::Reload | UiCommand::Find | UiCommand::FindNext | UiCommand::FindPrevious | UiCommand::GoToLine | UiCommand::Navigate(_) => state.enabled = has_session,
+            UiCommand::Replace => {
+                state.enabled = is_merge;
+                state.disabled_hint = Some("Replace works in the output of a merge");
+            }
             UiCommand::SwapSides => state.enabled = has_session && !self.is_opening(),
             UiCommand::CopyPath | UiCommand::CopyFileName | UiCommand::RevealFile => {
                 state.enabled = self.caret_document_with_path().is_some();
@@ -2341,6 +2416,7 @@ Shortcut: {}", link.display()),
             UiCommand::Undo => self.undo_redo(ctx, Command::Undo),
             UiCommand::Redo => self.undo_redo(ctx, Command::Redo),
             UiCommand::Find => self.open_find(),
+            UiCommand::Replace => self.open_replace(),
             UiCommand::FindNext => self.find_step(ctx, true),
             UiCommand::FindPrevious => self.find_step(ctx, false),
             UiCommand::GoToLine => self.open_go_to_line(),
@@ -2905,7 +2981,7 @@ impl eframe::App for KdiffApp {
                     find_events = find::show_bar(&ctx, self.tab.id, find_corner, &mut self.tab.panes.find);
                 }
                 if self.tab.panes.go_to_line.open {
-                    let corner = if self.tab.panes.find.open { find_corner + egui::vec2(0.0, FIND_BAR_STEP) } else { find_corner };
+                    let corner = if self.tab.panes.find.open { find_corner + egui::vec2(0.0, self.tab.panes.find.height + FIND_BAR_GAP) } else { find_corner };
                     let line_count = self.go_to_line_count();
                     go_to_line_event = go_to_line::show_bar(&ctx, self.tab.id, corner, &mut self.tab.panes.go_to_line, line_count);
                 }
@@ -3149,6 +3225,15 @@ fn through_folds(folds: &Folds, lines: std::ops::Range<usize>) -> std::ops::Rang
     match folds.folded().iter().find(|fold| fold.start == last) {
         Some(fold) => lines.start..lines.end.max(fold.end.clone()),
         None => lines,
+    }
+}
+
+
+fn replaced_summary(count: usize) -> String {
+    match count {
+        0 => "Nothing to replace".to_string(),
+        1 => "Replaced 1 match".to_string(),
+        count => format!("Replaced {count} matches"),
     }
 }
 
@@ -5392,6 +5477,114 @@ mod tests {
         app.tab.panes.set_caret(Document::D, Cursor::at(at(0, 0)), None);
         press(&mut app, &ctx, Key::F3, Modifiers::NONE);
         assert_eq!(selected(&app), Some((Document::D, at(1, 0), at(1, 1))));
+    }
+
+    #[test]
+    fn with_all_panes_f3_goes_on_into_the_next_pane_and_around() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.panes.find.query = "x".to_string();
+        app.tab.panes.find.all_panes = true;
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        let mut visited = Vec::new();
+        for _ in 0..4 {
+            press(&mut app, &ctx, Key::F3, Modifiers::NONE);
+            visited.push(selected(&app).map(|(document, start, _)| (document, start)));
+            assert_eq!(app.tab.panes.find.summary(), format!("{} of 3", (visited.len() - 1) % 3 + 1));
+        }
+        assert_eq!(visited, [Document::A, Document::B, Document::D, Document::A].map(|document| Some((document, at(1, 0)))));
+        press(&mut app, &ctx, Key::F3, Modifiers::SHIFT);
+        assert_eq!(selected(&app).map(|(document, _, _)| document), Some(Document::D));
+        assert_eq!(app.tab.panes.find.document, Some(Document::D));
+        assert_eq!(app.tab.panes.find.others.iter().map(|pane| pane.document).collect::<Vec<_>>(), [Document::A, Document::B]);
+    }
+
+    #[test]
+    fn typing_with_all_panes_goes_to_a_pane_that_has_the_text() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        app.tab.panes.find.query = "b".to_string();
+        app.tab.panes.find.open = true;
+        app.handle_find_event(&ctx, FindEvent::Changed);
+        assert_eq!(selected(&app), Some((Document::A, at(0, 0), at(0, 0))), "only A is searched");
+        app.tab.panes.find.all_panes = true;
+        app.handle_find_event(&ctx, FindEvent::Changed);
+        assert_eq!(selected(&app), Some((Document::B, at(0, 0), at(0, 1))));
+    }
+
+    #[test]
+    fn ctrl_h_opens_the_replace_row_and_searches_the_output() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.panes.set_caret(Document::A, Cursor::at(at(0, 0)), None);
+        app.tab.panes.find.all_panes = true;
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        assert!(app.tab.panes.find.open && app.tab.panes.find.focus && app.tab.panes.find.replace_open);
+        app.tab.panes.find.query = "x".to_string();
+        app.handle_find_event(&ctx, FindEvent::Changed);
+        assert_eq!(selected(&app), Some((Document::D, at(1, 0), at(1, 1))));
+        assert!(app.tab.panes.find.others.is_empty());
+        press(&mut app, &ctx, Key::F, Modifiers::COMMAND);
+        assert!(app.tab.panes.find.open && !app.tab.panes.find.replace_open);
+    }
+
+    #[test]
+    fn replace_needs_an_output() {
+        let (mut app, _host, ctx) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        snapshot.output = None;
+        snapshot.merge.clear();
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        assert!(!app.command_state(UiCommand::Replace).enabled);
+        press(&mut app, &ctx, Key::H, Modifiers::COMMAND);
+        app.run_command(&ctx, UiCommand::Replace);
+        assert!(!app.tab.panes.find.open && !app.tab.panes.find.replace_open);
+    }
+
+    #[test]
+    fn replace_edits_the_selected_match_and_goes_to_the_next() {
+        let (mut app, host, ctx) = app_with_session();
+        app.run_command(&ctx, UiCommand::Replace);
+        app.tab.panes.find.query = "(b|x)".to_string();
+        app.tab.panes.find.options.regex = true;
+        app.tab.panes.find.replacement = "<$1>".to_string();
+        app.handle_find_event(&ctx, FindEvent::Replace);
+        assert_eq!(selected(&app), Some((Document::D, at(0, 0), at(0, 1))), "the first Replace only selects");
+        assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().lines().text, "b\nx\n");
+        app.handle_find_event(&ctx, FindEvent::Replace);
+        assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().lines().text, "<b>\nx\n");
+        assert_eq!(selected(&app), Some((Document::D, at(1, 0), at(1, 1))));
+        app.tab.panes.find.replacement.clear();
+        app.handle_find_event(&ctx, FindEvent::Replace);
+        assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().lines().text, "<b>\n\n");
+        let edits: Vec<(std::ops::Range<usize>, String)> = sent(app, host)
+            .into_iter()
+            .map(|command| match command {
+                Command::EditOutput(edit) => (edit.range, edit.text),
+                other => panic!("expected an edit, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(edits, [(0..1, "<b>".to_string()), (4..5, String::new())]);
+    }
+
+    #[test]
+    fn replace_all_sends_every_replacement_in_one_command() {
+        let (mut app, host, ctx) = app_with_session();
+        app.run_command(&ctx, UiCommand::Replace);
+        app.tab.panes.find.query = "q".to_string();
+        app.handle_find_event(&ctx, FindEvent::ReplaceAll);
+        assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some("Nothing to replace"));
+        app.tab.panes.find.query = ".".to_string();
+        app.tab.panes.find.options.regex = true;
+        app.tab.panes.find.replacement = "$0$0".to_string();
+        app.handle_find_event(&ctx, FindEvent::ReplaceAll);
+        assert!(app.tab.may_discard_work());
+        let id = app.tab.pending.keys().next().cloned().unwrap();
+        app.handle_message(&ctx, HostMessage::Response(Response { id, result: Ok(()) }));
+        assert_eq!(app.tab.status.as_ref().map(|status| status.text.as_str()), Some("Replaced 2 matches"));
+        let replacements = vec![
+            kdiff4_protocol::OutputReplacement { range: 0..1, text: "bb".to_string() },
+            kdiff4_protocol::OutputReplacement { range: 2..3, text: "xx".to_string() },
+        ];
+        assert_eq!(sent(app, host), [Command::ReplaceInOutput { base: kdiff4_protocol::Revision(1), replacements }]);
     }
 
     #[test]
