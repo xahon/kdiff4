@@ -18,6 +18,7 @@ mod heuristics_dialog;
 mod icons;
 mod inset_dialog;
 mod language;
+mod messages;
 mod minimap;
 mod mirror;
 mod open_dialog;

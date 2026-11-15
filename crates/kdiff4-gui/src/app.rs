@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Instant;
 
 use eframe::egui_wgpu::wgpu::rwh::HasWindowHandle;
 use egui::{Key, KeyboardShortcut, Modifiers, RichText};
@@ -29,6 +30,7 @@ use crate::paths;
 use crate::rows::{self, Rows};
 use crate::scroll::ScrollMotion;
 use crate::settings_dialog::{self, SettingsAction, SettingsDialog};
+use crate::messages::{self, Messages, MessagesEvent};
 use crate::shortcuts_dialog::{self, ShortcutsDialog};
 use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
@@ -42,6 +44,8 @@ use crate::window_frame;
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
 /// Distance of the find bar from the top right corner of the panes.
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
+const MESSAGES_HINT: &str = "Click to show all messages";
+const UNSEEN_ERRORS_HINT: &str = "Errors since the Messages window was last open. Click to show them";
 /// The space between the find bar and the Go to Line bar under it while both are open.
 const FIND_BAR_GAP: f32 = 4.0;
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
@@ -193,6 +197,9 @@ pub struct KdiffApp {
     /// The command palette, while it is open.
     palette: Option<PaletteState>,
     shortcuts_dialog: Option<ShortcutsDialog>,
+    /// What the status bars and Open forms of all tabs said since the app started.
+    messages: Messages,
+    messages_open: bool,
 }
 
 impl DocumentTab {
@@ -223,6 +230,14 @@ impl DocumentTab {
             folds_language: None,
             output_folds_stale: false,
         }
+    }
+
+    /// The name the tab strip shows, without the mark of unsaved changes.
+    fn title(&self) -> String {
+        self.title_path()
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(|| "Open".to_string(), |name| name.to_string_lossy().into_owned())
     }
 
     fn is_blank(&self) -> bool {
@@ -331,6 +346,8 @@ impl KdiffApp {
             dialogs: DialogWindows::default(),
             palette: None,
             shortcuts_dialog: None,
+            messages: Messages::default(),
+            messages_open: false,
         };
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         app.apply_view(ctx, &view);
@@ -521,7 +538,7 @@ impl KdiffApp {
 
     fn tab_switch_blocked(&self) -> bool {
         self.close_confirmation.is_some() || self.settings.is_some() || self.updater.update_window.is_some() || self.tab.inset_prompt.is_some() || self.tab.eol_prompt.is_some()
-            || self.tab.heuristics.is_some() || self.shortcuts_dialog.is_some()
+            || self.tab.heuristics.is_some() || self.shortcuts_dialog.is_some() || self.messages_open
     }
 
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
@@ -791,6 +808,7 @@ Shortcut: {}", link.display()),
         }
         if let Err(error) = config::save(path, &self.config) {
             log::error!("{error}");
+            self.messages.push(Instant::now(), WINDOW_TITLE, &error.to_string(), true);
         }
     }
 
@@ -808,8 +826,21 @@ Shortcut: {}", link.display()),
         }
     }
 
+    /// Adds a message of the active tab to the Messages window.
+    fn log_message(&mut self, text: &str, is_error: bool) {
+        let tab = self.tab.title();
+        self.messages.push(Instant::now(), &tab, text, is_error);
+    }
+
+    /// Shows the outcome of something the user did in the status bar.
+    fn report_info(&mut self, text: &str) {
+        self.log_message(text, false);
+        self.tab.status = Some(Status { text: text.to_string(), is_error: false });
+    }
+
     fn report_error(&mut self, text: String) {
         log::error!("{text}");
+        self.log_message(&text, true);
         if self.tab.mirror.is_some() {
             self.tab.status = Some(Status { text, is_error: true });
         } else {
@@ -1126,6 +1157,7 @@ Shortcut: {}", link.display()),
                     self.success_blink_started_at = Some(ctx.input(|input| input.time));
                     ctx.request_repaint();
                 }
+                let mut kept = false;
                 self.tab.status = match kind {
                     Pending::Save => self.tab.mirror.as_ref().and_then(Mirror::output).and_then(|output| output.path.clone()).map(|path| {
                         log::info!("saved {}", path.display());
@@ -1135,7 +1167,10 @@ Shortcut: {}", link.display()),
                             is_error: false,
                         }
                     }),
-                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion | Pending::SetOutputEol => self.tab.status.take(),
+                    Pending::Edit | Pending::Resync | Pending::UndoRedo | Pending::Navigated | Pending::SelectRegion | Pending::SetOutputEol | Pending::HeuristicPropose | Pending::FoldRanges => {
+                        kept = true;
+                        self.tab.status.take()
+                    }
                     Pending::Navigate(to) => Some(Status {
                         text: format!("No {}", navigation_noun(to)),
                         is_error: false,
@@ -1161,15 +1196,20 @@ Shortcut: {}", link.display()),
                         text: format!("Alignments applied. {}", mirror.difference_summary()),
                         is_error: false,
                     }),
-                    Pending::HeuristicPropose => self.tab.status.take(),
-                    Pending::FoldRanges => self.tab.status.take(),
                 };
+                if !kept && let Some(status) = self.tab.status.clone() {
+                    self.log_message(&status.text, status.is_error);
+                }
                 return;
             }
             Err(error) => error,
         };
         match kind {
-            Pending::Open => self.tab.error = Some(error.message),
+            Pending::Open => {
+                log::error!("{}", error.message);
+                self.log_message(&error.message, true);
+                self.tab.error = Some(error.message);
+            }
             Pending::FoldRanges => {
                 self.tab.fold_request = None;
                 log::warn!("cannot find the fold ranges: {}", error.message);
@@ -1410,7 +1450,7 @@ Shortcut: {}", link.display()),
             Err(_) => return,
         };
         if replacements.is_empty() {
-            self.tab.status = Some(Status { text: replaced_summary(0), is_error: false });
+            self.report_info(&replaced_summary(0));
             return;
         }
         let count = replacements.len();
@@ -1983,10 +2023,7 @@ Shortcut: {}", link.display()),
         if self.tab.mirror.as_ref().is_some_and(|mirror| mirror.alignments().changed) {
             self.send(Command::ApplyAlignments { confirmed: false }, Pending::ApplyAlignments);
         } else {
-            self.tab.status = Some(Status {
-                text: "The marks give the alignments already applied".to_string(),
-                is_error: false,
-            });
+            self.report_info("The marks give the alignments already applied");
         }
     }
 
@@ -2070,10 +2107,7 @@ Shortcut: {}", link.display()),
         if self.tab.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()) {
             self.send(Command::ClearAlignmentMarks, Pending::AlignmentEdit);
         } else {
-            self.tab.status = Some(Status {
-                text: "There are no alignment marks".to_string(),
-                is_error: false,
-            });
+            self.report_info("There are no alignment marks");
         }
     }
 
@@ -2381,7 +2415,7 @@ Shortcut: {}", link.display()),
             }
             UiCommand::AddToStartMenu => state.enabled = cfg!(windows) && self.shortcut_install.is_none(),
             UiCommand::ToggleAutomaticUpdates => state.checked = Some(self.config.updates.check_automatically),
-            UiCommand::KeyboardShortcuts => state.enabled = !self.tab_switch_blocked(),
+            UiCommand::KeyboardShortcuts | UiCommand::Messages => state.enabled = !self.tab_switch_blocked(),
             UiCommand::CommandPalette => state.enabled = self.palette.is_some() || !self.tab_switch_blocked(),
             UiCommand::PreviousTab | UiCommand::NextTab | UiCommand::MoveTabLeft | UiCommand::MoveTabRight => state.enabled = !self.background.is_empty() && !self.tab_switch_blocked() && self.tab_drag.is_none(),
         }
@@ -2444,6 +2478,7 @@ Shortcut: {}", link.display()),
             UiCommand::AddToStartMenu => self.begin_shortcut_install(ctx),
             UiCommand::About => self.updater.update_window = Some(UpdateWindow::About),
             UiCommand::KeyboardShortcuts => self.shortcuts_dialog = Some(ShortcutsDialog::default()),
+            UiCommand::Messages => self.messages_open = true,
             UiCommand::CommandPalette => self.palette = if self.palette.is_some() { None } else { Some(PaletteState::default()) },
             UiCommand::CheckForUpdates => self.updater.begin_update_check(ctx, true),
             UiCommand::ToggleAutomaticUpdates => {
@@ -2485,6 +2520,27 @@ Shortcut: {}", link.display()),
         if close || closed {
             self.shortcuts_dialog = None;
         }
+    }
+
+    /// The Messages window. Showing it is seeing the errors, so the status bar stops counting them.
+    fn show_messages(&mut self, ctx: &egui::Context) {
+        if !self.messages_open {
+            return;
+        }
+        self.messages.mark_seen();
+        let now = Instant::now();
+        let mut event = None;
+        let spec = DialogSpec { id: "messages_dialog", title: "Messages", width: messages::DIALOG_WIDTH, closable: true, resizable: Some(messages::RESIZABLE) };
+        let closed = self.dialogs.show(ctx, &spec, |ui| event = messages::show(ui, &self.messages, now));
+        match event {
+            Some(MessagesEvent::Copy) => ctx.copy_text(self.messages.text(now)),
+            Some(MessagesEvent::Clear) => self.messages.clear(),
+            Some(MessagesEvent::Close) => self.messages_open = false,
+            None if closed => self.messages_open = false,
+            None => {}
+        }
+        // The ages go by the minute.
+        ctx.request_repaint_after(std::time::Duration::from_secs(20));
     }
 
     /// The strip under the menu bar: the void space toggle of the output pane, the overview strip, minimap, independent scrolling and ignore whitespace toggles.
@@ -2699,7 +2755,7 @@ Shortcut: {}", link.display()),
         let indentation = output.map(|output| (self.output_indentation(output.lines()), self.tab.indentation_override.is_some()));
         let conflicts = self.tab.mirror.as_ref().and_then(Mirror::conflict_counts);
         let differences = self.tab.mirror.as_ref().and_then(Mirror::difference_counts);
-        status_bar(ui, self.tab.status.as_ref(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts, differences)
+        status_bar(ui, self.tab.status.as_ref(), self.messages.unseen_errors(), self.tab.language.current(), output.map(|output| &output.eol), indentation, conflicts, differences)
     }
 
 
@@ -2956,6 +3012,7 @@ impl eframe::App for KdiffApp {
         let mut find_events = Vec::new();
         let mut go_to_line_event = None;
         let mut eol_pick = None;
+        let mut show_messages = false;
         let palette_top = ui.available_rect_before_wrap().center_top() + egui::vec2(0.0, FIND_BAR_MARGIN.y);
         match self.tab.mirror.as_ref() {
             None => {
@@ -2969,6 +3026,7 @@ impl eframe::App for KdiffApp {
                     self.tab.language.pick(picked, mirror);
                 }
                 eol_pick = picks.eol;
+                show_messages = picks.messages;
                 if let Some(indentation) = picks.indentation {
                     self.tab.indentation_override = indentation;
                 }
@@ -2996,6 +3054,9 @@ impl eframe::App for KdiffApp {
         if let Some(event) = go_to_line_event {
             self.handle_go_to_line_event(&ctx, event);
         }
+        if show_messages {
+            self.run_command(&ctx, UiCommand::Messages);
+        }
         if let Some(action) = form_action {
             self.handle_form_action(action);
         }
@@ -3008,6 +3069,7 @@ impl eframe::App for KdiffApp {
         self.show_heuristics(&ctx);
         self.show_settings(&ctx);
         self.show_shortcuts(&ctx);
+        self.show_messages(&ctx);
         self.show_update_window(&ctx);
         self.show_close_confirmation(&ctx);
         self.dialogs.end_frame(frame.window_handle().ok().map(|handle| handle.as_raw()));
@@ -3089,11 +3151,13 @@ struct StatusPicks {
     language: Option<Language>,
     eol: Option<EolStyle>,
     indentation: Option<Option<Indentation>>,
+    /// The message or the count of unseen errors was clicked.
+    messages: bool,
 }
 
-/// The message at the left and the Bottom Controls at the right.
+/// The message at the left, after the count of errors not yet seen in the Messages window, and the Bottom Controls at the right. A click on the message or the count asks for the Messages window.
 fn status_bar(
-    ui: &mut egui::Ui, status: Option<&Status>, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>, conflicts: Option<ConflictCounts>, differences: Option<DifferenceCounts>,
+    ui: &mut egui::Ui, status: Option<&Status>, unseen_errors: usize, language: &Language, eol: Option<&EolChoice>, indentation: Option<(Indentation, bool)>, conflicts: Option<ConflictCounts>, differences: Option<DifferenceCounts>,
 ) -> StatusPicks {
     let mut picks = StatusPicks::default();
     egui::Panel::bottom("status_bar").show(ui, |ui| {
@@ -3117,7 +3181,12 @@ fn status_bar(
                 difference_label(ui, differences);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.add(egui::Label::new(RichText::new(text).color(color)).truncate());
+                if let Some(badge) = messages::error_badge(unseen_errors) {
+                    let badge = egui::Label::new(RichText::new(badge).color(ui.visuals().error_fg_color).strong()).sense(egui::Sense::click());
+                    picks.messages |= ui.add(badge).on_hover_text(UNSEEN_ERRORS_HINT).clicked();
+                }
+                let message = egui::Label::new(RichText::new(text).color(color)).truncate().sense(egui::Sense::click());
+                picks.messages |= ui.add(message).on_hover_text(MESSAGES_HINT).clicked();
             });
         });
     });
@@ -5139,12 +5208,75 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, status.as_ref(), &Language::plain_text(), None, None, None, None);
+            status_bar(ui, status.as_ref(), 0, &Language::plain_text(), None, None, None, None);
         });
         harness.run();
         let selector = harness.get_by_label("Language of the documents").rect();
         let message = harness.get_by_label_contains(text.unwrap_or("Ready")).rect();
         (selector.height(), selector.right(), message.right())
+    }
+
+    #[test]
+    fn messages_of_the_status_bar_and_errors_go_to_the_messages_list() {
+        let (mut app, host, ctx) = app_with_session();
+        app.clear_alignments();
+        app.report_error("Cannot do it".to_string());
+        app.undo_redo(&ctx, Command::Undo);
+        let undo = app.tab.pending.keys().next().cloned().unwrap();
+        app.handle_message(&ctx, HostMessage::Response(Response { id: undo, result: Ok(()) }));
+        let save = app.send(Command::Save, Pending::Save).unwrap();
+        app.handle_message(&ctx, HostMessage::Response(Response { id: save, result: Err(kdiff4_protocol::ProtocolError { kind: ErrorKind::Io, message: "disk full".to_string() }) }));
+        let listed: Vec<(String, String, bool)> = app.messages.entries().map(|message| (message.tab.clone(), message.text.clone(), message.is_error)).collect();
+        let expected = [("There are no alignment marks", false), ("Cannot do it", true), ("Cannot save: disk full", true)];
+        assert_eq!(listed, expected.map(|(text, is_error)| ("A.txt".to_string(), text.to_string(), is_error)), "the answer to undo keeps the message and adds none");
+        assert_eq!(app.messages.unseen_errors(), 2);
+        drop(host);
+    }
+
+    #[test]
+    fn a_failed_open_is_listed_under_the_tab_of_its_form() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.tab.mirror = None;
+        let open = app.send(Command::Open(OpenFiles::default()), Pending::Open).unwrap();
+        app.handle_message(&ctx, HostMessage::Response(Response { id: open, result: Err(kdiff4_protocol::ProtocolError { kind: ErrorKind::Io, message: "no such file".to_string() }) }));
+        assert_eq!(app.tab.error.as_deref(), Some("no such file"));
+        let listed: Vec<(&str, &str, bool)> = app.messages.entries().map(|message| (message.tab.as_str(), message.text.as_str(), message.is_error)).collect();
+        assert_eq!(listed, [("Open", "no such file", true)]);
+    }
+
+    #[test]
+    fn the_messages_command_opens_the_window_which_marks_the_errors_seen() {
+        let (mut app, _host, ctx) = app_with_session();
+        app.report_error("Cannot do it".to_string());
+        assert!(app.command_state(UiCommand::Messages).enabled);
+        app.run_command(&ctx, UiCommand::Messages);
+        assert!(app.messages_open && app.tab_switch_blocked());
+        assert_eq!(app.messages.unseen_errors(), 1, "not seen until the window is shown");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.show_messages(ui.ctx()));
+        output.textures_delta.clear();
+        assert_eq!(app.messages.unseen_errors(), 0);
+        assert_eq!(app.messages.entries().count(), 1);
+    }
+
+    #[test]
+    fn the_status_bar_counts_unseen_errors_and_a_click_asks_for_the_messages() {
+        use egui_kittest::kittest::Queryable;
+        for (label, unseen) in [("Saved", 0), ("2 errors", 2), ("Saved", 2)] {
+            let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui_state(
+                move |ui, clicked: &mut bool| {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    let status = Status { text: "Saved".to_string(), is_error: false };
+                    *clicked |= status_bar(ui, Some(&status), unseen, &Language::plain_text(), None, None, None, None).messages;
+                },
+                false,
+            );
+            harness.run();
+            assert_eq!(harness.query_by_label("2 errors").is_some(), unseen == 2);
+            assert!(!*harness.state());
+            harness.get_by_label(label).click();
+            harness.run();
+            assert!(*harness.state(), "{label} with {unseen} unseen errors");
+        }
     }
 
     #[test]
@@ -5164,7 +5296,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(move |ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), Some(&eol), None, None, None);
+            status_bar(ui, None, 0, &Language::plain_text(), Some(&eol), None, None, None);
         });
         harness.run();
         harness
@@ -5188,7 +5320,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 240.0))
             .with_context_setup(egui_extras::install_image_loaders)
             .build_ui_state(|ui, eol| {
-                let picks = status_bar(ui, None, &Language::plain_text(), Some(eol), Some((Indentation { spaces: true, size: 4 }, false)), None, None);
+                let picks = status_bar(ui, None, 0, &Language::plain_text(), Some(eol), Some((Indentation { spaces: true, size: 4 }, false)), None, None);
                 if let Some(picked) = picks.eol {
                     *eol = EolChoice::Style(picked);
                 }
@@ -5305,7 +5437,7 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(500.0, 200.0)).build_ui(|ui| {
             egui_extras::install_image_loaders(ui.ctx());
             theme::apply_style(ui.ctx(), &config::ViewConfig::default());
-            status_bar(ui, None, &Language::plain_text(), None, None, None, None);
+            status_bar(ui, None, 0, &Language::plain_text(), None, None, None, None);
         });
         harness.run();
         assert!(harness.query_by_label(eol::SELECTOR_HINT).is_none());
