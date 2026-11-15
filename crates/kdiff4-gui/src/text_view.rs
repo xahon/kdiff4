@@ -230,6 +230,16 @@ pub struct ViewResponse {
     pub viewport: Viewport,
     /// The wheel scrolling over the view this frame; the caller scrolls the view, so panes that scroll together move as one.
     pub wheel: Wheel,
+    pub horizontal: HorizontalScroll,
+}
+
+/// Where a view ended a frame sideways, and how far its longest line lets it go.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HorizontalScroll {
+    pub offset: f32,
+    pub max: f32,
+    /// Pixels the wheel over the view asked to scroll right this frame, negative for left. The view scrolled by them itself as far as its lines go; the caller needs them when it stood at its end already.
+    pub wheel: f32,
 }
 
 /// Pixels the wheel asked to scroll down in a frame, negative for up: `stepped` by mouse wheel notches, which may scroll smoothly, and `direct` by a trackpad, which follows the fingers at once.
@@ -306,7 +316,7 @@ impl Margin {
     }
 }
 
-/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset, so several views can scroll together. Vertical wheel scrolling is not applied but reported, for the caller to scroll with. With `folds`, a fold column right of the line numbers has a button for each fold range, shown while the pointer is over the margin and always for a fold, and a folded header row ends in the Fold Ellipsis.
+/// Draws `rows` of `lines` in a scroll area, laying out only the visible rows: text with its char diff from `char_runs`, or hatching for a void, behind a margin of line numbers and gutters, with a bordered box around each region that differs and the current region's background. `caret` is drawn if it is in this view; `reveal_caret` scrolls it into view. `offset` forces the vertical scroll offset and `offset_x` the horizontal one, so several views can scroll together; the view still scrolls sideways itself, and reports where it ended. Vertical wheel scrolling is not applied but reported, for the caller to scroll with. With `folds`, a fold column right of the line numbers has a button for each fold range, shown while the pointer is over the margin and always for a fold, and a folded header row ends in the Fold Ellipsis.
 pub fn show(
     ui: &mut Ui,
     id_salt: &str,
@@ -316,6 +326,7 @@ pub fn show(
     caret: Option<Caret>,
     reveal_caret: bool,
     offset: Option<f32>,
+    offset_x: Option<f32>,
     style: &ViewStyle<'_>,
     marks: PaneMarks<'_>,
     find: Option<FindHits<'_>>,
@@ -364,10 +375,15 @@ pub fn show(
         area = area.vertical_scroll_offset(target);
     }
     let horizontal_id = ui.make_persistent_id((id_salt, "autoscroll_x"));
-    if let Some(x) = ui.data_mut(|data| data.remove_temp::<f32>(horizontal_id)) {
+    let autoscrolled_x = ui.data_mut(|data| data.remove_temp::<f32>(horizontal_id));
+    if let Some(x) = autoscrolled_x.or(offset_x) {
         area = area.horizontal_scroll_offset(x);
     }
     let mut wheel = take_vertical_wheel(ui, row_height, viewport_height, style.scroll_step_rows);
+    let wheel_x = match ui.rect_contains_pointer(ui.available_rect_before_wrap()) {
+        true => -ui.input(|input| input.smooth_scroll_delta.x),
+        false => 0.0,
+    };
     // One target for the whole visible pane, so empty space, the margin and the space right of a line take the mouse too. It goes in before the scroll area, so the scroll bars floating over the text are on top of it and can be grabbed.
     let response = ui.interact(ui.available_rect_before_wrap(), ui.make_persistent_id((id_salt, "pointer")), Sense::click_and_drag());
 
@@ -781,6 +797,7 @@ pub fn show(
         page_rows,
         viewport,
         wheel,
+        horizontal: HorizontalScroll { offset: scroll.x, max: (output.content_size.x - output.inner_rect.width()).max(0.0), wheel: wheel_x },
     }
 }
 
@@ -1686,7 +1703,7 @@ mod tests {
                     highest: test.highest,
                     insets: &test.insets,
                 };
-                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, &style, marks, None, None);
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, test.caret, false, None, None, &style, marks, None, None);
                 if response.menu.is_some() {
                     test.menu = response.menu;
                 }
@@ -1747,7 +1764,7 @@ mod tests {
                     highest: 0,
                     insets: &[],
                 };
-                let response = show(ui, "pane", lines, Rows::Mapped(&rows), None, None, false, None, &style, marks, None, Some(&folds));
+                let response = show(ui, "pane", lines, Rows::Mapped(&rows), None, None, false, None, None, &style, marks, None, Some(&folds));
                 if response.pointer.is_some() {
                     test.pointer = response.pointer;
                 }
@@ -1940,6 +1957,8 @@ mod tests {
         size: Vec2,
         row_height: f32,
         text_left: f32,
+        given_x: Option<f32>,
+        horizontal: HorizontalScroll,
     }
 
 
@@ -1949,7 +1968,7 @@ mod tests {
     /// A view of 200 long lines whose vertical offset the test keeps the way the panes do: it follows the scroll bar and adds the wheel.
     fn scroll_harness() -> egui_kittest::Harness<'static, ScrollTest> {
         let text: &'static str = Box::leak((0..200).map(|line| format!("{line:03}{}\n", "x".repeat(300))).collect::<String>().into_boxed_str());
-        let test = ScrollTest { offset: 0.0, actions: Vec::new(), origin: Pos2::ZERO, size: Vec2::ZERO, row_height: 0.0, text_left: 0.0 };
+        let test = ScrollTest { offset: 0.0, actions: Vec::new(), origin: Pos2::ZERO, size: Vec2::ZERO, row_height: 0.0, text_left: 0.0, given_x: None, horizontal: HorizontalScroll::default() };
         let mut harness = egui_kittest::Harness::builder().with_size(SCROLL_TEST_SIZE).with_step_dt(0.01).build_ui_state(
             move |ui, test: &mut ScrollTest| {
                 let ranges = editing::editor_lines(text);
@@ -1963,7 +1982,8 @@ mod tests {
                 test.text_left = test.origin.x + margin_widths(&style, lines.count(), char_width, test.row_height, 0).total();
                 let marks = PaneMarks { marks: &[], highest: 0, insets: &[] };
                 let given = test.offset.clone();
-                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, None, false, Some(given), &style, marks, None, None);
+                let response = show(ui, "pane", lines, Rows::PerLine(lines.count()), None, None, false, Some(given), test.given_x.clone(), &style, marks, None, None);
+                test.horizontal = response.horizontal;
                 let max = response.viewport.max_offset();
                 test.offset = match (response.viewport.offset - given).abs() > 0.5 {
                     true => response.viewport.offset,
@@ -2021,6 +2041,57 @@ mod tests {
         assert!(column_at_text_left(&mut harness) > 0, "the view did not scroll sideways");
     }
 
+
+    #[test]
+    fn a_given_horizontal_offset_is_shown_and_stops_at_the_end_of_the_longest_line() {
+        let mut harness = scroll_harness();
+        assert_eq!(harness.state().horizontal.offset, 0.0);
+        let max = harness.state().horizontal.max;
+        assert!(max > 500.0, "300 characters do not fit: {max}");
+        harness.state_mut().given_x = Some(120.0);
+        harness.run_steps(2);
+        assert_eq!(harness.state().horizontal.offset, 120.0);
+        assert!(column_at_text_left(&mut harness) > 0);
+        harness.state_mut().given_x = Some(max + 1000.0);
+        harness.run_steps(2);
+        assert!((harness.state().horizontal.offset - max).abs() < 0.5, "{} is not the end, {max}", harness.state().horizontal.offset);
+    }
+
+    #[test]
+    fn a_view_given_its_horizontal_offset_still_scrolls_sideways_by_its_bar() {
+        let mut harness = scroll_harness();
+        harness.state_mut().given_x = Some(0.0);
+        harness.run_steps(2);
+        let (origin, size) = (harness.state().origin, harness.state().size);
+        let bar_y = origin.y + size.y - 4.0;
+        harness.hover_at(pos2(origin.x + 40.0, bar_y));
+        harness.run_steps(2);
+        harness.event(button_event(pos2(origin.x + 40.0, bar_y), egui::PointerButton::Primary, true));
+        harness.run_steps(2);
+        harness.hover_at(pos2(origin.x + 200.0, bar_y));
+        harness.step();
+        assert!(harness.state().horizontal.offset > 0.5, "the frame of the drag reports where the bar took the view");
+    }
+
+    #[test]
+    fn the_horizontal_wheel_over_a_view_is_reported_even_at_the_end_of_its_lines() {
+        let mut harness = scroll_harness();
+        let max = harness.state().horizontal.max;
+        harness.state_mut().given_x = Some(max + 1000.0);
+        let over = harness.state().origin + vec2(100.0, 50.0);
+        harness.hover_at(over);
+        harness.run_steps(2);
+        harness.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(40.0, 0.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown });
+        harness.step();
+        let horizontal = harness.state().horizontal;
+        assert!(horizontal.wheel < 0.0, "scrolling the content right is scrolling left: {}", horizontal.wheel);
+        assert!((horizontal.offset - max).abs() < 0.5, "the view is still given an offset past its end");
+        harness.hover_at(harness.state().origin + vec2(100.0, SCROLL_TEST_SIZE.y + 50.0));
+        harness.run_steps(3);
+        harness.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(40.0, 0.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Unknown });
+        harness.step();
+        assert_eq!(harness.state().horizontal.wheel, 0.0, "the wheel away from the view is not its wheel");
+    }
 
     #[test]
     fn the_vertical_scroll_bar_can_be_dragged() {
@@ -2365,7 +2436,7 @@ mod tests {
                 test.gutter_left = margin_widths(&style, lines.count(), char_width, test.row_height, 0).gutter_left();
                 let map = block_rows();
                 let marks = PaneMarks { marks: &[], highest: 0, insets: &[] };
-                let response = show(ui, "pane", lines, Rows::Mapped(&map), None, test.caret, false, None, &style, marks, None, None);
+                let response = show(ui, "pane", lines, Rows::Mapped(&map), None, test.caret, false, None, None, &style, marks, None, None);
                 test.menu = response.menu.or(test.menu.take());
                 test.pointer = response.pointer.or(test.pointer.take());
             },

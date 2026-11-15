@@ -18,7 +18,7 @@ use crate::overview;
 use crate::paths;
 use crate::rows::Rows;
 use crate::scroll::{ScrollMotion, SmoothScroll};
-use crate::text_view::{self, Caret, CharRuns, FindHits, MarginKind, MenuAction, MergeView, PointerAction, ViewStyle, Viewport, Wheel};
+use crate::text_view::{self, Caret, CharRuns, FindHits, HorizontalScroll, MarginKind, MenuAction, MergeView, PointerAction, ViewStyle, Viewport, Wheel};
 use crate::theme::{self, Palette};
 
 const SPLITTER_HEIGHT: f32 = 0.0;
@@ -116,6 +116,8 @@ pub struct PaneState {
     pub output_scroll: SmoothScroll,
     /// Vertical scrolling of each pane on its own while the panes scroll independently, in `Document::ALL` order.
     pub pane_scrolls: [SmoothScroll; 4],
+    /// Horizontal scroll offset shared by all panes, unless they scroll on their own. Every pane is drawn at it, also past the end of its own lines, so the same columns line up in all of them.
+    pub shared_x: f32,
     /// Every pane scrolls on its own, as of the last frame.
     pub independent_scroll: bool,
     /// The pane, among those that line up with the source panes, that the user last pressed in, scrolled with the wheel or dragged the scroll bar of. The others take its offset when scrolling is synced again.
@@ -142,6 +144,7 @@ impl Default for PaneState {
             source_scroll: SmoothScroll::default(),
             output_scroll: SmoothScroll::default(),
             pane_scrolls: [SmoothScroll::default(); 4],
+            shared_x: 0.0,
             independent_scroll: false,
             scroll_leader: None,
             viewports: [None; 4],
@@ -281,6 +284,9 @@ struct PaneScroll {
     after: f32,
     wheel: Wheel,
     max: f32,
+    /// The horizontal offset the pane was given; `None` while it scrolls sideways on its own.
+    given_x: Option<f32>,
+    horizontal: HorizontalScroll,
 }
 
 /// Shows the overview strip; whatever it returns also gives the strip the keyboard.
@@ -379,6 +385,10 @@ pub fn show_session(ui: &mut Ui, mirror: &Mirror, state: &mut PaneState, options
         }
         if let Some(leader) = focused_pane(&scrolls, mirror.is_aligned()) {
             state.scroll_leader = Some(leader);
+        }
+        if let Some(x) = scrolled_x(state.shared_x.clone(), &scrolls) {
+            state.shared_x = x;
+            ui.ctx().request_repaint();
         }
         if mirror.is_aligned() && !state.independent_scroll {
             state.output_scroll = state.source_scroll.clone();
@@ -505,6 +515,27 @@ pub fn jump_offset(rows: Range<usize>, context: usize, viewport: Viewport) -> f3
     let length = rows.len().max(1);
     let context = context.min(viewport.page_rows().saturating_sub(length) / 2);
     rows.start.saturating_sub(context) as f32 * viewport.row_height
+}
+
+/// The horizontal offset every pane takes after a frame, given `shared` in this one: that of a pane that ended up away from the offset it was given, or from the end of its own scroll range when that is shorter, because the user scrolled it sideways. A pane whose lines fit, or that is at its end, can't scroll itself, so the wheel over it scrolls the shared offset instead, as far as the longest lines go. `None` while nothing scrolled or the panes scroll on their own.
+fn scrolled_x(shared: f32, panes: &[PaneScroll]) -> Option<f32> {
+    let moved = panes
+        .iter()
+        .find_map(|pane| {
+            let shown = pane.given_x?.min(pane.horizontal.max).max(0.0);
+            let after = pane.horizontal.offset;
+            ((after - shown).abs() > MOVED_BY_PANE).then_some(after)
+        });
+    if moved.is_some() {
+        return moved;
+    }
+    let synced = || panes.iter().filter(|pane| pane.given_x.is_some());
+    let wheel: f32 = synced().map(|pane| pane.horizontal.wheel).sum();
+    if wheel == 0.0 || wheel.is_nan() {
+        return None;
+    }
+    let max = synced().map(|pane| pane.horizontal.max).fold(0.0, f32::max);
+    Some((shared.min(max) + wheel).clamp(0.0, max))
 }
 
 /// After a frame: a pane of `group` that ended up away from its given offset, because the user dragged its scroll bar or it revealed the caret, takes the group's offset with it; otherwise the wheel over the group's panes scrolls them.
@@ -689,6 +720,7 @@ fn pane(
             theme::pane_body_frame()
                 .show(ui, |ui| {
                     let caret = state.visible_caret(document.clone());
+                    let given_x = (!state.independent_scroll).then(|| state.shared_x.clone());
                     let find = Some(&state.find)
                         .filter(|find| find.open && find.document == Some(document))
                         .map(|find| FindHits { matches: &find.matches, current: find.current });
@@ -701,6 +733,7 @@ fn pane(
                         caret,
                         state.reveal_caret && caret.is_some(),
                         Some(given.clone()),
+                        given_x.clone(),
                         style,
                         marks,
                         find,
@@ -752,6 +785,8 @@ fn pane(
                         after: response.viewport.offset,
                         wheel: response.wheel,
                         max: response.viewport.max_offset(),
+                        given_x,
+                        horizontal: response.horizontal,
                     }
                 })
                 .inner
@@ -1076,6 +1111,8 @@ mod tests {
             after,
             wheel: Wheel { stepped: wheel, direct: 0.0 },
             max: 500.0,
+            given_x: None,
+            horizontal: HorizontalScroll::default(),
         }
     }
 
@@ -1089,6 +1126,8 @@ mod tests {
             after: given,
             wheel: Wheel { stepped: 10.0, direct: 0.0 },
             max: 30.0,
+            given_x: None,
+            horizontal: HorizontalScroll::default(),
             ..scroll(ScrollGroup::Sources, given, given, 0.0)
         };
         let shared = unfold_scroll(pane, rows, 0.0, 10.0);
@@ -1099,6 +1138,41 @@ mod tests {
         assert_eq!(moved.after, 60.0);
     }
 
+
+    #[test]
+    fn every_pane_takes_the_horizontal_offset_of_the_one_that_was_scrolled() {
+        let pane = |given: Option<f32>, offset: f32, max: f32| PaneScroll { given_x: given, horizontal: HorizontalScroll { offset, max, wheel: 0.0 }, ..scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0) };
+        assert_eq!(scrolled_x(40.0, &[pane(Some(40.0), 40.0, 300.0), pane(Some(40.0), 40.0, 300.0)]), None);
+        assert_eq!(scrolled_x(40.0, &[pane(Some(40.0), 40.0, 300.0), pane(Some(40.0), 90.0, 300.0)]), Some(90.0));
+        assert_eq!(scrolled_x(40.0, &[pane(Some(40.0), 0.0, 300.0)]), Some(0.0));
+        assert_eq!(scrolled_x(40.0, &[]), None);
+    }
+
+    #[test]
+    fn the_wheel_over_a_pane_at_the_end_of_its_lines_scrolls_the_others() {
+        let pane = |offset: f32, max: f32, wheel: f32| PaneScroll { given_x: Some(200.0), horizontal: HorizontalScroll { offset, max, wheel }, ..scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0) };
+        assert_eq!(scrolled_x(200.0, &[pane(200.0, 300.0, 0.0), pane(50.0, 50.0, -30.0)]), Some(170.0));
+        assert_eq!(scrolled_x(200.0, &[pane(200.0, 300.0, 0.0), pane(50.0, 50.0, 500.0)]), Some(300.0), "no further than the longest lines");
+        assert_eq!(scrolled_x(200.0, &[pane(200.0, 300.0, 0.0), pane(50.0, 50.0, -500.0)]), Some(0.0));
+        assert_eq!(scrolled_x(200.0, &[pane(170.0, 300.0, -30.0), pane(50.0, 50.0, 0.0)]), Some(170.0), "a pane that moved by its wheel is not moved twice");
+        let past = |offset: f32, max: f32, wheel: f32| PaneScroll { given_x: Some(900.0), ..pane(offset, max, wheel) };
+        assert_eq!(scrolled_x(900.0, &[past(300.0, 300.0, 0.0), past(50.0, 50.0, -30.0)]), Some(270.0), "an offset past every end counts from the end");
+        assert_eq!(scrolled_x(200.0, &[pane(200.0, 300.0, f32::NAN)]), None);
+    }
+
+    #[test]
+    fn a_pane_with_shorter_lines_does_not_pull_the_others_back() {
+        let pane = |given: Option<f32>, offset: f32, max: f32| PaneScroll { given_x: given, horizontal: HorizontalScroll { offset, max, wheel: 0.0 }, ..scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0) };
+        assert_eq!(scrolled_x(200.0, &[pane(Some(200.0), 200.0, 300.0), pane(Some(200.0), 50.0, 50.0), pane(Some(200.0), 0.0, 0.0)]), None);
+        assert_eq!(scrolled_x(200.0, &[pane(Some(200.0), 200.0, 300.0), pane(Some(200.0), 30.0, 50.0)]), Some(30.0), "its scroll bar was dragged back from its end");
+        assert_eq!(scrolled_x(f32::NAN, &[pane(Some(f32::NAN), 0.0, 0.0)]), None);
+    }
+
+    #[test]
+    fn panes_that_scroll_on_their_own_keep_their_horizontal_offsets() {
+        let pane = |offset: f32| PaneScroll { given_x: None, horizontal: HorizontalScroll { offset, max: 300.0, wheel: -20.0 }, ..scroll(ScrollGroup::Sources, 0.0, 0.0, 0.0) };
+        assert_eq!(scrolled_x(40.0, &[pane(10.0), pane(250.0)]), None);
+    }
 
     #[test]
     fn shared_offset_follows_the_pane_that_moved() {
@@ -1143,6 +1217,8 @@ mod tests {
             after: 0.0,
             wheel: Wheel { stepped: 0.0, direct: 12.0 },
             max: 500.0,
+            given_x: None,
+            horizontal: HorizontalScroll::default(),
         };
         follow_panes(&mut shared, ScrollGroup::Sources, &[pane], smooth);
         assert_eq!(shared, SmoothScroll { offset: 12.0, target: 12.0 });
