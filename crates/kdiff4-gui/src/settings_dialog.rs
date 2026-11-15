@@ -25,13 +25,15 @@ const REGION_BOXES: Section = Section { id: "region_boxes", title: "Region boxes
 const JUMPED_TO_REGION: Section = Section { id: "jumped_to_region", title: "Jumped-to region: Highlight", words: "background color current region" };
 const ALIGNMENTS: Section = Section { id: "alignments", title: "Alignments: Gutter and navigation", words: "gutter color inset arrow gap jump stops previous next difference" };
 const DOCUMENT_COLORS: Section = Section { id: "document_colors", title: "Documents: Colors", words: "a b c differs from all red fold ellipsis color" };
+pub const RESTORE_TABS_LABEL: &str = "Reopen the tabs of the last run on start";
 const WINDOW_APPEARANCE: Section = Section { id: "window_appearance", title: "Window: Appearance", words: "theme light dark system ui text color corner radius" };
+const WINDOW_TABS: Section = Section { id: "window_tabs", title: "Window: Tabs", words: "reopen restore tabs last run start" };
 const BOTTOM_CONTROLS: Section = Section { id: "bottom_controls_appearance", title: "Bottom Controls", words: "bottom switch tint outline color" };
 const SUCCESS_BLINK: Section = Section { id: "success_blink_appearance", title: "Success Blink", words: "enable blink color peak alpha animation time save" };
 const HEURISTICS: Section = Section { id: "comparison_heuristics", title: "Heuristics Alignment", words: "extractor tree-sitter functions entities" };
 const ALGORITHM: Section = Section { id: "comparison_algorithm", title: "Comparison: Algorithm", words: "algorithm diff myers patience histogram try hard pair similar changed lines" };
 const CHAR_DIFF: Section = Section { id: "comparison_char_diff", title: "Comparison: Character diff", words: "line limit characters" };
-const SECTIONS: [&Section; 14] = [&PANES_TEXT, &OUTPUT_INDENTATION, &PANES_CONTENT, &PANES_SCROLLING, &REGION_BOXES, &JUMPED_TO_REGION, &ALIGNMENTS, &DOCUMENT_COLORS, &WINDOW_APPEARANCE, &BOTTOM_CONTROLS, &SUCCESS_BLINK, &HEURISTICS, &ALGORITHM, &CHAR_DIFF];
+const SECTIONS: [&Section; 15] = [&PANES_TEXT, &OUTPUT_INDENTATION, &PANES_CONTENT, &PANES_SCROLLING, &REGION_BOXES, &JUMPED_TO_REGION, &ALIGNMENTS, &DOCUMENT_COLORS, &WINDOW_APPEARANCE, &WINDOW_TABS, &BOTTOM_CONTROLS, &SUCCESS_BLINK, &HEURISTICS, &ALGORITHM, &CHAR_DIFF];
 
 
 /// A titled group of settings. `words` are the lowercase words of its settings the search finds it by, besides its title.
@@ -545,6 +547,12 @@ impl SettingsDialog {
                 .on_hover_text("Shared rounding for panes, buttons, tabs, Bottom Controls, menus, dialogs, and the window frame.");
             ui.end_row();
         });
+        section(ui, filter, &WINDOW_TABS, |ui| {
+            ui.label("");
+            ui.checkbox(&mut self.draft.restore_tabs, RESTORE_TABS_LABEL)
+                .on_hover_text("When Kdiff4 starts without files, open the comparisons its window had when it was closed, instead of the Open window. Only the files are opened again, not unsaved merge work, and tabs opened from a command line are not kept.");
+            ui.end_row();
+        });
         section(ui, filter, &BOTTOM_CONTROLS, |ui| {
             let colors = self.draft.colors_mut(theme == Theme::Dark);
             let palette = theme::palette(theme);
@@ -819,6 +827,18 @@ mod tests {
         harness.run();
         harness.get_by_label(SUCCESS_BLINK.title);
         assert!(harness.query_by_label(PANES_TEXT.title).is_none());
+    }
+
+    #[test]
+    fn the_tabs_section_turns_reopening_the_tabs_off() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = search_harness("reopen tabs");
+        harness.get_by_label(WINDOW_TABS.title);
+        assert!(harness.state().draft().restore_tabs);
+        harness.get_by_label(RESTORE_TABS_LABEL).click();
+        harness.run();
+        assert!(!harness.state().draft().restore_tabs);
     }
 
     #[test]

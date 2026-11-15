@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use kdiff4_protocol::{Extractor, HeuristicOptions};
+use kdiff4_protocol::{Extractor, HeuristicOptions, OpenFiles};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -60,6 +60,8 @@ pub struct GuiConfig {
     pub window: Option<crate::window_placement::WindowPlacement>,
     /// The options the Heuristics Alignment window was last closed with. Its extractor is the one of the view settings.
     pub heuristics: HeuristicOptions,
+    /// The tabs the main window had when it last closed.
+    pub tabs: TabsConfig,
 }
 
 impl Default for GuiConfig {
@@ -71,8 +73,29 @@ impl Default for GuiConfig {
             updates: UpdateConfig::default(),
             window: None,
             heuristics: HeuristicOptions::default(),
+            tabs: TabsConfig::default(),
         }
     }
+}
+
+
+/// The tabs to open again when Kdiff4 starts without files: those opened in the app, not the ones a command line waits for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabsConfig {
+    /// The files of every tab, in the order of the tab strip.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub open: Vec<OpenFiles>,
+    /// The index in `open` of the tab that was active.
+    pub active: usize,
+}
+
+
+/// Whether the saved settings ask to reopen tabs and there are tabs to reopen.
+pub fn has_tabs_to_restore() -> bool {
+    default_config_path()
+        .and_then(|path| load(&path).ok())
+        .is_some_and(|config| config.view.restore_tabs && !config.tabs.open.is_empty())
 }
 
 pub const MAX_TAB_SIZE: u8 = 100;
@@ -111,6 +134,8 @@ pub struct ViewConfig {
     pub show_minimap: bool,
     /// Every pane scrolls on its own instead of with the others.
     pub independent_scroll: bool,
+    /// A start without files opens the tabs of the last run again.
+    pub restore_tabs: bool,
     /// Rows kept above a region that navigation jumps to.
     pub jump_context_lines: u8,
     /// Wheel scrolling and jumps glide to where they go instead of moving at once.
@@ -160,6 +185,7 @@ impl Default for ViewConfig {
             show_overview_strip: true,
             show_minimap: true,
             independent_scroll: false,
+            restore_tabs: true,
             jump_context_lines: DEFAULT_JUMP_CONTEXT_LINES,
             smooth_scrolling: true,
             smooth_scroll_ms: DEFAULT_SMOOTH_SCROLL_MS,
@@ -334,6 +360,10 @@ impl Default for UpdateConfig {
 
 
 pub fn default_config_path() -> Option<PathBuf> {
+    // Tests must never read or overwrite the user's own settings.
+    if cfg!(test) {
+        return None;
+    }
     dirs::config_dir().map(|dir| dir.join("kdiff4").join("gui.toml"))
 }
 
@@ -428,6 +458,33 @@ mod tests {
     }
 
     #[test]
+    fn tests_have_no_config_file_of_the_user_to_overwrite() {
+        assert_eq!(default_config_path(), None);
+        assert!(!has_tabs_to_restore());
+    }
+
+    #[test]
+    fn tabs_round_trip_and_are_restored_by_default() {
+        let dir = temp_dir("tabs");
+        let path = dir.join("gui.toml");
+        let mut config = GuiConfig::default();
+        assert!(config.view.restore_tabs && config.tabs.open.is_empty());
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap().tabs, TabsConfig::default());
+        let labels = kdiff4_protocol::Labels { a: Some("Base".to_string()), b: None, c: Some("Theirs".to_string()) };
+        config.tabs.open = vec![
+            OpenFiles { a: "C:\\work\\a.txt".into(), b: "b.txt".into(), c: None, output: None, labels: kdiff4_protocol::Labels::default() },
+            OpenFiles { a: "base.rs".into(), b: "left.rs".into(), c: Some("right.rs".into()), output: Some("out dir/out.rs".into()), labels },
+        ];
+        config.tabs.active = 1;
+        config.view.restore_tabs = false;
+        save(&path, &config).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.tabs, config.tabs);
+        assert!(!loaded.view.restore_tabs);
+    }
+
+    #[test]
     fn updates_round_trip() {
         let dir = temp_dir("updates");
         let path = dir.join("gui.toml");
@@ -494,6 +551,7 @@ last_dir = \"x\"
             show_overview_strip: false,
             show_minimap: false,
             independent_scroll: true,
+            restore_tabs: false,
             jump_context_lines: 7,
             smooth_scrolling: false,
             smooth_scroll_ms: 400,

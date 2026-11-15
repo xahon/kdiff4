@@ -125,6 +125,10 @@ fn restart_updated_executable(exe: &std::path::Path) -> anyhow::Result<()> {
 
 fn run_open_window() -> anyhow::Result<bool> {
     let check_for_updates = !instance::has_window().unwrap_or(false);
+    // A first start without files opens the tabs of the last run instead of the Open window, when there are any.
+    if check_for_updates && kdiff4_gui::has_tabs_to_restore() && instance::restore_tabs().unwrap_or(false) {
+        return Ok(true);
+    }
     let _logger = check_for_updates.then(logging::init);
     let restart = kdiff4_gui::run_open_window(check_for_updates, |files, last_dir| {
         match instance::open_from_form(files, last_dir) {

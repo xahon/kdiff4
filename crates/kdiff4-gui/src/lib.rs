@@ -46,6 +46,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use kdiff4_protocol::{Client, Document, Labels, OpenFiles};
 use thiserror::Error;
 
+pub use config::has_tabs_to_restore;
 pub use paths::{clean_path, clean_path_text};
 
 #[derive(Debug, Error)]
@@ -54,11 +55,12 @@ pub enum GuiError {
     Eframe(String),
 }
 
-/// Files to open in a tab, or paths to prefill when the invocation supplied fewer than two inputs.
+/// Files to open in a tab, paths to prefill when the invocation supplied fewer than two inputs, or the tabs of the last run to open again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum OpenDocument {
     Open(OpenFiles),
     Prefill(Vec<(Document, PathBuf)>, Labels),
+    Restore,
 }
 
 

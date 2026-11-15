@@ -11,7 +11,7 @@ use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
 use crate::bottom_controls::{bottom_switch, conflict_label, difference_label, SwitchPopup};
 use crate::command_palette::{self, PaletteEntry, PaletteEvent, PaletteState};
-use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
+use crate::config::{self, GuiConfig, TabIndentation, TabsConfig, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
 use crate::document_tabs;
 use crate::editing::{self, Cursor, EditKey, Indentation, Lines, Motion, Position};
@@ -521,7 +521,10 @@ impl KdiffApp {
             return;
         }
         self.exiting = true;
-        if self.window_placement_changed {
+        let tabs = self.remembered_tabs();
+        let tabs_changed = tabs != self.config.tabs;
+        self.config.tabs = tabs;
+        if self.window_placement_changed || tabs_changed {
             self.save_config(false);
         }
         self.tab.finish();
@@ -577,7 +580,7 @@ impl KdiffApp {
     fn receive_launches(&mut self, ctx: &egui::Context, starting: bool) {
         if let Some(incoming) = &self.incoming {
             for request in incoming.try_iter() {
-                self.activate_window |= !starting || matches!(request.document, OpenDocument::Prefill(..));
+                self.activate_window |= !starting || matches!(request.document, OpenDocument::Prefill(..) | OpenDocument::Restore);
                 self.waiting_launches.push_back(request);
             }
         }
@@ -589,6 +592,13 @@ impl KdiffApp {
                 OpenCompletion::TabClosed(result) => (Some(result), None, None),
                 OpenCompletion::Dispatched { result, last_dir } => (None, Some(result), last_dir),
             };
+            if request.document == OpenDocument::Restore {
+                let restored = self.restore_tabs(ctx);
+                if let Some(completion) = on_close.or(on_dispatch) {
+                    let _ = completion.send(restored);
+                }
+                continue;
+            }
             if !self.tab.is_blank() && !self.activate_new_tab(ctx) {
                 if let Some(completion) = on_close.or(on_dispatch) {
                     let _ = completion.send(false);
@@ -613,6 +623,7 @@ impl KdiffApp {
                     self.tab.form.set_labels(labels);
                     true
                 }
+                OpenDocument::Restore => false,
             };
             if let Some(completion) = on_dispatch {
                 let _ = completion.send(dispatched);
@@ -621,6 +632,50 @@ impl KdiffApp {
         }
     }
 
+
+    /// The tabs to open again on the next start, in the order of the tab strip, and which of them is active: those that have files and no command line waiting for them. A path that is not Unicode can't be saved, so its tab is left out.
+    fn remembered_tabs(&self) -> TabsConfig {
+        let mut tabs = TabsConfig::default();
+        for id in self.tab_order.open_ids() {
+            let tab = if id == self.tab.id { Some(&self.tab) } else { self.background.iter().find(|tab| tab.id == id) };
+            let files = tab.filter(|tab| tab.completion.is_none()).and_then(DocumentTab::reopen_files);
+            let Some(files) = files else { continue };
+            let saveable = [Some(&files.a), Some(&files.b), files.c.as_ref(), files.output.as_ref()]
+                .into_iter()
+                .flatten()
+                .all(|path| path.to_str().is_some());
+            if !saveable {
+                continue;
+            }
+            if id == self.tab.id {
+                tabs.active = tabs.open.len();
+            }
+            tabs.open.push(files);
+        }
+        tabs
+    }
+
+    /// Opens the tabs of the last run again and activates the one that was active. False when the setting is off, there are none, or none could be opened.
+    fn restore_tabs(&mut self, ctx: &egui::Context) -> bool {
+        if !self.config.view.restore_tabs {
+            return false;
+        }
+        let tabs = self.config.tabs.clone();
+        let mut opened = Vec::new();
+        for files in tabs.open {
+            if !self.tab.is_blank() && !self.activate_new_tab(ctx) {
+                break;
+            }
+            self.tab.form.set_files(&files);
+            self.open_files(files);
+            opened.push(self.tab.id);
+        }
+        if let Some(id) = opened.get(tabs.active).cloned() {
+            self.activate_tab(ctx, id);
+        }
+        self.reveal_tab = true;
+        !opened.is_empty()
+    }
 
     /// Records where the main window is. Until the window got its working size it still has the small one it starts with, which is not the user's choice and is not recorded. The window reports that size for a frame or more after it was told to grow.
     fn record_window_placement(&mut self, viewport: &egui::ViewportInfo, pixels_per_point: f32, monitor: Option<[i32; 2]>) {
@@ -3642,6 +3697,96 @@ mod tests {
         assert_eq!(blink_alpha(&harness), None);
     }
 
+
+    /// An app whose new tabs get clients of hosts that are kept, with the launch channel.
+    fn app_taking_launches() -> (KdiffApp, std::sync::mpsc::Sender<OpenRequest>, std::rc::Rc<std::cell::RefCell<Vec<kdiff4_protocol::HostEndpoint>>>, egui::Context) {
+        let (client, host) = kdiff4_protocol::in_process();
+        let ctx = egui::Context::default();
+        let hosts = std::rc::Rc::new(std::cell::RefCell::new(vec![host]));
+        let new_hosts = hosts.clone();
+        let mut app = KdiffApp::new(&ctx, client, move || {
+            let (client, host) = kdiff4_protocol::in_process();
+            new_hosts.borrow_mut().push(host);
+            Ok(client)
+        });
+        app.config = GuiConfig::default();
+        app.config_path = None;
+        let (launch, incoming) = std::sync::mpsc::channel();
+        app.connect_launches(incoming, std::sync::mpsc::channel().0);
+        (app, launch, hosts, ctx)
+    }
+
+    fn files_named(a: &str, b: &str) -> OpenFiles {
+        OpenFiles { a: a.into(), b: b.into(), ..OpenFiles::default() }
+    }
+
+    fn restore_request() -> (OpenRequest, std::sync::mpsc::Receiver<bool>) {
+        let (result, restored) = std::sync::mpsc::channel();
+        (OpenRequest { document: OpenDocument::Restore, completion: OpenCompletion::Dispatched { result, last_dir: None } }, restored)
+    }
+
+    #[test]
+    fn a_restore_launch_opens_the_tabs_of_the_last_run_and_activates_the_one_that_was_active() {
+        let (mut app, launch, hosts, ctx) = app_taking_launches();
+        app.config.tabs = TabsConfig { open: vec![files_named("a1", "b1"), files_named("a2", "b2"), files_named("a3", "b3")], active: 1 };
+        let (request, restored) = restore_request();
+        launch.send(request).unwrap();
+        app.receive_startup_launches(&ctx);
+        assert!(restored.try_recv().unwrap());
+        assert_eq!(app.tab_ids().len(), 3);
+        assert_eq!(app.tab.form.files(), Some(files_named("a2", "b2")));
+        assert!(app.tab.completion.is_none() && app.background.iter().all(|tab| tab.completion.is_none()));
+        let commands: Vec<Command> = hosts.borrow().iter().map(|host| host.recv().unwrap().command).collect();
+        assert_eq!(commands, [1, 2, 3].map(|index| Command::Open(files_named(&format!("a{index}"), &format!("b{index}")))));
+        assert_eq!(app.remembered_tabs(), app.config.tabs, "tabs still opening are remembered by their forms");
+    }
+
+    #[test]
+    fn a_restore_launch_opens_nothing_when_the_setting_is_off_or_no_tabs_are_saved() {
+        let (mut app, launch, _hosts, ctx) = app_taking_launches();
+        let (request, restored) = restore_request();
+        launch.send(request).unwrap();
+        app.receive_startup_launches(&ctx);
+        assert!(!restored.try_recv().unwrap(), "nothing saved");
+        app.config.tabs.open = vec![files_named("a1", "b1")];
+        app.config.view.restore_tabs = false;
+        let (request, restored) = restore_request();
+        launch.send(request).unwrap();
+        app.receive_launches(&ctx, false);
+        assert!(!restored.try_recv().unwrap(), "the setting is off");
+        assert!(app.tab.is_blank() && app.background.is_empty());
+    }
+
+    #[test]
+    fn exit_remembers_the_tabs_opened_in_the_app_but_not_those_a_command_line_waits_for() {
+        let (mut app, launch, _hosts, ctx) = app_taking_launches();
+        let (result, _dispatched) = std::sync::mpsc::channel();
+        launch.send(OpenRequest { document: OpenDocument::Open(files_named("a1", "b1")), completion: OpenCompletion::Dispatched { result, last_dir: None } }).unwrap();
+        let (completion, _closed) = std::sync::mpsc::channel();
+        launch.send(OpenRequest { document: OpenDocument::Open(files_named("git-a", "git-b")), completion: OpenCompletion::TabClosed(completion) }).unwrap();
+        let (result, _dispatched) = std::sync::mpsc::channel();
+        launch.send(OpenRequest { document: OpenDocument::Open(files_named("a3", "b3")), completion: OpenCompletion::Dispatched { result, last_dir: None } }).unwrap();
+        app.receive_launches(&ctx, false);
+        assert_eq!(app.tab_ids().len(), 3);
+        let expected = TabsConfig { open: vec![files_named("a1", "b1"), files_named("a3", "b3")], active: 1 };
+        assert_eq!(app.remembered_tabs(), expected);
+        app.cycle_tab(&ctx, false);
+        assert_eq!(app.remembered_tabs().active, 0, "the active tab is the command line's, which is not remembered");
+        app.cycle_tab(&ctx, false);
+        assert_eq!(app.remembered_tabs().active, 0);
+        app.exit(&ctx, true);
+        assert_eq!(app.config.tabs, TabsConfig { open: expected.open, active: 0 });
+    }
+
+    #[test]
+    fn a_blank_tab_and_a_mirror_without_a_form_are_remembered_by_what_they_show() {
+        let (mut app, _host, _ctx) = app_with_session();
+        let remembered = app.remembered_tabs();
+        assert_eq!(remembered.open.len(), 1);
+        assert_eq!((remembered.open[0].a.as_path(), remembered.open[0].b.as_path()), (Path::new("A.txt"), Path::new("B.txt")));
+        app.tab.mirror = None;
+        assert_eq!(app.remembered_tabs(), TabsConfig::default());
+    }
 
     #[test]
     fn an_open_window_submission_preserves_the_previous_comparison_in_a_tab() {

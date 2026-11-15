@@ -40,6 +40,7 @@ struct FormSubmission {
 enum LaunchFiles {
     Open { a: OsString, b: OsString, c: Option<OsString>, output: Option<OsString>, labels: Labels },
     Prefill(Vec<(Document, OsString)>, Labels),
+    Restore,
 }
 
 
@@ -60,6 +61,7 @@ impl LaunchFiles {
                 let paths = paths.into_iter().map(|(document, path)| Ok((document, absolute(path)?))).collect::<io::Result<_>>()?;
                 Ok(Self::Prefill(paths, labels))
             }
+            OpenDocument::Restore => Ok(Self::Restore),
         }
     }
 
@@ -73,6 +75,7 @@ impl LaunchFiles {
                 labels,
             }),
             Self::Prefill(paths, labels) => OpenDocument::Prefill(paths.into_iter().map(|(document, path)| (document, path.into())).collect(), labels),
+            Self::Restore => OpenDocument::Restore,
         }
     }
 }
@@ -88,6 +91,12 @@ pub fn open_from_form(files: OpenFiles, last_dir: Option<PathBuf>) -> anyhow::Re
     submit(OpenDocument::Open(files), Some(FormSubmission {
         last_dir: last_dir.map(PathBuf::into_os_string),
     }))
+}
+
+
+/// Asks the window, starting it if there is none, to open the tabs of the last run again. False when it opened none.
+pub fn restore_tabs() -> anyhow::Result<bool> {
+    submit(OpenDocument::Restore, Some(FormSubmission { last_dir: None }))
 }
 
 
@@ -430,6 +439,13 @@ mod tests {
         assert_eq!(files.output, Some(std::path::absolute(output).unwrap()));
         assert_eq!(files.labels.c.as_deref(), Some("Remote"));
         assert!(files.a.is_absolute() && files.b.is_absolute() && files.c.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn a_request_to_restore_the_tabs_survives_the_handoff() {
+        let request = LaunchFiles::new(OpenDocument::Restore).unwrap();
+        let decoded: LaunchFiles = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert_eq!(decoded.document(), OpenDocument::Restore);
     }
 
     #[cfg(unix)]
