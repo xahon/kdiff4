@@ -9,6 +9,7 @@ use kdiff4_protocol::{Alignments, Change, Client, Command, Document, EolChoice, 
 
 use crate::{OpenCompletion, OpenDocument, OpenRequest};
 use crate::bottom_controls::{bottom_switch, conflict_label, SwitchPopup};
+use crate::command_palette::{self, PaletteEntry, PaletteEvent, PaletteState};
 use crate::config::{self, GuiConfig, TabIndentation, ViewConfig};
 use crate::dialog_window::{self, DialogSpec, DialogWindows};
 use crate::document_tabs;
@@ -27,99 +28,23 @@ use crate::paths;
 use crate::rows::{self, Rows};
 use crate::scroll::ScrollMotion;
 use crate::settings_dialog::{self, SettingsAction, SettingsDialog};
+use crate::shortcuts_dialog::{self, ShortcutsDialog};
 use crate::start_menu::{ShortcutError, ShortcutInstall};
 use crate::text_view::{self, Caret};
 use crate::theme;
+use crate::ui_commands::{self, Group, UiCommand, hint_with_shortcut, OPEN_SHORTCUT, OPEN_TAB_SHORTCUT, RELOAD_SHORTCUT, SAVE_SHORTCUT, SAVE_AS_SHORTCUT, UNDO_SHORTCUT, REDO_SHORTCUT, MARK_LINES_SHORTCUT, MARK_FUNCTION_SHORTCUT, APPLY_ALIGNMENTS_SHORTCUT, CLEAR_ALIGNMENTS_SHORTCUT, HEURISTICS_SHORTCUT, HEURISTICS_INSIDE_SHORTCUT, EXIT_SHORTCUT, CLOSE_TAB_SHORTCUT, REOPEN_TAB_SHORTCUT, LEFT_TAB_SHORTCUT, RIGHT_TAB_SHORTCUT, MOVE_TAB_LEFT_SHORTCUT, MOVE_TAB_RIGHT_SHORTCUT, NEXT_TAB_SHORTCUT, PREVIOUS_TAB_SHORTCUT, SETTINGS_SHORTCUT, FIND_SHORTCUT, FIND_NEXT_SHORTCUT, FIND_PREVIOUS_SHORTCUT, MINIMAP_SHORTCUT, IGNORE_WHITESPACE_SHORTCUT, INDEPENDENT_SCROLL_SHORTCUT, FOLD_SHORTCUT, UNFOLD_SHORTCUT, FOLD_ALL_SHORTCUT, UNFOLD_ALL_SHORTCUT, KEYBOARD_SHORTCUTS_SHORTCUT, COMMAND_PALETTE_SHORTCUT, CHOOSE_SHORTCUTS, NAVIGATION_SHORTCUTS, VOID_TOGGLE_LABEL, VOID_TOGGLE_HINT, MINIMAP_TOGGLE_LABEL, MINIMAP_TOGGLE_HINT, OVERVIEW_TOGGLE_LABEL, OVERVIEW_TOGGLE_HINT, IGNORE_WHITESPACE_TOGGLE_LABEL, IGNORE_WHITESPACE_TOGGLE_HINT, INDEPENDENT_SCROLL_TOGGLE_LABEL, INDEPENDENT_SCROLL_TOGGLE_HINT};
 use crate::heuristics_dialog::{self, HeuristicsAction, HeuristicsDialog};
 use crate::inset_dialog::{self, InsetAnswer};
 use crate::updater::{UpdateWindow, Updater};
 use crate::window_frame;
 
-const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-const OPEN_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
-const RELOAD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F5);
-const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
-const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S);
-const UNDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
-const MARK_LINES_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Space);
-const MARK_FUNCTION_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Space);
-const APPLY_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
-const CLEAR_ALIGNMENTS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Y);
-const HEURISTICS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::J);
-const HEURISTICS_INSIDE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::ALT), Key::J);
 const INSIDE_ALIGNMENT_HINT: &str = "Put the caret inside an applied alignment to align inside it";
-const EXIT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
-const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
-const REOPEN_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::T);
-const LEFT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowLeft);
-const RIGHT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT, Key::ArrowRight);
-const MOVE_TAB_LEFT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT.plus(Modifiers::SHIFT), Key::ArrowLeft);
-const MOVE_TAB_RIGHT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::ALT.plus(Modifiers::SHIFT), Key::ArrowRight);
-const NEXT_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL, Key::Tab);
-const PREVIOUS_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab);
-const SETTINGS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma);
-const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
-const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
-const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
-const MINIMAP_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::M);
-const IGNORE_WHITESPACE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::I);
-const INDEPENDENT_SCROLL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::U);
-/// egui can't tell the numeric keypad's minus and plus from the main ones, so both fold and unfold.
-const FOLD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Minus);
-const UNFOLD_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Plus);
-const FOLD_ALL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Minus);
-const UNFOLD_ALL_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Plus);
-/// Toggle A, B or C in the region with the caret (kdiff3: Ctrl+1, Ctrl+2, Ctrl+3).
-const CHOOSE_SHORTCUTS: [(Document, KeyboardShortcut); 3] = [
-    (Document::A, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num1)),
-    (Document::B, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num2)),
-    (Document::C, KeyboardShortcut::new(Modifiers::COMMAND, Key::Num3)),
-];
-const NAVIGATION_SHORTCUTS: [(Navigation, &str, KeyboardShortcut, KeyboardShortcut); 4] = [
-    (
-        Navigation::PreviousDifference,
-        "Previous Difference",
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowUp),
-        KeyboardShortcut::new(Modifiers::ALT, Key::ArrowUp),
-    ),
-    (
-        Navigation::NextDifference,
-        "Next Difference",
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::ArrowDown),
-        KeyboardShortcut::new(Modifiers::ALT, Key::ArrowDown),
-    ),
-    (
-        Navigation::PreviousConflict,
-        "Previous Conflict",
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageUp),
-        KeyboardShortcut::new(Modifiers::ALT, Key::PageUp),
-    ),
-    (
-        Navigation::NextConflict,
-        "Next Conflict",
-        KeyboardShortcut::new(Modifiers::COMMAND, Key::PageDown),
-        KeyboardShortcut::new(Modifiers::ALT, Key::PageDown),
-    ),
-];
 /// Distance of the find bar from the top right corner of the panes.
 const FIND_BAR_MARGIN: egui::Vec2 = egui::vec2(24.0, 6.0);
-const VOID_TOGGLE_LABEL: &str = "Void Space";
-const VOID_TOGGLE_HINT: &str = "Toggle Void Space visibility in Output Pane";
-const MINIMAP_TOGGLE_LABEL: &str = "Minimap";
-const MINIMAP_TOGGLE_HINT: &str = "Toggle the Minimap: the whole document as a column right of the panes, to scroll by clicking or dragging";
-const OVERVIEW_TOGGLE_LABEL: &str = "Overview Strip";
-const OVERVIEW_TOGGLE_HINT: &str = "Toggle the Overview Strip: the current line of every document, with its character diff";
-const IGNORE_WHITESPACE_TOGGLE_LABEL: &str = "Ignore Whitespace";
-const IGNORE_WHITESPACE_TOGGLE_HINT: &str = "Toggle ignoring whitespace and line breaks in the character diff, so reflowed or reindented text shows only its real changes";
-const INDEPENDENT_SCROLL_TOGGLE_LABEL: &str = "Independent Scroll";
-const INDEPENDENT_SCROLL_TOGGLE_HINT: &str = "Toggle independent scrolling: every pane scrolls on its own. Turned off, the panes line up again with the one last clicked or scrolled";
 const TOOLBAR_ICON_SIZE: f32 = 18.0;
 /// Space between a toolbar button's icon and its label.
 const TOOLBAR_ICON_GAP: f32 = 2.0;
 const UNSAVABLE_HINT: &str = "Resolve every conflict before saving";
-const ADD_TO_START_MENU_LABEL: &str = "Add to Start Menu";
-const ADD_TO_START_MENU_HINT: &str = "Create a Kdiff4 shortcut in your Start menu that starts this executable";
 const ALIGNMENTS_CHANGED_HINT: &str = "Alignments changed: Apply Alignments (Ctrl+Y) compares the documents again";
 pub const WINDOW_TITLE: &str = "Kdiff4";
 pub const INITIAL_WINDOW_SIZE: [f32; 2] = [640.0, 190.0];
@@ -258,6 +183,9 @@ pub struct KdiffApp {
     /// The Start menu shortcut being written, while PowerShell runs.
     shortcut_install: Option<ShortcutInstall>,
     dialogs: DialogWindows,
+    /// The command palette, while it is open.
+    palette: Option<PaletteState>,
+    shortcuts_dialog: Option<ShortcutsDialog>,
 }
 
 impl DocumentTab {
@@ -393,6 +321,8 @@ impl KdiffApp {
             updater: Updater::default(),
             shortcut_install: None,
             dialogs: DialogWindows::default(),
+            palette: None,
+            shortcuts_dialog: None,
         };
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         app.apply_view(ctx, &view);
@@ -583,7 +513,7 @@ impl KdiffApp {
 
     fn tab_switch_blocked(&self) -> bool {
         self.close_confirmation.is_some() || self.settings.is_some() || self.updater.update_window.is_some() || self.tab.inset_prompt.is_some() || self.tab.eol_prompt.is_some()
-            || self.tab.heuristics.is_some()
+            || self.tab.heuristics.is_some() || self.shortcuts_dialog.is_some()
     }
 
     fn show_close_confirmation(&mut self, ctx: &egui::Context) {
@@ -1960,6 +1890,12 @@ Shortcut: {}", link.display()),
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_shortcut(&COMMAND_PALETTE_SHORTCUT)) {
+            self.run_command(ctx, UiCommand::CommandPalette);
+        }
+        if ctx.input_mut(|input| input.consume_shortcut(&KEYBOARD_SHORTCUTS_SHORTCUT)) {
+            self.run_command(ctx, UiCommand::KeyboardShortcuts);
+        }
         if !ctx.text_edit_focused() {
             if ctx.input_mut(|input| input.consume_shortcut(&REDO_SHORTCUT)) {
                 self.undo_redo(ctx, Command::Redo);
@@ -2133,227 +2069,192 @@ Shortcut: {}", link.display()),
     }
 
     fn show_menu(&mut self, ui: &mut egui::Ui) {
-        let is_merge = self.is_merge();
-        let savable = is_merge && self.tab.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
-        let has_session = self.tab.mirror.is_some();
+        let c_choosable = self.choosable().contains(&Document::C);
         egui::Panel::top("menu_bar").show_separator_line(false).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    let shortcuts = format!("{} / {}", ui.ctx().format_shortcut(&OPEN_SHORTCUT), ui.ctx().format_shortcut(&OPEN_TAB_SHORTCUT));
-                    let open = egui::Button::new("Open...").shortcut_text(shortcuts);
-                    if ui.add(open).clicked() {
-                        self.open_form();
-                    }
-                    let reload = egui::Button::new("Reload").shortcut_text(ui.ctx().format_shortcut(&RELOAD_SHORTCUT));
-                    if ui.add_enabled(has_session, reload).clicked() {
-                        self.reload();
-                    }
-                    let save = egui::Button::new("Save").shortcut_text(ui.ctx().format_shortcut(&SAVE_SHORTCUT));
-                    if ui.add_enabled(savable, save).on_disabled_hover_text(UNSAVABLE_HINT).clicked() {
-                        self.save();
-                    }
-                    let save_as = egui::Button::new("Save As...").shortcut_text(ui.ctx().format_shortcut(&SAVE_AS_SHORTCUT));
-                    if ui.add_enabled(savable, save_as).on_disabled_hover_text(UNSAVABLE_HINT).clicked() {
-                        self.save_as();
-                    }
-                    ui.separator();
-                    let close = egui::Button::new("Close Tab").shortcut_text(ui.ctx().format_shortcut(&CLOSE_TAB_SHORTCUT));
-                    if ui.add_enabled(!self.background.is_empty() && !self.tab.is_saving(), close).clicked() {
-                        self.close_tab_requested = true;
-                    }
-                    let reopen = egui::Button::new("Reopen Closed Tab").shortcut_text(ui.ctx().format_shortcut(&REOPEN_TAB_SHORTCUT));
-                    if ui.add_enabled(!self.closed_tabs.is_empty() && !self.tab_switch_blocked(), reopen).clicked() {
-                        self.reopen_tab(ui.ctx());
-                    }
-                    let exit = egui::Button::new("Exit").shortcut_text(ui.ctx().format_shortcut(&EXIT_SHORTCUT));
-                    if ui.add(exit).clicked() {
-                        self.exit(ui.ctx(), false);
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    let ctx = ui.ctx().clone();
-                    let undo = egui::Button::new("Undo").shortcut_text(ctx.format_shortcut(&UNDO_SHORTCUT));
-                    if ui.add_enabled(is_merge, undo).clicked() {
-                        self.undo_redo(&ctx, Command::Undo);
-                    }
-                    let redo = egui::Button::new("Redo").shortcut_text(ctx.format_shortcut(&REDO_SHORTCUT));
-                    if ui.add_enabled(is_merge, redo).clicked() {
-                        self.undo_redo(&ctx, Command::Redo);
-                    }
-                    ui.separator();
-                    let find = egui::Button::new("Find...").shortcut_text(ctx.format_shortcut(&FIND_SHORTCUT));
-                    if ui.add_enabled(has_session, find).clicked() {
-                        self.open_find();
-                    }
-                    let find_next = egui::Button::new("Find Next").shortcut_text(ctx.format_shortcut(&FIND_NEXT_SHORTCUT));
-                    if ui.add_enabled(has_session, find_next).clicked() {
-                        self.find_step(&ctx, true);
-                    }
-                    let find_previous = egui::Button::new("Find Previous").shortcut_text(ctx.format_shortcut(&FIND_PREVIOUS_SHORTCUT));
-                    if ui.add_enabled(has_session, find_previous).clicked() {
-                        self.find_step(&ctx, false);
-                    }
-                });
-                let choosable = self.choosable();
-                ui.menu_button("Merge", |ui| {
-                    for (document, shortcut) in CHOOSE_SHORTCUTS.iter() {
-                        let button = egui::Button::new(format!("Choose {} Here", document.letter())).shortcut_text(ui.ctx().format_shortcut(shortcut));
-                        if ui.add_enabled(choosable.contains(document), button).clicked() {
-                            self.choose_current(document.clone());
-                        }
-                    }
-                    ui.separator();
-                    for (document, shortcut) in CHOOSE_SHORTCUTS.iter() {
-                        if *document == Document::C && !choosable.contains(document) {
-                            continue;
-                        }
-                        let everywhere = KeyboardShortcut::new(shortcut.modifiers.plus(Modifiers::SHIFT), shortcut.logical_key);
-                        let button = egui::Button::new(format!("Choose {} Everywhere", document.letter())).shortcut_text(ui.ctx().format_shortcut(&everywhere));
-                        if ui.add_enabled(choosable.contains(document), button).clicked() {
-                            self.choose_everywhere(document.clone());
-                        }
-                    }
-                    ui.separator();
-                    for document in CHOOSE_SHORTCUTS.iter().map(|(document, _)| document) {
-                        let button = egui::Button::new(format!("Choose {} for All Unresolved", document.letter()));
-                        if ui.add_enabled(choosable.contains(document), button).clicked() {
-                            self.choose_for_unresolved(document.clone());
-                        }
-                    }
-                    ui.separator();
-                    for (to, label, shortcut, alternate) in NAVIGATION_SHORTCUTS.iter() {
-                        let shortcut_text = format!("{} / {}", ui.ctx().format_shortcut(shortcut), ui.ctx().format_shortcut(alternate));
-                        let button = egui::Button::new(*label).shortcut_text(shortcut_text);
-                        if ui.add_enabled(has_session, button).clicked() {
-                            self.navigate(to.clone());
-                        }
-                    }
-                    ui.separator();
-                    let (marks, changed) = self.tab
-                        .mirror
-                        .as_ref()
-                        .map_or((0, false), |mirror| (mirror.alignments().marks.len(), mirror.alignments().changed));
-                    let mark_lines = egui::Button::new("Mark Selected Lines for Alignment").shortcut_text(ui.ctx().format_shortcut(&MARK_LINES_SHORTCUT));
-                    if ui.add_enabled(has_session, mark_lines).clicked() {
-                        self.mark_selected_lines();
-                    }
-                    let mark_function = egui::Button::new("Mark Function for Alignment").shortcut_text(ui.ctx().format_shortcut(&MARK_FUNCTION_SHORTCUT));
-                    if ui.add_enabled(has_session, mark_function).clicked() {
-                        self.mark_function_at_caret();
-                    }
-                    if ui.add_enabled(has_session, egui::Button::new("Mark Alignment Anchor Before Line")).clicked() {
-                        self.mark_anchor_at_caret();
-                    }
-                    let apply = egui::Button::new("Apply Alignments").shortcut_text(ui.ctx().format_shortcut(&APPLY_ALIGNMENTS_SHORTCUT));
-                    if ui
-                        .add_enabled(changed, apply)
-                        .on_disabled_hover_text("The marks give the alignments already applied")
-                        .clicked()
-                    {
-                        self.apply_alignments();
-                    }
-                    let heuristics = egui::Button::new("Heuristics Alignment…").shortcut_text(ui.ctx().format_shortcut(&HEURISTICS_SHORTCUT));
-                    if ui
-                        .add_enabled(has_session, heuristics)
-                        .on_hover_text("Find functions, methods and types in the documents and align them, also where a document moved them")
-                        .clicked()
-                    {
-                        self.open_heuristics();
-                    }
-                    let inside = egui::Button::new("Heuristics Alignment Inside…").shortcut_text(ui.ctx().format_shortcut(&HEURISTICS_INSIDE_SHORTCUT));
-                    if ui
-                        .add_enabled(has_session, inside)
-                        .on_hover_text("Find and align the entities inside the applied alignment around the caret")
-                        .clicked()
-                    {
-                        self.open_heuristics_inside();
-                    }
-                    let clear = egui::Button::new("Clear All Alignments").shortcut_text(ui.ctx().format_shortcut(&CLEAR_ALIGNMENTS_SHORTCUT));
-                    if ui.add_enabled(marks > 0, clear).clicked() {
-                        self.clear_alignments();
-                    }
-                    ui.separator();
-                    let mut void_space = self.view().align_output;
-                    if ui
-                        .add_enabled(is_merge, egui::Checkbox::new(&mut void_space, VOID_TOGGLE_LABEL))
-                        .on_hover_text(VOID_TOGGLE_HINT)
-                        .clicked()
-                    {
-                        self.toggle_void_space();
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    let mut minimap = self.view().show_minimap;
-                    let item = egui::Checkbox::new(&mut minimap, MINIMAP_TOGGLE_LABEL);
-                    let shortcut = ui.ctx().format_shortcut(&MINIMAP_SHORTCUT);
-                    if ui.add(item).on_hover_text(hint_with_shortcut(MINIMAP_TOGGLE_HINT, &shortcut)).clicked() {
-                        self.toggle_minimap();
-                    }
-                    let mut independent = self.view().independent_scroll;
-                    let item = egui::Checkbox::new(&mut independent, INDEPENDENT_SCROLL_TOGGLE_LABEL);
-                    let shortcut = ui.ctx().format_shortcut(&INDEPENDENT_SCROLL_SHORTCUT);
-                    if ui.add(item).on_hover_text(hint_with_shortcut(INDEPENDENT_SCROLL_TOGGLE_HINT, &shortcut)).clicked() {
-                        self.toggle_independent_scroll();
-                    }
-                    ui.separator();
-                    let folds = [
-                        ("Fold", &FOLD_SHORTCUT, "Fold the innermost function, type or block around the caret"),
-                        ("Unfold", &UNFOLD_SHORTCUT, "Unfold the fold at the caret"),
-                        ("Fold All", &FOLD_ALL_SHORTCUT, "Fold the outermost functions, types and blocks of the pane with the caret"),
-                        ("Unfold All", &UNFOLD_ALL_SHORTCUT, "Unfold everything in the pane with the caret"),
-                    ];
-                    for (index, (label, shortcut, hint)) in folds.into_iter().enumerate() {
-                        let button = egui::Button::new(label).shortcut_text(ui.ctx().format_shortcut(shortcut));
-                        if ui.add_enabled(has_session, button).on_hover_text(hint).clicked() {
-                            match index {
-                                0 => self.fold_at_caret(),
-                                1 => self.unfold_at_caret(),
-                                2 => self.fold_all(true),
-                                _ => self.fold_all(false),
+                for menu in Group::MENUS {
+                    ui.menu_button(menu.name(), |ui| {
+                        for item in ui_commands::menu_items(menu.clone(), c_choosable, cfg!(windows)) {
+                            match item {
+                                Some(command) => self.show_menu_item(ui, command),
+                                None => {
+                                    ui.separator();
+                                }
                             }
                         }
-                    }
-                    ui.separator();
-                    let mut ignore_whitespace = self.ignores_whitespace();
-                    let item = egui::Checkbox::new(&mut ignore_whitespace, IGNORE_WHITESPACE_TOGGLE_LABEL);
-                    let shortcut = ui.ctx().format_shortcut(&IGNORE_WHITESPACE_SHORTCUT);
-                    if ui.add_enabled(has_session, item).on_hover_text(hint_with_shortcut(IGNORE_WHITESPACE_TOGGLE_HINT, &shortcut)).clicked() {
-                        self.toggle_ignore_whitespace();
-                    }
-                });
-                ui.menu_button("Settings", |ui| {
-                    let configure = egui::Button::new("Configure Kdiff4...").shortcut_text(ui.ctx().format_shortcut(&SETTINGS_SHORTCUT));
-                    if ui.add(configure).clicked() {
-                        let ctx = ui.ctx().clone();
-                        self.open_settings(&ctx);
-                    }
-                    if cfg!(windows) {
-                        ui.separator();
-                        let installing = self.shortcut_install.is_some();
-                        if ui.add_enabled(!installing, egui::Button::new(ADD_TO_START_MENU_LABEL)).on_hover_text(ADD_TO_START_MENU_HINT).clicked() {
-                            let ctx = ui.ctx().clone();
-                            self.begin_shortcut_install(&ctx);
-                        }
-                    }
-                });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About Kdiff4...").clicked() {
-                        self.updater.update_window = Some(UpdateWindow::About);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Check for Updates...").clicked() {
-                        let ctx = ui.ctx().clone();
-                        self.updater.begin_update_check(&ctx, true);
-                    }
-                    let mut automatic = self.config.updates.check_automatically;
-                    if ui.checkbox(&mut automatic, "Check for Updates Automatically").clicked() {
-                        self.config.updates.check_automatically = automatic;
-                        self.save_config(false);
-                    }
-                });
+                    });
+                }
             });
         });
+    }
+
+    /// One menu item, built from the command's info and state: a checkbox for a toggle, otherwise a button with its shortcuts.
+    fn show_menu_item(&mut self, ui: &mut egui::Ui, command: UiCommand) {
+        let info = command.info();
+        let state = self.command_state(command.clone());
+        let shortcut = ui_commands::shortcut_text(ui.ctx(), &info.shortcuts);
+        let clicked = match state.checked {
+            Some(mut checked) => {
+                let response = ui.add_enabled(state.enabled, egui::Checkbox::new(&mut checked, info.label.as_str()));
+                match info.hint {
+                    Some(hint) if shortcut.is_empty() => response.on_hover_text(hint).clicked(),
+                    Some(hint) => response.on_hover_text(hint_with_shortcut(hint, &shortcut)).clicked(),
+                    None => response.clicked(),
+                }
+            }
+            None => {
+                let mut button = egui::Button::new(info.label.as_str());
+                if !shortcut.is_empty() {
+                    button = button.shortcut_text(shortcut);
+                }
+                let mut response = ui.add_enabled(state.enabled, button);
+                if let Some(hint) = info.hint {
+                    response = response.on_hover_text(hint);
+                }
+                if let Some(hint) = state.disabled_hint {
+                    response = response.on_disabled_hover_text(hint);
+                }
+                response.clicked()
+            }
+        };
+        if clicked {
+            if state.checked.is_none() {
+                ui.close();
+            }
+            let ctx = ui.ctx().clone();
+            self.run_command(&ctx, command);
+        }
+    }
+
+    /// Whether a UI command can run now, and whether a toggle is on. The menus, the command palette and `run_command` all go by it.
+    fn command_state(&self, command: UiCommand) -> CommandState {
+        let has_session = self.tab.mirror.is_some();
+        let is_merge = self.is_merge();
+        let mut state = CommandState { enabled: true, checked: None, disabled_hint: None };
+        match command {
+            UiCommand::Open | UiCommand::Exit | UiCommand::Settings | UiCommand::About | UiCommand::CheckForUpdates => {}
+            UiCommand::Reload | UiCommand::Find | UiCommand::FindNext | UiCommand::FindPrevious | UiCommand::Navigate(_) => state.enabled = has_session,
+            UiCommand::MarkLines | UiCommand::MarkFunction | UiCommand::MarkAnchor | UiCommand::Heuristics | UiCommand::HeuristicsInside => state.enabled = has_session,
+            UiCommand::Fold | UiCommand::Unfold | UiCommand::FoldAll | UiCommand::UnfoldAll => state.enabled = has_session,
+            UiCommand::Save | UiCommand::SaveAs => {
+                state.enabled = is_merge && self.tab.mirror.as_ref().is_some_and(|mirror| mirror.unresolved_count() == 0);
+                state.disabled_hint = Some(UNSAVABLE_HINT);
+            }
+            UiCommand::CloseTab => state.enabled = !self.background.is_empty() && !self.tab.is_saving(),
+            UiCommand::ReopenTab => state.enabled = !self.closed_tabs.is_empty() && !self.tab_switch_blocked(),
+            UiCommand::Undo | UiCommand::Redo => state.enabled = is_merge,
+            UiCommand::ChooseHere(document) | UiCommand::ChooseEverywhere(document) | UiCommand::ChooseForUnresolved(document) => state.enabled = self.choosable().contains(&document),
+            UiCommand::ApplyAlignments => {
+                state.enabled = self.tab.mirror.as_ref().is_some_and(|mirror| mirror.alignments().changed);
+                state.disabled_hint = Some("The marks give the alignments already applied");
+            }
+            UiCommand::ClearAlignments => state.enabled = self.tab.mirror.as_ref().is_some_and(|mirror| !mirror.alignments().marks.is_empty()),
+            UiCommand::ToggleVoidSpace => {
+                state.enabled = is_merge;
+                state.checked = Some(self.view().align_output);
+            }
+            UiCommand::ToggleMinimap => state.checked = Some(self.view().show_minimap),
+            UiCommand::ToggleOverviewStrip => state.checked = Some(self.view().show_overview_strip),
+            UiCommand::ToggleIndependentScroll => state.checked = Some(self.view().independent_scroll),
+            UiCommand::ToggleIgnoreWhitespace => {
+                state.enabled = has_session;
+                state.checked = Some(self.ignores_whitespace());
+            }
+            UiCommand::AddToStartMenu => state.enabled = cfg!(windows) && self.shortcut_install.is_none(),
+            UiCommand::ToggleAutomaticUpdates => state.checked = Some(self.config.updates.check_automatically),
+            UiCommand::KeyboardShortcuts => state.enabled = !self.tab_switch_blocked(),
+            UiCommand::CommandPalette => state.enabled = self.palette.is_some() || !self.tab_switch_blocked(),
+            UiCommand::PreviousTab | UiCommand::NextTab | UiCommand::MoveTabLeft | UiCommand::MoveTabRight => state.enabled = !self.background.is_empty() && !self.tab_switch_blocked() && self.tab_drag.is_none(),
+        }
+        state
+    }
+
+    /// Runs a UI command as its menu item does; a command that can't run now is ignored.
+    fn run_command(&mut self, ctx: &egui::Context, command: UiCommand) {
+        if !self.command_state(command.clone()).enabled {
+            return;
+        }
+        match command {
+            UiCommand::Open => self.open_form(),
+            UiCommand::Reload => self.reload(),
+            UiCommand::Save => self.save(),
+            UiCommand::SaveAs => self.save_as(),
+            UiCommand::CloseTab => {
+                self.close_tab_requested = true;
+                ctx.request_repaint();
+            }
+            UiCommand::ReopenTab => self.reopen_tab(ctx),
+            UiCommand::Exit => self.exit(ctx, false),
+            UiCommand::Undo => self.undo_redo(ctx, Command::Undo),
+            UiCommand::Redo => self.undo_redo(ctx, Command::Redo),
+            UiCommand::Find => self.open_find(),
+            UiCommand::FindNext => self.find_step(ctx, true),
+            UiCommand::FindPrevious => self.find_step(ctx, false),
+            UiCommand::ChooseHere(document) => self.choose_current(document),
+            UiCommand::ChooseEverywhere(document) => self.choose_everywhere(document),
+            UiCommand::ChooseForUnresolved(document) => self.choose_for_unresolved(document),
+            UiCommand::Navigate(to) => self.navigate(to),
+            UiCommand::MarkLines => self.mark_selected_lines(),
+            UiCommand::MarkFunction => self.mark_function_at_caret(),
+            UiCommand::MarkAnchor => self.mark_anchor_at_caret(),
+            UiCommand::ApplyAlignments => self.apply_alignments(),
+            UiCommand::Heuristics => self.open_heuristics(),
+            UiCommand::HeuristicsInside => self.open_heuristics_inside(),
+            UiCommand::ClearAlignments => self.clear_alignments(),
+            UiCommand::ToggleVoidSpace => self.toggle_void_space(),
+            UiCommand::ToggleMinimap => self.toggle_minimap(),
+            UiCommand::ToggleOverviewStrip => self.toggle_overview_strip(),
+            UiCommand::ToggleIndependentScroll => self.toggle_independent_scroll(),
+            UiCommand::Fold => self.fold_at_caret(),
+            UiCommand::Unfold => self.unfold_at_caret(),
+            UiCommand::FoldAll => self.fold_all(true),
+            UiCommand::UnfoldAll => self.fold_all(false),
+            UiCommand::ToggleIgnoreWhitespace => self.toggle_ignore_whitespace(),
+            UiCommand::Settings => self.open_settings(ctx),
+            UiCommand::AddToStartMenu => self.begin_shortcut_install(ctx),
+            UiCommand::About => self.updater.update_window = Some(UpdateWindow::About),
+            UiCommand::KeyboardShortcuts => self.shortcuts_dialog = Some(ShortcutsDialog::default()),
+            UiCommand::CommandPalette => self.palette = if self.palette.is_some() { None } else { Some(PaletteState::default()) },
+            UiCommand::CheckForUpdates => self.updater.begin_update_check(ctx, true),
+            UiCommand::ToggleAutomaticUpdates => {
+                self.config.updates.check_automatically = !self.config.updates.check_automatically;
+                self.save_config(false);
+            }
+            UiCommand::PreviousTab => self.cycle_tab(ctx, false),
+            UiCommand::NextTab => self.cycle_tab(ctx, true),
+            UiCommand::MoveTabLeft => self.move_active_tab(ctx, false),
+            UiCommand::MoveTabRight => self.move_active_tab(ctx, true),
+        }
+    }
+
+    /// The command palette below `top_center`: every UI command with its state, to filter and run. Running a command closes it.
+    fn show_palette(&mut self, ctx: &egui::Context, top_center: egui::Pos2) {
+        let Some(mut palette) = self.palette.take() else { return };
+        let entries: Vec<PaletteEntry> = ui_commands::all(cfg!(windows))
+            .into_iter()
+            .filter(|command| *command != UiCommand::CommandPalette)
+            .map(|command| {
+                let info = command.info();
+                let state = self.command_state(command.clone());
+                PaletteEntry { command, group: info.group.name(), shortcut: ui_commands::shortcut_text(ctx, &info.shortcuts), label: info.label, enabled: state.enabled, checked: state.checked }
+            })
+            .collect();
+        match command_palette::show(ctx, top_center, &mut palette, &entries) {
+            Some(PaletteEvent::Run(command)) => self.run_command(ctx, command),
+            Some(PaletteEvent::Close) => {}
+            None => self.palette = Some(palette),
+        }
+    }
+
+    fn show_shortcuts(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.shortcuts_dialog.as_mut() else { return };
+        let rows = shortcuts_dialog::rows(ctx, cfg!(windows));
+        let mut close = false;
+        let spec = DialogSpec { id: "shortcuts_dialog", title: "Keyboard Shortcuts", width: shortcuts_dialog::DIALOG_WIDTH, closable: true };
+        let closed = self.dialogs.show(ctx, &spec, |ui| close |= shortcuts_dialog::show(ui, dialog, &rows));
+        if close || closed {
+            self.shortcuts_dialog = None;
+        }
     }
 
     /// The strip under the menu bar: the void space toggle of the output pane, the overview strip, minimap, independent scrolling and ignore whitespace toggles.
@@ -2800,6 +2701,7 @@ impl eframe::App for KdiffApp {
         let mut pane_actions = Vec::new();
         let mut find_events = Vec::new();
         let mut eol_pick = None;
+        let palette_top = ui.available_rect_before_wrap().center_top() + egui::vec2(0.0, FIND_BAR_MARGIN.y);
         match self.tab.mirror.as_ref() {
             None => {
                 egui::CentralPanel::default().show(ui, |ui| {
@@ -2837,10 +2739,12 @@ impl eframe::App for KdiffApp {
         if let Some(style) = eol_pick {
             self.send(Command::SetOutputEol(style), Pending::SetOutputEol);
         }
+        self.show_palette(&ctx, palette_top);
         self.show_inset_prompt(&ctx);
         self.show_eol_prompt(&ctx);
         self.show_heuristics(&ctx);
         self.show_settings(&ctx);
+        self.show_shortcuts(&ctx);
         self.show_update_window(&ctx);
         self.show_close_confirmation(&ctx);
         self.dialogs.end_frame(frame.window_handle().ok().map(|handle| handle.as_raw()));
@@ -2908,6 +2812,14 @@ fn navigation_noun(to: Navigation) -> &'static str {
     }
 }
 
+/// Whether a UI command can run now, the reason a menu gives while it can't, and whether a toggle is on.
+struct CommandState {
+    enabled: bool,
+    checked: Option<bool>,
+    disabled_hint: Option<&'static str>,
+}
+
+
 /// What the user picked in the status bar this frame.
 #[derive(Default)]
 struct StatusPicks {
@@ -2974,12 +2886,6 @@ fn indentation_selector(ui: &mut egui::Ui, current: Indentation, overridden: boo
     } else {
         (updated != current).then_some(Some(updated))
     }
-}
-
-
-/// A toggle's hint followed by its shortcut, for the tooltips of the View menu and the toolbar.
-fn hint_with_shortcut(hint: &str, shortcut: &str) -> String {
-    format!("{hint} ({shortcut})")
 }
 
 
@@ -4012,11 +3918,86 @@ mod tests {
     }
 
     #[test]
-    fn a_toggle_hint_ends_with_its_shortcut() {
-        let ctx = egui::Context::default();
-        let hint = hint_with_shortcut(MINIMAP_TOGGLE_HINT, &ctx.format_shortcut(&MINIMAP_SHORTCUT));
-        assert!(hint.starts_with(MINIMAP_TOGGLE_HINT));
-        assert!(hint.ends_with("+M)"), "{hint}");
+    fn ctrl_shift_a_opens_and_closes_the_command_palette() {
+        let (mut app, _host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::A, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert!(app.palette.is_some());
+        press(&mut app, &ctx, Key::A, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn f1_opens_keyboard_shortcuts_and_the_palette_stays_shut_under_it() {
+        let (mut app, _host, ctx) = app_with_session();
+        press(&mut app, &ctx, Key::F1, Modifiers::NONE);
+        assert!(app.shortcuts_dialog.is_some());
+        assert!(!app.command_state(UiCommand::CommandPalette).enabled);
+        press(&mut app, &ctx, Key::A, Modifiers::COMMAND.plus(Modifiers::SHIFT));
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn run_command_does_what_the_menu_item_does_and_ignores_a_disabled_command() {
+        let (mut app, _host, ctx) = app_with_session();
+        let shown = app.view().show_minimap;
+        app.run_command(&ctx, UiCommand::ToggleMinimap);
+        assert_eq!(app.view().show_minimap, !shown);
+        assert_eq!(app.command_state(UiCommand::ToggleMinimap).checked, Some(!shown));
+        assert!(!app.command_state(UiCommand::CloseTab).enabled, "the last tab stays open");
+        app.run_command(&ctx, UiCommand::CloseTab);
+        assert!(!app.close_tab_requested);
+        app.run_command(&ctx, UiCommand::About);
+        assert!(matches!(app.updater.update_window, Some(UpdateWindow::About)));
+    }
+
+    #[test]
+    fn the_palette_runs_the_typed_command_and_closes() {
+        let (mut app, _host, _ctx) = app_with_session();
+        let shown = app.view().show_minimap;
+        app.palette = Some(PaletteState::default());
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
+            |ui, app: &mut KdiffApp| {
+                let ctx = ui.ctx().clone();
+                app.show_palette(&ctx, egui::pos2(450.0, 20.0));
+            },
+            app,
+        );
+        harness.run_steps(3);
+        harness.event(egui::Event::Text("minimap".to_string()));
+        harness.run_steps(2);
+        harness.key_press(Key::Enter);
+        harness.run_steps(2);
+        assert_eq!(harness.state().view().show_minimap, !shown);
+        assert!(harness.state().palette.is_none());
+    }
+
+    #[test]
+    fn the_menus_are_built_from_the_command_table() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+
+        let (app, _host, _ctx) = app_with_session();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(|ui, app: &mut KdiffApp| app.show_menu(ui), app);
+        harness.run_steps(3);
+        harness.get_by_label("Merge").click();
+        harness.run_steps(2);
+        for label in ["Choose A Here", "Choose B Everywhere", "Next Conflict", "Apply Alignments", "Void Space"] {
+            harness.get_by_label_contains(label);
+        }
+        assert!(harness.get_by_label_contains("Apply Alignments").accesskit_node().is_disabled(), "there are no marks to apply");
+    }
+
+    #[test]
+    fn the_help_menu_opens_keyboard_shortcuts() {
+        use egui_kittest::kittest::Queryable;
+
+        let (app, _host, _ctx) = app_with_session();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(|ui, app: &mut KdiffApp| app.show_menu(ui), app);
+        harness.run_steps(3);
+        harness.get_by_label("Help").click();
+        harness.run_steps(2);
+        harness.get_by_label_contains("Keyboard Shortcuts...").click();
+        harness.run_steps(2);
+        assert!(harness.state().shortcuts_dialog.is_some());
     }
 
     #[test]
