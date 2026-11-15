@@ -5803,6 +5803,45 @@ mod tests {
         assert!(app.tab.panes.find.open && !app.tab.panes.find.replace_open);
     }
 
+    /// An app whose first region is an unresolved conflict without lines in D, with the caret on its marker.
+    fn app_on_a_conflict_marker() -> (KdiffApp, kdiff4_protocol::HostEndpoint, egui::Context) {
+        let (mut app, host, ctx) = app_with_session();
+        let mut snapshot = resolved_snapshot();
+        snapshot.merge[0] = kdiff4_protocol::RegionMerge { choice: kdiff4_protocol::Choice::Unresolved, edited: false, output_lines: 0 };
+        snapshot.output.as_mut().unwrap().text = "x\n".to_string();
+        app.tab.mirror = Some(Mirror::from_snapshot(snapshot, false));
+        app.tab.panes.set_caret(Document::D, Cursor::at(at(0, 0)), Some(0));
+        (app, host, ctx)
+    }
+
+    #[test]
+    fn typing_on_a_conflict_marker_replaces_the_conflict_with_the_typed_line() {
+        let (mut app, host, _ctx) = app_on_a_conflict_marker();
+        assert_eq!(app.tab.mirror.as_ref().unwrap().conflict_counts().map(|counts| counts.unresolved), Some(1));
+        app.edit_output(EditKey::Insert("mine".to_string()));
+        let mirror = app.tab.mirror.as_ref().unwrap();
+        assert_eq!(mirror.output().unwrap().lines().text, "mine\nx\n");
+        assert_eq!(mirror.conflict_counts().map(|counts| counts.unresolved), Some(0));
+        assert_eq!(app.tab.panes.caret, Some((Document::D, Cursor::at(at(0, 4)))));
+        assert_eq!(app.tab.panes.void_row, None);
+        let expected = kdiff4_protocol::OutputEdit { base: kdiff4_protocol::Revision(1), range: 0..0, text: "mine\n".to_string(), region: Some(0) };
+        assert_eq!(sent(app, host), [Command::EditOutput(expected)]);
+    }
+
+    #[test]
+    fn enter_on_a_conflict_marker_resolves_it_as_an_empty_line_and_deleting_keys_do_nothing() {
+        let (mut app, host, _ctx) = app_on_a_conflict_marker();
+        for key in [EditKey::Backspace, EditKey::Delete, EditKey::DeleteWordLeft, EditKey::DeleteWordRight] {
+            app.edit_output(key);
+        }
+        assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().lines().text, "x\n");
+        assert_eq!(app.tab.mirror.as_ref().unwrap().conflict_counts().map(|counts| counts.unresolved), Some(1));
+        app.edit_output(EditKey::Newline);
+        assert_eq!(app.tab.mirror.as_ref().unwrap().output().unwrap().lines().text, "\nx\n");
+        assert_eq!(app.tab.mirror.as_ref().unwrap().conflict_counts().map(|counts| counts.unresolved), Some(0));
+        assert_eq!(sent(app, host).len(), 1);
+    }
+
     #[test]
     fn replace_needs_an_output() {
         let (mut app, _host, ctx) = app_with_session();

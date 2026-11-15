@@ -2748,6 +2748,30 @@ cc
     }
 
     #[test]
+    fn typing_on_an_unresolved_conflict_resolves_it_and_undo_brings_it_back() {
+        let dir = temp_dir("edit-conflict");
+        let mut session = merge_of(&dir, &["s", "a", "t"], &["s", "b", "t"], &["s", "c", "t"]);
+        let before = session.snapshot();
+        assert_eq!(output_text(&session), "s\nt\n");
+        assert!(before.merge[1].is_unresolved());
+        assert!(matches!(session.save(), Err(CoreError::UnresolvedConflicts { count: 1 })));
+        let change = session.edit_output(&OutputEdit { region: Some(1), ..edit(&session, 2..2, "mine\n") }, &BuiltinEngine).unwrap();
+        let Change::OutputEdited { merge: update, .. } = &change else {
+            panic!("expected an output change");
+        };
+        assert_eq!((update.at, update.removed), (1, 1));
+        assert_eq!(update.merge[0], RegionMerge { choice: Choice::Unresolved, edited: true, output_lines: 1 });
+        assert_eq!(output_text(&session), "s\nmine\nt\n");
+        assert_eq!(session.snapshot().comparison.regions, before.comparison.regions);
+        assert_consistent(&session);
+        session.save().unwrap();
+        session.undo().unwrap().unwrap();
+        assert_eq!(output_text(&session), "s\nt\n");
+        assert_eq!(session.snapshot().merge, before.merge);
+        assert!(matches!(session.save(), Err(CoreError::UnresolvedConflicts { count: 1 })));
+    }
+
+    #[test]
     fn typing_on_an_empty_region_goes_to_it() {
         let dir = temp_dir("edit-empty-region");
         let mut session = merge_of(&dir, &["s", "x", "t"], &["s", "t"], &["s", "x", "t"]);

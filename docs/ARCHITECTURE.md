@@ -231,6 +231,7 @@ kdiff4-gui  ──►  kdiff4-protocol  ◄──  kdiff4-core
 - **Merge update**: what one merge op did to the regions, as sent to front ends: a run of regions replaced by new ones, with their choices, edited flags and the number of D lines each contributes.
 - **Placeholder row**: the row D shows for an unresolved conflict that contributes no lines. Boxed with its region.
 - **Empty region row**: the void row D shows for a region that differs, is not an unresolved conflict and contributes no lines, such as a deletion that was chosen. Boxed with its region, so D has a box for every region the source panes have one for. Typing on it gives the region those lines and makes it edited.
+- **Conflict marker**: the `<Merge Conflict>` row D shows for an unresolved conflict, which has no lines in D. Typing, pasting or Enter on it gives the region those lines and makes it edited, which resolves the conflict; Backspace and Delete do nothing there.
 - **Undo step**: a group of merge ops undone and redone together.
 - **Output reference**: the source document whose encoding, BOM and final line break D is saved with.
 - **Output EOL**: the EOL style D is saved with. It is what the sources with an EOL style share, LF when none has one, and a conflict when two differ, until the user chooses a style. D can't be saved while it is in conflict.

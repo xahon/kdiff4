@@ -493,13 +493,13 @@ impl Mirror {
         summary
     }
 
-    /// The region of D whose void row is `row`, when that region has no lines and isn't an unresolved conflict, so typing there goes to it. `None` while local edits are unconfirmed: they may join regions, so region indices aren't known yet.
+    /// The region of D whose void row or conflict marker is `row`, when that region has no lines, so typing there goes to it: an unresolved conflict is then resolved by the typed lines. `None` while local edits are unconfirmed: they may join regions, so region indices aren't known yet.
     pub fn empty_region_at_row(&self, row: usize) -> Option<usize> {
         self.choice_base()?;
         let pane_row = Rows::Mapped(&self.output_rows).row(row)?;
         let region = pane_row.region?;
         let state = self.merge.get(region)?;
-        let empty = pane_row.line.is_none() && !pane_row.conflict_marker && state.output_lines == 0 && !state.is_unresolved();
+        let empty = pane_row.line.is_none() && state.output_lines == 0;
         empty.then_some(region)
     }
 
@@ -1163,9 +1163,22 @@ mod tests {
     }
 
     #[test]
+    fn typing_on_the_marker_of_an_unresolved_conflict_resolves_it_with_the_typed_lines() {
+        let mut mirror = conflict_mirror();
+        assert!(Rows::Mapped(mirror.output_rows()).row(0).unwrap().conflict_marker);
+        assert_eq!(mirror.empty_region_at_row(0), Some(0));
+        let command = mirror.apply_local_edit(&Edit { range: 0..0, text: "mine\n".to_string() }, Some(0)).unwrap();
+        assert_eq!(command.region, Some(0));
+        assert_eq!(mirror.merge[0], RegionMerge { choice: Choice::Unresolved, edited: true, output_lines: 1 });
+        assert!(!mirror.merge[0].is_unresolved());
+        let row = Rows::Mapped(mirror.output_rows()).row(0).unwrap();
+        assert_eq!((row.line, row.conflict_marker), (Some(0), false));
+        assert_eq!(mirror.conflict_counts().map(|counts| counts.unresolved), Some(0));
+    }
+
+    #[test]
     fn typing_on_the_void_row_of_an_empty_region_goes_to_it() {
         let mut mirror = conflict_mirror();
-        assert_eq!(mirror.empty_region_at_row(0), None, "an unresolved conflict's placeholder");
         mirror.merge[0] = RegionMerge {
             choice: Choice::Hunks(vec![Document::A]),
             edited: false,
