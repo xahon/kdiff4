@@ -19,6 +19,18 @@ pub struct DialogSpec<'a> {
     pub width: f32,
     /// Whether the window has a close button and closes on Escape.
     pub closable: bool,
+    /// Set for a window the user can resize.
+    pub resizable: Option<Resizable>,
+}
+
+
+/// A dialog window the user can resize. Its content is laid out in the room of the window instead of giving the window its size, and the size the user left it at is used again the next time it opens, while the app runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resizable {
+    /// The height of the content the window first opens with.
+    pub height: f32,
+    /// The smallest content the window can be resized to.
+    pub min_size: Vec2,
 }
 
 
@@ -34,7 +46,13 @@ struct Placement {
 
 impl Placement {
     fn new(width: f32, parent: Option<Rect>) -> Self {
-        let size = vec2(width, INITIAL_HEIGHT) + margins();
+        Self::sized(vec2(width, INITIAL_HEIGHT), parent)
+    }
+
+
+    /// A window around content of the size `content`.
+    fn sized(content: Vec2, parent: Option<Rect>) -> Self {
+        let size = content + margins();
         Self {
             size: size.clone(),
             position: centered(parent, size),
@@ -83,6 +101,8 @@ pub struct DialogWindows {
     shown: HashMap<ViewportId, String>,
     /// Dialogs whose window the main window owns already.
     owned: HashSet<ViewportId>,
+    /// The content size the user left each resizable dialog at.
+    sizes: HashMap<ViewportId, Vec2>,
 }
 
 
@@ -92,13 +112,26 @@ impl DialogWindows {
     /// Returns whether the user closed the window with its close button or Escape. The window stays open until the caller stops showing it.
     pub fn show(&mut self, ctx: &Context, spec: &DialogSpec, mut content: impl FnMut(&mut Ui)) -> bool {
         if ctx.embed_viewports() {
-            let modal = egui::Modal::new(egui::Id::unique(spec.id)).show(ctx, |ui| content(ui));
+            let modal = egui::Modal::new(egui::Id::unique(spec.id)).show(ctx, |ui| {
+                if let Some(resizable) = &spec.resizable {
+                    let size = vec2(spec.width.clone(), resizable.height.clone());
+                    ui.set_min_size(size.clone());
+                    ui.set_max_size(size);
+                }
+                content(ui)
+            });
             return spec.closable && modal.should_close();
         }
         let id = ViewportId::from_hash_of(spec.id);
         self.shown.insert(id.clone(), spec.title.to_owned());
         let parent = ctx.input(|input| input.viewport().outer_rect);
-        let placement = self.placements.entry(id.clone()).or_insert_with(|| Placement::new(spec.width.clone(), parent.clone()));
+        let opening_size = self.opening_size(&id, spec);
+        let placement = self.placements.entry(id.clone()).or_insert_with(|| match opening_size {
+            Some(size) => Placement::sized(size, parent.clone()),
+            None => Placement::new(spec.width.clone(), parent.clone()),
+        });
+        let resizable = spec.resizable.clone();
+        let mut left_at = None;
         egui::Modal::new(egui::Id::unique((spec.id, "backdrop"))).frame(egui::Frame::NONE).show(ctx, |_| ());
         if ctx.input(|input| input.viewport().focused) == Some(true) {
             ctx.send_viewport_cmd_to(id.clone(), egui::ViewportCommand::Focus);
@@ -106,7 +139,7 @@ impl DialogWindows {
         let mut builder = ViewportBuilder::default()
             .with_title(spec.title)
             .with_inner_size(placement.size.clone())
-            .with_resizable(false)
+            .with_resizable(resizable.is_some())
             .with_minimize_button(false)
             .with_maximize_button(false)
             .with_close_button(spec.closable)
@@ -114,15 +147,28 @@ impl DialogWindows {
         if let Some(position) = placement.position.clone() {
             builder = builder.with_position(position);
         }
+        if let Some(resizable) = &resizable {
+            builder = builder.with_min_inner_size(resizable.min_size + margins());
+        }
         let width = spec.width.clone();
         let closable = spec.closable;
-        ctx.show_viewport_immediate(id, builder, |ui, _| {
+        let closed = ctx.show_viewport_immediate(id.clone(), builder, |ui, _| {
             let frame = egui::Frame::central_panel(ui.style()).inner_margin(Margin::same(MARGIN));
             let mut content_size = Vec2::ZERO;
             egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-                let room = Rect::from_min_size(ui.cursor().min, vec2(width.clone(), MEASURE_HEIGHT));
+                let room = match resizable {
+                    Some(_) => ui.max_rect(),
+                    None => Rect::from_min_size(ui.cursor().min, vec2(width.clone(), MEASURE_HEIGHT)),
+                };
                 content_size = ui.scope_builder(UiBuilder::new().max_rect(room), |ui| content(ui)).response.rect.size();
             });
+            if resizable.is_some() {
+                // The window gives the content its size, so there is nothing to fit but the first centering.
+                content_size = placement.size.clone() - margins();
+                if placement.fitted {
+                    left_at = ui.ctx().input(|input| input.viewport().inner_rect).map(|rect| rect.size() - margins());
+                }
+            }
             if !placement.fitted {
                 let theme = title_bar_theme(ui.ctx().options(|options| options.theme_preference));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::SetTheme(theme));
@@ -135,7 +181,26 @@ impl DialogWindows {
             let escape = closable && !egui::Popup::is_any_open(ctx) && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
             let closed = closable && ctx.input(|input| input.viewport().close_requested());
             escape || closed
-        })
+        });
+        if let Some(size) = left_at {
+            self.remember_size(id, size);
+        }
+        closed
+    }
+
+
+    /// The content size a resizable dialog opens with: the one the user left it at, or the one of its spec. `None` for a dialog that is fitted to its content.
+    fn opening_size(&self, id: &ViewportId, spec: &DialogSpec) -> Option<Vec2> {
+        let resizable = spec.resizable.as_ref()?;
+        let default = vec2(spec.width.clone(), resizable.height.clone());
+        Some(self.sizes.get(id).map_or(default, |size| size.max(resizable.min_size)))
+    }
+
+
+    fn remember_size(&mut self, id: ViewportId, size: Vec2) {
+        if size.is_finite() && size.min_elem() > 0.0 {
+            self.sizes.insert(id, size);
+        }
     }
 
 
@@ -392,6 +457,39 @@ mod tests {
 
 
     #[test]
+    fn a_resizable_dialog_opens_at_its_own_size_and_is_not_fitted_to_its_content() {
+        let resizable = Resizable { height: 600.0, min_size: vec2(300.0, 200.0) };
+        let spec = DialogSpec { id: "resizable", title: "Resizable", width: 700.0, closable: true, resizable: Some(resizable) };
+        let windows = DialogWindows::default();
+        let id = ViewportId::from_hash_of(spec.id);
+        let size = windows.opening_size(&id, &spec).expect("resizable");
+        assert_eq!(size, vec2(700.0, 600.0));
+        let mut placement = Placement::sized(size, parent());
+        assert_eq!(placement.size, vec2(700.0, 600.0) + margins());
+        let position = placement.position.clone();
+        assert!(!placement.fit(placement.size.clone() - margins(), parent()), "nothing to resize or move");
+        assert_eq!(placement.position, position);
+        let fixed = DialogSpec { resizable: None, ..spec };
+        assert_eq!(windows.opening_size(&id, &fixed), None);
+    }
+
+    #[test]
+    fn a_resizable_dialog_opens_again_at_the_size_it_was_left_at() {
+        let resizable = Resizable { height: 600.0, min_size: vec2(300.0, 200.0) };
+        let spec = DialogSpec { id: "resizable", title: "Resizable", width: 700.0, closable: true, resizable: Some(resizable) };
+        let mut windows = DialogWindows::default();
+        let id = ViewportId::from_hash_of(spec.id);
+        windows.remember_size(id.clone(), vec2(900.0, 650.0));
+        windows.end_frame(None);
+        assert_eq!(windows.opening_size(&id, &spec), Some(vec2(900.0, 650.0)), "kept after the dialog closed");
+        windows.remember_size(id.clone(), vec2(f32::NAN, 100.0));
+        windows.remember_size(id.clone(), vec2(0.0, 100.0));
+        assert_eq!(windows.opening_size(&id, &spec), Some(vec2(900.0, 650.0)), "a broken size is not remembered");
+        windows.remember_size(id.clone(), vec2(100.0, 650.0));
+        assert_eq!(windows.opening_size(&id, &spec), Some(vec2(300.0, 650.0)), "never below the minimum");
+    }
+
+    #[test]
     fn dialogs_not_shown_in_a_frame_are_forgotten() {
         let mut windows = DialogWindows::default();
         let kept = ViewportId::from_hash_of("kept");
@@ -467,7 +565,7 @@ mod tests {
     fn without_native_windows_a_dialog_is_shown_in_the_main_window() {
         let mut windows = DialogWindows::default();
         let mut harness = egui_kittest::Harness::builder().with_size(vec2(600.0, 400.0)).build_ui(move |ui| {
-            let spec = DialogSpec { id: "test_dialog", title: "Test", width: 200.0, closable: true };
+            let spec = DialogSpec { id: "test_dialog", title: "Test", width: 200.0, closable: true, resizable: None };
             windows.show(ui.ctx(), &spec, |ui| {
                 ui.label("dialog body");
             });

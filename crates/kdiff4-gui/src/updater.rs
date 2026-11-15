@@ -160,7 +160,7 @@ impl Updater {
         match self.update_window.as_ref() {
             None => return,
             Some(UpdateWindow::About) => {
-                let spec = DialogSpec { id: "about_dialog", title: "About Kdiff4", width: about_dialog::DIALOG_WIDTH, closable: true };
+                let spec = DialogSpec { id: "about_dialog", title: "About Kdiff4", width: about_dialog::DIALOG_WIDTH, closable: true, resizable: None };
                 let mut check_for_updates = false;
                 let closed = dialogs.show(ctx, &spec, |ui| check_for_updates |= about_dialog::show(ui, self.update_check.is_some()));
                 if check_for_updates {
@@ -175,7 +175,7 @@ impl Updater {
                     can_install: release.asset_for_this_platform().is_some(),
                     has_unsaved_changes,
                 };
-                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Update Available", width: update_dialog::DIALOG_WIDTH, closable: true };
+                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Update Available", width: update_dialog::DIALOG_WIDTH, closable: true, resizable: None };
                 let closed = dialogs.show(ctx, &spec, |ui| {
                     choice = update_dialog::show_available(ui, release, &self.current_version, offer.clone(), &mut self.update_cache);
                 });
@@ -189,7 +189,7 @@ impl Updater {
                     ctx.request_repaint_after(std::time::Duration::from_millis(100));
                     let downloaded = install.downloaded.load(std::sync::atomic::Ordering::Relaxed);
                     let total = install.total.load(std::sync::atomic::Ordering::Relaxed);
-                    let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Updating Kdiff4", width: update_dialog::DIALOG_WIDTH, closable: false };
+                    let spec = DialogSpec { id: UPDATE_DIALOG_ID, title: "Updating Kdiff4", width: update_dialog::DIALOG_WIDTH, closable: false, resizable: None };
                     dialogs.show(ctx, &spec, |ui| {
                         if update_dialog::show_progress(ui, &release.version, install.fraction(), downloaded, total) {
                             install.cancel();
@@ -198,7 +198,7 @@ impl Updater {
                 }
             },
             Some(UpdateWindow::Message { title, text }) => {
-                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title, width: update_dialog::DIALOG_WIDTH, closable: true };
+                let spec = DialogSpec { id: UPDATE_DIALOG_ID, title, width: update_dialog::DIALOG_WIDTH, closable: true, resizable: None };
                 let closed = dialogs.show(ctx, &spec, |ui| dismissed = update_dialog::show_message(ui, title, text));
                 dismissed |= closed;
             }

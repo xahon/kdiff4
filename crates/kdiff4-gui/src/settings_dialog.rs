@@ -1,4 +1,4 @@
-use egui::{Button, Checkbox, Color32, ComboBox, DragValue, Label, RichText, ScrollArea, Theme, Ui};
+use egui::{Align, Button, Checkbox, Color32, ComboBox, DragValue, Label, Layout, RichText, ScrollArea, TextEdit, Theme, Ui, vec2};
 use kdiff4_protocol::{Document, Extractor};
 use kdiff4_protocol::engine::{ComparisonOptions, DiffAlgorithm};
 
@@ -7,13 +7,67 @@ use crate::config::{
     MAX_SMOOTH_SCROLL_MS, MIN_FONT_SIZE, MIN_SCROLL_STEP_LINES, MAX_AUTOSCROLL_LINES_PER_SECOND, MIN_AUTOSCROLL_LINES_PER_SECOND, MIN_SMOOTH_SCROLL_MS, MAX_TAB_SIZE, TabIndentation, ThemeChoice, ViewConfig,
 };
 use crate::fonts::MonospaceFamily;
+use crate::dialog_window::Resizable;
 use crate::theme;
 
 const BUILTIN_FONT_LABEL: &str = "Built-in (Hack)";
 const MAX_CHAR_DIFF_LINE_LIMIT: usize = 1_000_000;
-/// The dialog keeps this size whatever the tab; a tab taller than the body scrolls.
+/// The dialog opens with this width whatever the tab; a tab taller than the body scrolls.
 pub(crate) const DIALOG_WIDTH: f32 = 720.0;
-const BODY_HEIGHT: f32 = 440.0;
+pub(crate) const RESIZABLE: Resizable = Resizable { height: 640.0, min_size: vec2(480.0, 320.0) };
+const SEARCH_WIDTH: f32 = 220.0;
+const NO_MATCH_LABEL: &str = "No settings match the search.";
+const PANES_TEXT: Section = Section { id: "panes_text", title: "Panes: Text", words: "font family size rendering hinting subpixel positioning text color preview monospace" };
+const OUTPUT_INDENTATION: Section = Section { id: "output_indentation", title: "Merge output: Indentation", words: "tab inserts tabs spaces auto-detect tab size indent" };
+const PANES_CONTENT: Section = Section { id: "panes_content", title: "Panes: Content", words: "show line numbers region gutters void space output pane overview strip minimap independent scrolling whitespace render" };
+const PANES_SCROLLING: Section = Section { id: "panes_scrolling", title: "Panes: Navigation and scrolling", words: "context above jumps smooth scrolling animation wheel step selection drag speed middle-button scroll speed" };
+const REGION_BOXES: Section = Section { id: "region_boxes", title: "Region boxes: Borders", words: "corner radius opacity of other regions" };
+const JUMPED_TO_REGION: Section = Section { id: "jumped_to_region", title: "Jumped-to region: Highlight", words: "background color current region" };
+const ALIGNMENTS: Section = Section { id: "alignments", title: "Alignments: Gutter and navigation", words: "gutter color inset arrow gap jump stops previous next difference" };
+const DOCUMENT_COLORS: Section = Section { id: "document_colors", title: "Documents: Colors", words: "a b c differs from all red fold ellipsis color" };
+const WINDOW_APPEARANCE: Section = Section { id: "window_appearance", title: "Window: Appearance", words: "theme light dark system ui text color corner radius" };
+const BOTTOM_CONTROLS: Section = Section { id: "bottom_controls_appearance", title: "Bottom Controls", words: "bottom switch tint outline color" };
+const SUCCESS_BLINK: Section = Section { id: "success_blink_appearance", title: "Success Blink", words: "enable blink color peak alpha animation time save" };
+const HEURISTICS: Section = Section { id: "comparison_heuristics", title: "Heuristics Alignment", words: "extractor tree-sitter functions entities" };
+const ALGORITHM: Section = Section { id: "comparison_algorithm", title: "Comparison: Algorithm", words: "algorithm diff myers patience histogram try hard pair similar changed lines" };
+const CHAR_DIFF: Section = Section { id: "comparison_char_diff", title: "Comparison: Character diff", words: "line limit characters" };
+const SECTIONS: [&Section; 14] = [&PANES_TEXT, &OUTPUT_INDENTATION, &PANES_CONTENT, &PANES_SCROLLING, &REGION_BOXES, &JUMPED_TO_REGION, &ALIGNMENTS, &DOCUMENT_COLORS, &WINDOW_APPEARANCE, &BOTTOM_CONTROLS, &SUCCESS_BLINK, &HEURISTICS, &ALGORITHM, &CHAR_DIFF];
+
+
+/// A titled group of settings. `words` are the lowercase words of its settings the search finds it by, besides its title.
+struct Section {
+    id: &'static str,
+    title: &'static str,
+    words: &'static str,
+}
+
+
+/// The search text as lowercase words. A section matches when it has every one of them; no words match everything.
+struct Filter {
+    words: Vec<String>,
+}
+
+
+impl Filter {
+    fn new(search: &str) -> Self {
+        let words = search
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        Self { words }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    fn matches(&self, section: &Section) -> bool {
+        let title = section.title.to_lowercase();
+        self.words
+            .iter()
+            .all(|word| title.contains(word.as_str()) || section.words.contains(word.as_str()))
+    }
+}
 const PREVIEW_LINES: [&str; 3] = [
     "fn main() { println!(\"Hello, world!\"); }",
     "0O 1lI| {}[]() <=> != -> 'x' \"y\"",
@@ -43,6 +97,10 @@ pub struct SettingsDialog {
     /// The session's options and their draft; `None` without a session.
     comparison: Option<(ComparisonOptions, ComparisonOptions)>,
     tab: Tab,
+    /// What the search field holds. While it holds something, the matching sections of every tab are shown.
+    search: String,
+    /// Give the search field the keyboard on the next frame.
+    focus_search: bool,
 }
 
 impl SettingsDialog {
@@ -52,6 +110,8 @@ impl SettingsDialog {
             draft: view.clone(),
             comparison: comparison.map(|options| (options.clone(), options.clone())),
             tab: Tab::Panes,
+            search: String::new(),
+            focus_search: true,
         }
     }
 
@@ -110,47 +170,76 @@ impl SettingsDialog {
     /// `families` is `None` while the font scan is still running.
     pub fn show(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) -> Option<SettingsAction> {
         let mut action = None;
-        ui.set_width(DIALOG_WIDTH);
         ui.heading("Settings");
         ui.add_space(4.0);
+        let filter = Filter::new(&self.search);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Panes, "Panes");
-            ui.selectable_value(&mut self.tab, Tab::Appearance, "Appearance");
-            ui.selectable_value(&mut self.tab, Tab::Comparison, "Comparison");
+            ui.add_enabled_ui(filter.is_empty(), |ui| {
+                ui.selectable_value(&mut self.tab, Tab::Panes, "Panes");
+                ui.selectable_value(&mut self.tab, Tab::Appearance, "Appearance");
+                ui.selectable_value(&mut self.tab, Tab::Comparison, "Comparison");
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let field = ui.add(TextEdit::singleline(&mut self.search).hint_text("Search settings").desired_width(SEARCH_WIDTH));
+                if self.focus_search {
+                    self.focus_search = false;
+                    field.request_focus();
+                }
+                field.on_hover_text("Show the sections of every tab that have a setting with these words");
+            });
         });
         ui.separator();
-        ScrollArea::vertical()
-            .id_salt("settings_body")
-            .auto_shrink(false)
-            .min_scrolled_height(BODY_HEIGHT)
-            .max_height(BODY_HEIGHT)
-            .show(ui, |ui| match self.tab {
-                Tab::Panes => self.panes_tab(ui, families),
-                Tab::Appearance => self.appearance_tab(ui),
-                Tab::Comparison => self.comparison_tab(ui),
+        // The buttons go in first, from the bottom, so the body gets whatever height the window leaves.
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    action = Some(SettingsAction::Ok);
+                }
+                if ui.button("Cancel").clicked() {
+                    action = Some(SettingsAction::Cancel);
+                }
+                if ui.button("Defaults").clicked() {
+                    self.reset_to_defaults();
+                }
+                if ui.button("Open in editor").on_hover_text("Open gui.toml in the default editor").clicked() {
+                    action = Some(SettingsAction::OpenConfigFile);
+                }
             });
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
-                action = Some(SettingsAction::Ok);
-            }
-            if ui.button("Cancel").clicked() {
-                action = Some(SettingsAction::Cancel);
-            }
-            if ui.button("Defaults").clicked() {
-                self.reset_to_defaults();
-            }
-            if ui.button("Open in editor").on_hover_text("Open gui.toml in the default editor").clicked() {
-                action = Some(SettingsAction::OpenConfigFile);
-            }
+            ui.separator();
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ScrollArea::vertical()
+                    .id_salt("settings_body")
+                    .auto_shrink(false)
+                    .show(ui, |ui| self.body(ui, families, &filter));
+            });
         });
         action
     }
 
+    /// The sections of the chosen tab, or while searching the matching sections of every tab.
+    fn body(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>, filter: &Filter) {
+        if filter.is_empty() {
+            match self.tab {
+                Tab::Panes => self.panes_tab(ui, families, filter),
+                Tab::Appearance => self.appearance_tab(ui, filter),
+                Tab::Comparison => self.comparison_tab(ui, filter),
+            }
+            return;
+        }
+        if !SECTIONS.iter().any(|section| filter.matches(section)) {
+            ui.add_space(6.0);
+            ui.label(RichText::new(NO_MATCH_LABEL).weak());
+            return;
+        }
+        self.panes_tab(ui, families, filter);
+        self.appearance_tab(ui, filter);
+        self.comparison_tab(ui, filter);
+    }
+
     /// How the panes draw text and regions.
-    fn panes_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>) {
+    fn panes_tab(&mut self, ui: &mut Ui, families: Option<&[MonospaceFamily]>, filter: &Filter) {
         let theme = active_theme(ui);
-        section(ui, "panes_text", "Panes: Text", |ui| {
+        section(ui, filter, &PANES_TEXT, |ui| {
             ui.label("Font:");
             ui.horizontal(|ui| {
                 self.font_family_combo(ui, families);
@@ -198,7 +287,7 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "output_indentation", "Merge output: Indentation", |ui| {
+        section(ui, filter, &OUTPUT_INDENTATION, |ui| {
             ui.label("Tab inserts:");
             ComboBox::from_id_salt("tab_indentation")
                 .selected_text(match self.draft.tab_indentation {
@@ -221,7 +310,7 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "panes_content", "Panes: Content", |ui| {
+        section(ui, filter, &PANES_CONTENT, |ui| {
             ui.label("Show:");
             ui.vertical(|ui| {
                 ui.checkbox(&mut self.draft.show_line_numbers, "Line numbers");
@@ -258,7 +347,7 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "panes_scrolling", "Panes: Navigation and scrolling", |ui| {
+        section(ui, filter, &PANES_SCROLLING, |ui| {
             ui.label("Context above jumps:");
             ui.add(
                 DragValue::new(&mut self.draft.jump_context_lines)
@@ -319,7 +408,7 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "region_boxes", "Region boxes: Borders", |ui| {
+        section(ui, filter, &REGION_BOXES, |ui| {
             ui.label("Corner radius:");
             ui.add(
                 DragValue::new(&mut self.draft.region_corner_radius)
@@ -341,14 +430,14 @@ impl SettingsDialog {
             ui.end_row();
         });
 
-        section(ui, "jumped_to_region", "Jumped-to region: Highlight", |ui| {
+        section(ui, filter, &JUMPED_TO_REGION, |ui| {
             ui.label("Background:");
             ui.color_edit_button_srgba_unmultiplied(&mut self.draft.current_region_color)
                 .on_hover_text("The background of the region navigation is at, in every pane, void space included.");
             ui.end_row();
         });
 
-        section(ui, "alignments", "Alignments: Gutter and navigation", |ui| {
+        section(ui, filter, &ALIGNMENTS, |ui| {
             ui.label("Gutter color:");
             ui.color_edit_button_srgba_unmultiplied(&mut self.draft.alignment_color)
                 .on_hover_text("The color of the alignment marks in the gutters of the source panes.");
@@ -367,7 +456,7 @@ impl SettingsDialog {
 
         let dark = theme == Theme::Dark;
         let defaults = theme::palette(theme);
-        section(ui, "document_colors", "Documents: Colors", |ui| {
+        section(ui, filter, &DOCUMENT_COLORS, |ui| {
             let colors = self.draft.colors_mut(dark);
             let name = theme_name(theme);
             ui.label("A:");
@@ -415,20 +504,22 @@ impl SettingsDialog {
             );
             ui.end_row();
         });
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(format!(
-                "Colors are kept per theme; these are the {} theme's. Fills and borders are derived from them.",
-                theme_name(theme)
-            ))
-            .weak(),
-        );
+        if filter.matches(&DOCUMENT_COLORS) {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "Colors are kept per theme; these are the {} theme's. Fills and borders are derived from them.",
+                    theme_name(theme)
+                ))
+                .weak(),
+            );
+        }
     }
 
     /// Colors and theming of the window around the panes.
-    fn appearance_tab(&mut self, ui: &mut Ui) {
+    fn appearance_tab(&mut self, ui: &mut Ui, filter: &Filter) {
         let theme = active_theme(ui);
-        section(ui, "window_appearance", "Window: Appearance", |ui| {
+        section(ui, filter, &WINDOW_APPEARANCE, |ui| {
             ui.label("Theme:");
             ComboBox::from_id_salt("theme_choice")
                 .selected_text(theme_choice_name(self.draft.theme.clone()))
@@ -454,7 +545,7 @@ impl SettingsDialog {
                 .on_hover_text("Shared rounding for panes, buttons, tabs, Bottom Controls, menus, dialogs, and the window frame.");
             ui.end_row();
         });
-        section(ui, "bottom_controls_appearance", "Bottom Controls", |ui| {
+        section(ui, filter, &BOTTOM_CONTROLS, |ui| {
             let colors = self.draft.colors_mut(theme == Theme::Dark);
             let palette = theme::palette(theme);
             ui.label("Bottom Switch tint:");
@@ -464,9 +555,11 @@ impl SettingsDialog {
             color_override(ui, &mut colors.bottom_switch_outline, palette.bottom_switch_outline, "Thin outline around a hovered or open Bottom Switch.");
             ui.end_row();
         });
-        ui.add_space(4.0);
-        ui.label(RichText::new(format!("Colors are kept per theme; these are the {} theme's.", theme_name(theme))).weak());
-        section(ui, "success_blink_appearance", "Success Blink", |ui| {
+        if filter.matches(&WINDOW_APPEARANCE) || filter.matches(&BOTTOM_CONTROLS) {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("Colors are kept per theme; these are the {} theme's.", theme_name(theme))).weak());
+        }
+        section(ui, filter, &SUCCESS_BLINK, |ui| {
             let blink = &mut self.draft.success_blink;
             ui.label("");
             ui.checkbox(&mut blink.enabled, "Enable Success Blink");
@@ -483,8 +576,8 @@ impl SettingsDialog {
         });
     }
 
-    fn comparison_tab(&mut self, ui: &mut Ui) {
-        section(ui, "comparison_heuristics", "Heuristics Alignment", |ui| {
+    fn comparison_tab(&mut self, ui: &mut Ui, filter: &Filter) {
+        section(ui, filter, &HEURISTICS, |ui| {
             ui.label("Extractor:");
             ComboBox::from_id_salt("heuristic_extractor").selected_text(extractor_name(self.draft.heuristic_extractor)).show_ui(ui, |ui| {
                 for extractor in [Extractor::TreeSitter] {
@@ -495,11 +588,14 @@ impl SettingsDialog {
             .on_hover_text("The parser that finds the functions, methods and types Heuristics Alignment pairs.");
             ui.end_row();
         });
+        if !filter.matches(&ALGORITHM) && !filter.matches(&CHAR_DIFF) {
+            return;
+        }
         let Some((_, draft)) = self.comparison.as_mut() else {
             ui.label(RichText::new("Open files to change how they are compared.").weak());
             return;
         };
-        section(ui, "comparison_algorithm", "Comparison: Algorithm", |ui| {
+        section(ui, filter, &ALGORITHM, |ui| {
             ui.label("Algorithm:");
             ComboBox::from_id_salt("diff_algorithm").selected_text(algorithm_name(draft.algorithm)).show_ui(ui, |ui| {
                 for algorithm in [DiffAlgorithm::Histogram, DiffAlgorithm::Myers] {
@@ -519,7 +615,7 @@ impl SettingsDialog {
                 .on_hover_text("Inside a changed region, put a line that changed a little next to its old version, even when lines were added or removed before it. Off pairs the lines by position, like kdiff3.");
             ui.end_row();
         });
-        section(ui, "comparison_char_diff", "Comparison: Character diff", |ui| {
+        section(ui, filter, &CHAR_DIFF, |ui| {
             ui.label("Line limit:");
             ui.add(
                 DragValue::new(&mut draft.char_diff_line_limit)
@@ -546,14 +642,17 @@ impl SettingsDialog {
     }
 }
 
-/// A titled group of settings in its own rect, laid out as label and control rows. `title` starts with the name of what the settings change.
-fn section(ui: &mut Ui, id: &str, title: &str, rows: impl FnOnce(&mut Ui)) {
+/// A titled group of settings in its own rect, laid out as label and control rows, left out while the search doesn't match it. Its title starts with the name of what the settings change.
+fn section(ui: &mut Ui, filter: &Filter, section: &Section, rows: impl FnOnce(&mut Ui)) {
+    if !filter.matches(section) {
+        return;
+    }
     ui.add_space(6.0);
     ui.group(|ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title).strong());
+        ui.label(RichText::new(section.title).strong());
         ui.separator();
-        egui::Grid::new(id).num_columns(2).spacing([12.0, 8.0]).show(ui, rows);
+        egui::Grid::new(section.id).num_columns(2).spacing([12.0, 8.0]).show(ui, rows);
     });
 }
 
@@ -658,6 +757,89 @@ mod tests {
         assert_eq!(dialog.original(), &view);
         assert_eq!(dialog.draft(), &view);
         assert_eq!(dialog.changed_comparison(), None);
+    }
+
+    fn search_harness(search: &str) -> egui_kittest::Harness<'static, SettingsDialog> {
+        let mut dialog = SettingsDialog::new(&ViewConfig::default(), Some(&ComparisonOptions::default()));
+        dialog.search = search.to_string();
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 1600.0)).with_accessibility_check(false)
+            .build_ui_state(|ui, dialog: &mut SettingsDialog| { dialog.show(ui, Some(&[])); }, dialog);
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn sections_have_their_own_ids_and_lowercase_search_words() {
+        for (index, section) in SECTIONS.iter().enumerate() {
+            assert!(SECTIONS[..index].iter().all(|other| other.id != section.id), "{} is used twice", section.id);
+            assert_eq!(section.words, section.words.to_lowercase(), "{}", section.id);
+            assert!(!section.title.is_empty() && !section.words.is_empty(), "{}", section.id);
+        }
+    }
+
+    #[test]
+    fn the_search_matches_sections_by_every_word_in_title_or_settings() {
+        assert!(Filter::new("").matches(&PANES_TEXT));
+        assert!(Filter::new("  HINTING ").matches(&PANES_TEXT));
+        assert!(Filter::new("panes font").matches(&PANES_TEXT));
+        assert!(!Filter::new("font minimap").matches(&PANES_TEXT));
+        assert!(Filter::new("corner").matches(&REGION_BOXES) && Filter::new("corner").matches(&WINDOW_APPEARANCE));
+    }
+
+    #[test]
+    fn searching_shows_the_matching_sections_of_every_tab() {
+        use egui_kittest::kittest::Queryable;
+
+        let harness = search_harness("");
+        harness.get_by_label(PANES_TEXT.title);
+        assert!(harness.query_by_label(WINDOW_APPEARANCE.title).is_none(), "another tab");
+
+        let harness = search_harness("corner radius");
+        harness.get_by_label(REGION_BOXES.title);
+        harness.get_by_label(WINDOW_APPEARANCE.title);
+        assert!(harness.query_by_label(PANES_TEXT.title).is_none());
+        assert!(harness.query_by_label(CHAR_DIFF.title).is_none());
+
+        assert_eq!(harness.query_all_by_label_contains("Colors are kept per theme").count(), 1, "only the note of the window section");
+
+        let harness = search_harness("line limit");
+        harness.get_by_label(CHAR_DIFF.title);
+        assert_eq!(harness.query_all_by_label_contains("Colors are kept per theme").count(), 0);
+        harness.get_by_label_contains("Applied on OK");
+        assert!(search_harness("hinting").query_by_label_contains("Applied on OK").is_none(), "the note belongs to the comparison sections");
+    }
+
+    #[test]
+    fn the_search_field_has_the_keyboard_when_the_dialog_opens() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut harness = search_harness("");
+        assert!(harness.get_by_role(egui::Role::TextInput).is_focused());
+        harness.event(egui::Event::Text("blink".to_string()));
+        harness.run();
+        harness.get_by_label(SUCCESS_BLINK.title);
+        assert!(harness.query_by_label(PANES_TEXT.title).is_none());
+    }
+
+    #[test]
+    fn a_search_without_a_match_says_so() {
+        use egui_kittest::kittest::Queryable;
+
+        let harness = search_harness("no such setting");
+        harness.get_by_label(NO_MATCH_LABEL);
+        for section in SECTIONS {
+            assert!(harness.query_by_label(section.title).is_none(), "{}", section.title);
+        }
+    }
+
+    #[test]
+    fn the_buttons_stay_at_the_bottom_and_the_body_takes_the_height_between() {
+        use egui_kittest::kittest::Queryable;
+
+        let harness = search_harness("");
+        let ok = harness.get_by_label("OK").rect();
+        assert!(ok.bottom() > 1500.0, "OK sits at the bottom of a tall window, not at {}", ok.bottom());
+        assert!(harness.get_by_label(PANES_TEXT.title).rect().top() < 200.0);
     }
 
     #[test]

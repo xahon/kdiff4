@@ -528,7 +528,7 @@ impl KdiffApp {
             CloseConfirmation::Tab(_) => ("Close tab?", "This tab has unsaved merge changes."),
             CloseConfirmation::Window => ("Quit Kdiff4?", "There are unsaved merge changes in the open tabs."),
         };
-        let spec = DialogSpec { id: "close_confirmation", title, width: 340.0, closable: true };
+        let spec = DialogSpec { id: "close_confirmation", title, width: 340.0, closable: true, resizable: None };
         let mut discard = false;
         let mut cancel = false;
         let closed = self.dialogs.show(ctx, &spec, |ui| {
@@ -1974,7 +1974,7 @@ Shortcut: {}", link.display()),
     fn show_heuristics(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.tab.heuristics.as_mut() else { return };
         let mut action = None;
-        let spec = DialogSpec { id: "heuristics_dialog", title: "Heuristics Alignment", width: heuristics_dialog::DIALOG_WIDTH, closable: true };
+        let spec = DialogSpec { id: "heuristics_dialog", title: "Heuristics Alignment", width: heuristics_dialog::DIALOG_WIDTH, closable: true, resizable: None };
         let closed = self.dialogs.show(ctx, &spec, |ui| action = dialog.show(ui));
         if action.is_none() && closed {
             action = Some(HeuristicsAction::Cancel);
@@ -2141,7 +2141,7 @@ Shortcut: {}", link.display()),
     fn show_inset_prompt(&mut self, ctx: &egui::Context) {
         let Some(choice) = self.tab.inset_prompt.as_ref() else { return };
         let mut answer = None;
-        let spec = DialogSpec { id: "inset_dialog", title: "Alignment Placement", width: inset_dialog::DIALOG_WIDTH, closable: true };
+        let spec = DialogSpec { id: "inset_dialog", title: "Alignment Placement", width: inset_dialog::DIALOG_WIDTH, closable: true, resizable: None };
         let closed = self.dialogs.show(ctx, &spec, |ui| answer = inset_dialog::show(ui, choice));
         if answer.is_none() && closed {
             answer = Some(InsetAnswer::Keep);
@@ -2164,7 +2164,7 @@ Shortcut: {}", link.display()),
             return;
         }
         let mut answer = None;
-        let spec = DialogSpec { id: "eol_dialog", title: "Line Endings", width: eol::DIALOG_WIDTH, closable: true };
+        let spec = DialogSpec { id: "eol_dialog", title: "Line Endings", width: eol::DIALOG_WIDTH, closable: true, resizable: None };
         let closed = self.dialogs.show(ctx, &spec, |ui| answer = eol::show_dialog(ui));
         if answer.is_none() && closed {
             answer = Some(EolAnswer::Cancel);
@@ -2191,7 +2191,7 @@ Shortcut: {}", link.display()),
             None => return,
         };
         let mut action = None;
-        let spec = DialogSpec { id: "settings_dialog", title: "Settings", width: settings_dialog::DIALOG_WIDTH, closable: true };
+        let spec = DialogSpec { id: "settings_dialog", title: "Settings", width: settings_dialog::DIALOG_WIDTH, closable: true, resizable: Some(settings_dialog::RESIZABLE) };
         let closed = self.dialogs.show(ctx, &spec, |ui| {
             action = dialog.show(ui, families);
         });
@@ -2404,7 +2404,7 @@ Shortcut: {}", link.display()),
         let Some(dialog) = self.shortcuts_dialog.as_mut() else { return };
         let rows = shortcuts_dialog::rows(ctx, cfg!(windows));
         let mut close = false;
-        let spec = DialogSpec { id: "shortcuts_dialog", title: "Keyboard Shortcuts", width: shortcuts_dialog::DIALOG_WIDTH, closable: true };
+        let spec = DialogSpec { id: "shortcuts_dialog", title: "Keyboard Shortcuts", width: shortcuts_dialog::DIALOG_WIDTH, closable: true, resizable: None };
         let closed = self.dialogs.show(ctx, &spec, |ui| close |= shortcuts_dialog::show(ui, dialog, &rows));
         if close || closed {
             self.shortcuts_dialog = None;
