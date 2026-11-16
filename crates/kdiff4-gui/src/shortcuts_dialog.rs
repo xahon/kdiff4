@@ -92,7 +92,7 @@ mod tests {
 
 
     fn all_rows() -> Vec<ShortcutRow> {
-        rows(&Context::default(), true)
+        rows(&ui_commands::test_context(), true)
     }
 
     fn harness() -> egui_kittest::Harness<'static, (ShortcutsDialog, bool)> {

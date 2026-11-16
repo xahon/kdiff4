@@ -402,6 +402,15 @@ pub fn hint_with_shortcut(hint: &str, shortcut: &str) -> String {
 }
 
 
+/// A context that formats shortcuts as on Windows and Linux; on macOS egui needs fonts, so a context that never ran a frame panics.
+#[cfg(test)]
+pub fn test_context() -> Context {
+    let ctx = Context::default();
+    ctx.set_os(egui::os::OperatingSystem::Windows);
+    ctx
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,7 +477,7 @@ mod tests {
 
     #[test]
     fn a_command_with_two_shortcuts_shows_both() {
-        let ctx = Context::default();
+        let ctx = test_context();
         let text = shortcut_text(&ctx, &UiCommand::Open.info().shortcuts);
         assert_eq!(text.split(" / ").count(), 2, "{text}");
         assert!(shortcut_text(&ctx, &UiCommand::About.info().shortcuts).is_empty());
@@ -476,7 +485,7 @@ mod tests {
 
     #[test]
     fn a_toggle_hint_ends_with_its_shortcut() {
-        let ctx = Context::default();
+        let ctx = test_context();
         let hint = hint_with_shortcut(MINIMAP_TOGGLE_HINT, &ctx.format_shortcut(&MINIMAP_SHORTCUT));
         assert!(hint.starts_with(MINIMAP_TOGGLE_HINT));
         assert!(hint.ends_with("+M)"), "{hint}");
